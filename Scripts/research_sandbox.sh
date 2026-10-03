@@ -10,7 +10,8 @@
 #
 # The sandbox is the only part of `tuff research` with internet access. It runs
 # in its own Linux VM with a read-only root and no Mac folders mounted. A
-# firewall inside the VM lets it reach public internet addresses only, and the
+# firewall inside the VM lets it reach public internet addresses, plus DNS on
+# the Mac when the Mac is its name server, and the
 # server runs as a non-root user with no Linux capabilities. Its port is
 # published to the Mac's loopback address only. See docs/WEB_RESEARCH.md.
 
@@ -174,6 +175,42 @@ except OSError:
         pass "the VM cannot connect to $target"
       fi
     done
+
+    # Every TCP port on the Mac. DNS (53) may answer when the VM's name server
+    # is the Mac, which is the default; nothing else may.
+    echo "Every TCP port on the Mac, from inside the VM:"
+    open_ports="$(container exec --user 10001:10001 "$name" python3 -c '
+import socket, sys
+from concurrent.futures import ThreadPoolExecutor
+host = sys.argv[1]
+def probe(port):
+    try:
+        socket.create_connection((host, port), timeout=1).close()
+        return port
+    except OSError:
+        return None
+with ThreadPoolExecutor(64) as pool:
+    print(" ".join(str(p) for p in pool.map(probe, range(1, 65536)) if p))
+' "$gateway" 2>/dev/null)" || open_ports="error"
+    mac_dns="no"
+    if container exec "$name" awk '$1 == "nameserver" { print $2 }' /etc/resolv.conf 2>/dev/null \
+        | grep -qx "$gateway"; then
+      mac_dns="yes"
+    fi
+    case "$open_ports" in
+      "")
+        pass "no port on the Mac is reachable" ;;
+      53)
+        if [[ "$mac_dns" == "yes" ]]; then
+          pass "only the Mac's DNS port (53) is reachable, as configured"
+        else
+          fail "the Mac's port 53 is reachable although the VM does not use the Mac for DNS"
+        fi ;;
+      error)
+        fail "the port scan of the Mac did not run" ;;
+      *)
+        fail "the VM can reach these ports on the Mac: $open_ports" ;;
+    esac
 
     echo "Requests to the sandbox API that must be refused:"
     status="$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: attacker.example' \

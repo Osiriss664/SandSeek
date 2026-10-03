@@ -27,6 +27,14 @@ def failing_extractor(markup, url):
     raise RuntimeError("extractor crashed")
 
 
+def object_extractor(markup, url):
+    return {"not": "text"}
+
+
+def control_extractor(markup, url):
+    return "clean\x1b[2J\u200b text"
+
+
 def length_extractor(markup, url):
     return str(len(markup))
 
@@ -236,6 +244,13 @@ class FetchTests(unittest.TestCase):
         self.assertNotIn(tags, result["text"])
         self.assertIn("Body text", result["text"])
 
+    def test_remaining_invisible_characters_are_removed(self):
+        hidden = "".join(chr(0xE0100 + n) for n in range(5))
+        text = (f"a{hidden}\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b\u180f\u2800"
+                "\u3164\uffa0b")
+        self.assertEqual(server.clean_text(text), "ab")
+        self.assertEqual(server.clean_text("ok \u2764\ufe0f"), "ok \u2764\ufe0f")
+
     def test_meta_charset_is_used_when_the_header_has_none(self):
         markup = '<html><head><meta charset="windows-1252"><title>Gr\xfc\xdfe</title></head>' \
                  '<body><p>M\xfcnchen</p></body></html>'
@@ -258,6 +273,19 @@ class FetchTests(unittest.TestCase):
         self.assertEqual(server.extract_text_bounded(
             "x" * (server.MAX_EXTRACT_CHARS + 10), "https://example.com/", timeout=10,
             extractor=length_extractor), str(server.MAX_EXTRACT_CHARS))
+        # Only text crosses back from the child, and it is cleaned again.
+        self.assertEqual(server.extract_text_bounded(
+            markup, "https://example.com/", timeout=10, extractor=object_extractor),
+            "Fallback works.")
+        self.assertEqual(server.extract_text_bounded(
+            markup, "https://example.com/", timeout=10, extractor=control_extractor),
+            "clean[2J text")
+
+    def test_child_results_are_never_unpickled(self):
+        import inspect
+        source = inspect.getsource(server.extract_text_bounded)
+        self.assertIn("recv_bytes", source)
+        self.assertNotIn(".recv(", source)
 
     def test_unclosed_titles_do_not_stall_the_server(self):
         started = time.monotonic()
