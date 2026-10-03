@@ -194,7 +194,10 @@ public struct ResearchAgent: Sendable {
                     "type": .string("function"),
                     "function": .object([
                         "name": .string(call.name),
-                        "arguments": .string(call.arguments),
+                        // TUFF refuses history whose arguments are not a
+                        // JSON object; such a call already got a tool error.
+                        "arguments": .string(Self.isJSONObject(call.arguments)
+                            ? call.arguments : "{}"),
                     ]),
                 ])
             }),
@@ -218,6 +221,10 @@ public struct ResearchAgent: Sendable {
             return try await chat.complete(
                 messages: state.messages, tools: Self.tools, allowTools: allowTools)
         }
+    }
+
+    static func isJSONObject(_ text: String) -> Bool {
+        (try? ResearchJSON.decode(Data(text.utf8)))?.objectValue != nil
     }
 
     func execute(_ call: ResearchToolCall, state: inout State) async -> String {

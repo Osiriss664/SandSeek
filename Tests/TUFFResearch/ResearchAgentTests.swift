@@ -218,6 +218,11 @@ struct ResearchAgentTests {
             "Tool error: unknown tool run_shell. Use web_search or open_page.",
             "Tool error: arguments must be a JSON object.",
         ])
+        // History sent back to TUFF keeps only valid argument objects.
+        let history = messages(services.modelRequests.last!)
+        let sentArguments = history[2]["tool_calls"]?.arrayValue?
+            .compactMap { $0["function"]?["arguments"]?.stringValue }
+        #expect(sentArguments?.last == "{}")
         // Only the one http URL reached the sandbox.
         #expect(services.requests.filter { $0.url.path == "/v1/fetch" }.count == 1)
     }
