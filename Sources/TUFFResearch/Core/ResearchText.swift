@@ -28,9 +28,11 @@ public enum ResearchText {
     /// as the saved report is opened, or a `javascript:` or `file:` link.
     /// Images become plain links, every `<` is escaped so no HTML or
     /// autolink is rendered, and links to anything but http and https are
-    /// reduced to their text.
+    /// reduced to their text. Control and invisible characters are removed
+    /// first, so one placed inside the syntax, such as between `!` and `[`,
+    /// cannot hide it from these rules and be stripped afterwards.
     public static func inertMarkdown(_ text: String) -> String {
-        var result = text.replacingOccurrences(of: "![", with: "[")
+        var result = terminalSafe(text).replacingOccurrences(of: "![", with: "[")
         result = replacing(linkDefinition, in: result) { label, target in
             isWebURL(target) ? nil : "\\[\(label)\\]: (link removed)"
         }

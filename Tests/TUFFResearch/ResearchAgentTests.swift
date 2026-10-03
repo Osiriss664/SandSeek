@@ -296,6 +296,22 @@ struct ResearchAgentTests {
         #expect(ResearchText.inertMarkdown("\\[x\\]: y") == "\\[x\\]: y")
     }
 
+    @Test func invisibleCharactersCannotHideMarkdownFromTheCleaner() {
+        let report = ResearchReport(
+            question: "q",
+            answer: "![\u{200B}x](https://tracker.example/a) !\u{200B}[y](https://tracker.example/b) "
+                + "[r](java\u{200B}script:alert(1)) [f](\u{2060}file:///etc/passwd) "
+                + "\u{FE00}<img src=x> [g]\u{200B}(file:///z)\n[d]\u{200B}: file:///w",
+            sources: [ResearchSource(
+                number: 1, title: "!\u{200B}[t](https://t.example/x)", url: "https://example.com/a")],
+            modelTurns: 1, budgetExhausted: false)
+        let markdown = report.markdown
+        #expect(!markdown.contains("!["))
+        #expect(!markdown.contains("javascript:"))
+        #expect(!markdown.contains("file:///"))
+        #expect(markdown.contains("\\<img"))
+    }
+
     @Test func remainingInvisibleCharactersAreRemoved() {
         let hidden = String(String.UnicodeScalarView((0..<5).map { Unicode.Scalar(0xE0100 + $0)! }))
             + String(String.UnicodeScalarView((0..<15).map { Unicode.Scalar(0xFE00 + $0)! }))
