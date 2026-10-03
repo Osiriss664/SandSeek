@@ -66,6 +66,7 @@ struct ResearchWorkspaceView: View {
                         Text("Your question")
                             .appFont(.body)
                             .foregroundStyle(.tertiary)
+                            .accessibilityHidden(true)
                             .padding(.horizontal, 9)
                             .padding(.vertical, 6)
                             .allowsHitTesting(false)
@@ -715,7 +716,8 @@ private struct ResearchReportView: View {
                     .appFont(.caption)
                     .foregroundStyle(.orange)
             }
-            if report.sources.isEmpty && !report.answer.isEmpty {
+            if report.sources.isEmpty
+                && !report.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Text("No web page was read for this answer, so it comes from the model's memory or search previews and has no sources to check.")
                     .appFont(.caption)
                     .foregroundStyle(.orange)
