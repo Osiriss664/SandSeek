@@ -44,7 +44,7 @@ let agent = ResearchAgent(
         case .reasoning(let text):
             guard showThinking else { return }
             let indented = text.split(separator: "\n", omittingEmptySubsequences: false)
-                .map { "    │ " + $0 }.joined(separator: "\n")
+                .map { "    │ \($0)" }.joined(separator: "\n")
             writeError(indented)
         case .searching(let query): writeError("    searching: \(query)")
         case .reading(let url): writeError("    reading: \(url)")
