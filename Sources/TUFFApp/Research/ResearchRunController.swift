@@ -148,6 +148,8 @@ public final class ResearchRunController {
             append(.reading, ResearchText.url(url), started: started)
         case .toolFailed(let message):
             append(.failed, message, started: started)
+        case .retryingEmptyAnswer:
+            append(.turn, "No answer yet; asking for a short one", started: started)
         }
     }
 

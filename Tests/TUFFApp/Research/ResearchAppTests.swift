@@ -188,6 +188,22 @@ import TUFFAppServer
         #expect(!services.paths.contains("/v1/chat/completions"))
     }
 
+    @Test func aTurnWithoutAnAnswerIsAskedOnceMore() async throws {
+        let services = FakeResearchServices(modelReplies: [
+            FakeResearchServices.answer("", reasoning: "Thinking until the budget runs out."),
+            FakeResearchServices.answer("A short answer."),
+        ])
+        let store = ResearchReportStore(directory: temporaryDirectory())
+        let run = ResearchRunController(store: store, transport: services)
+        run.start(question: "Anything", settings: ResearchRunSettings(model: "m"),
+                  serverURL: server, sandboxURL: sandbox)
+        await waitUntil { !run.isRunning }
+
+        #expect(run.phase == .finished)
+        #expect(run.steps.contains { $0.text == "No answer yet; asking for a short one" })
+        #expect(try #require(run.report).answer.contains("A short answer."))
+    }
+
     @Test func stoppingDiscardsTheRun() async {
         let services = FakeResearchServices(modelReplies: [
             FakeResearchServices.answer("Too late."),
