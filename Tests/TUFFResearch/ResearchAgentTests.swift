@@ -173,6 +173,37 @@ struct ResearchAgentTests {
         #expect(page.hasSuffix(ResearchAgent.untrustedClose))
     }
 
+    @Test func rereadingAPageKeepsItsNumber() async throws {
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
+            FakeServices.calls([("b", "open_page",
+                                 #"{"url":"https://github.com/apple/container","offset":120}"#)]),
+            FakeServices.answer("It needs macOS 26 [1, 2]."),
+        ])
+        let report = try await agent(services).run(question: "q")
+        #expect(report.sources.count == 1)
+        let reread = messages(services.modelRequests.last!).last?["content"]?.stringValue ?? ""
+        #expect(reread.contains("same page as source [1]; cite it only as [1]"))
+        #expect(report.unknownCitations == [2])
+        #expect(report.markdown.contains("The answer cites [2], which is not a page the research read."))
+    }
+
+    @Test func citationsAreReadFromTheAnswer() {
+        func report(_ answer: String, sources: Int) -> ResearchReport {
+            ResearchReport(
+                question: "q", answer: answer,
+                sources: (1...max(1, sources)).prefix(sources).map {
+                    ResearchSource(number: $0, title: "", url: "https://e.example/\($0)")
+                },
+                modelTurns: 1, budgetExhausted: false)
+        }
+        #expect(report("A [1] and B [2][3].", sources: 2).unknownCitations == [3])
+        #expect(report("See [1, 4] and [4].", sources: 1).unknownCitations == [4])
+        #expect(report("A [link](https://x.example) and [note].", sources: 0).unknownCitations == [])
+        #expect(report("All good [1][2].", sources: 2).unknownCitations == [])
+        #expect(!report("All good [1].", sources: 1).markdown.contains("not a page"))
+    }
+
     @Test func requestsUseOnlyFieldsTheTUFFServerAccepts() async throws {
         let services = FakeServices(modelReplies: [FakeServices.answer("done")])
         _ = try await agent(services).run(question: "q")

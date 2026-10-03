@@ -46,10 +46,40 @@ public struct ResearchReport: Equatable, Sendable {
                 text += "\(source.number). [\(title)](\(source.url))\n"
             }
         }
+        let unknown = unknownCitations
+        if !unknown.isEmpty {
+            let listed = unknown.map { "[\($0)]" }.joined(separator: ", ")
+            text += "\n_The answer cites \(listed), which is not a page the research read._\n"
+        }
         if budgetExhausted {
             text += "\n_The research step budget ran out; this answer may be incomplete._\n"
         }
         return text
+    }
+
+    /// Citation numbers in the answer that match no source, such as a model
+    /// numbering a page it read twice as two sources. Reads `[2]`, `[1, 2]`
+    /// and `[1][2]`; Markdown links are not citations.
+    public var unknownCitations: [Int] {
+        let known = Set(sources.map(\.number))
+        var found: [Int] = []
+        var remaining = Substring(answer)
+        while let open = remaining.firstIndex(of: "[") {
+            let afterOpen = remaining.index(after: open)
+            guard let close = remaining[afterOpen...].firstIndex(of: "]") else { break }
+            let inside = remaining[afterOpen..<close]
+            let afterClose = remaining.index(after: close)
+            let isLink = afterClose < remaining.endIndex && remaining[afterClose] == "("
+            let parts = inside.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+            if !isLink, !parts.isEmpty, parts.allSatisfy({ Int($0) != nil }) {
+                for number in parts.compactMap({ Int($0) })
+                    where !known.contains(number) && !found.contains(number) {
+                    found.append(number)
+                }
+            }
+            remaining = remaining[afterClose...]
+        }
+        return found
     }
 }
 
@@ -255,8 +285,9 @@ public struct ResearchAgent: Sendable {
                 onEvent(.reading(url))
                 let page = try await sandbox.fetch(
                     url: url, offset: offset, maxCharacters: options.pageSliceCharacters)
+                let alreadyNumbered = state.sources.contains { $0.url == page.url }
                 let source = state.source(for: page)
-                return Self.formatPage(page, source: source)
+                return Self.formatPage(page, source: source, alreadyNumbered: alreadyNumbered)
             default:
                 return "Tool error: unknown tool \(call.name). Use web_search or open_page."
             }
@@ -288,9 +319,15 @@ public struct ResearchAgent: Sendable {
         return lines.joined(separator: "\n")
     }
 
-    static func formatPage(_ page: ResearchPageSlice, source: ResearchSource) -> String {
+    static func formatPage(_ page: ResearchPageSlice,
+                           source: ResearchSource,
+                           alreadyNumbered: Bool = false) -> String {
         let end = page.offset + page.text.count
         var header = "Source [\(source.number)]: \(sanitized(page.title.isEmpty ? page.url : page.title))\n"
+        if alreadyNumbered {
+            header += "This is the same page as source [\(source.number)]; cite it only as "
+                + "[\(source.number)].\n"
+        }
             + "URL: \(page.url)\n"
             + "Characters \(page.offset)-\(end) of \(page.totalCharacters)."
         if let next = page.nextOffset {
