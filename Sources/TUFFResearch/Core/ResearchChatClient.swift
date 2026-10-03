@@ -10,6 +10,8 @@ public struct ResearchToolCall: Equatable, Sendable {
 public struct ResearchAssistantTurn: Equatable, Sendable {
     public let content: String?
     public let toolCalls: [ResearchToolCall]
+    /// The model's reasoning, when the server returns `reasoning_content`.
+    public var reasoning: String? = nil
 }
 
 /// Talks to TUFF's OpenAI-compatible Chat Completions endpoint. It sends only
@@ -86,6 +88,7 @@ public struct ResearchChatClient: Sendable {
             }
             return ResearchToolCall(id: id, name: name, arguments: arguments)
         }
-        return ResearchAssistantTurn(content: message["content"]?.stringValue, toolCalls: calls)
+        return ResearchAssistantTurn(content: message["content"]?.stringValue, toolCalls: calls,
+                                     reasoning: message["reasoning_content"]?.stringValue)
     }
 }

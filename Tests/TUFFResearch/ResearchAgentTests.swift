@@ -173,6 +173,35 @@ struct ResearchAgentTests {
         #expect(page.hasSuffix(ResearchAgent.untrustedClose))
     }
 
+    @Test func reasoningIsShownButNeverSentBack() async throws {
+        let thought = FakeServices.json(200, .object(["choices": .array([.object([
+            "message": .object([
+                "role": .string("assistant"),
+                "content": .null,
+                "reasoning_content": .string("  I should search first.\n"),
+                "tool_calls": .array([.object([
+                    "id": .string("call_1"),
+                    "type": .string("function"),
+                    "function": .object([
+                        "name": .string("web_search"),
+                        "arguments": .string(#"{"query":"tuff"}"#),
+                    ]),
+                ])]),
+            ]),
+            "finish_reason": .string("tool_calls"),
+        ])])]))
+        let services = FakeServices(modelReplies: [thought, FakeServices.answer("Done.")])
+        let log = EventLog()
+        _ = try await agent(services, events: log).run(question: "What is TUFF?")
+
+        #expect(log.events == [
+            .modelTurn(1), .reasoning("I should search first."), .searching("tuff"),
+            .modelTurn(2),
+        ])
+        let history = messages(services.modelRequests.last!)
+        #expect(history.allSatisfy { $0["reasoning_content"] == nil })
+    }
+
     @Test func rereadingAPageKeepsItsNumber() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
@@ -375,6 +404,19 @@ struct ResearchArgumentsTests {
         #expect(parsed.outputPath == "notes.md")
         #expect(parsed.quiet)
         #expect(parsed.question == "--literal question")
+    }
+
+    @Test func showThinkingTurnsReasoningOnWithRoomForIt() throws {
+        let shown = try ResearchArguments.parse(["q", "--show-thinking"])
+        #expect(shown.showThinking)
+        #expect(shown.enableThinking == true)
+        #expect(shown.maxTokens == 4_096)
+
+        let chosen = try ResearchArguments.parse(
+            ["q", "--max-tokens", "2000", "--thinking", "off", "--show-thinking"])
+        #expect(chosen.enableThinking == false)
+        #expect(chosen.maxTokens == 2_000)
+        #expect(try ResearchArguments.parse(["q"]).maxTokens == 1_024)
     }
 
     @Test func servicesMustBeLocal() {

@@ -10,6 +10,7 @@ public struct ResearchArguments: Equatable, Sendable {
     public var outputPath: String?
     public var maxTokens: Int = 1_024
     public var enableThinking: Bool?
+    public var showThinking = false
     public var quiet = false
     public var showHelp = false
     public var options = ResearchOptions()
@@ -28,11 +29,14 @@ public struct ResearchArguments: Equatable, Sendable {
       --server <url>           TUFF server (default: http://127.0.0.1:8080).
       --sandbox <url>          Web sandbox (default: http://127.0.0.1:9000).
       --max-steps <1...32>     Model turns that may use tools (default 8).
-      --max-tokens <n>         Completion tokens per model turn (default 1024).
+      --max-tokens <n>         Completion tokens per model turn (default 1024,
+                               or 4096 with --show-thinking).
       --page-chars <n>         Page text per read, 500...20000 (default 3000).
       --context-chars <n>      Prompt budget before old results are shortened
                                (default 16000).
       --thinking on|off        Gemma and Qwen reasoning (default: model's own).
+      --show-thinking          Turn reasoning on and print it with the
+                               progress. It is not added to the report.
       --output <file.md>       Also write the report to a new file.
       --quiet                  Do not print progress to standard error.
     """
@@ -43,6 +47,7 @@ public struct ResearchArguments: Equatable, Sendable {
         var parsed = ResearchArguments()
         var words: [String] = []
         var index = 0
+        var maxTokensGiven = false
         func value(_ flag: String) throws -> String {
             guard index + 1 < arguments.count else {
                 throw ResearchArgumentError("missing value for \(flag)")
@@ -73,6 +78,7 @@ public struct ResearchArguments: Equatable, Sendable {
                 parsed.options.maxSteps = try integer(argument, 1...32)
             case "--max-tokens":
                 parsed.maxTokens = try integer(argument, 64...32_768)
+                maxTokensGiven = true
             case "--page-chars":
                 parsed.options.pageSliceCharacters = try integer(argument, 500...20_000)
             case "--context-chars":
@@ -83,6 +89,8 @@ public struct ResearchArguments: Equatable, Sendable {
                 case "off": parsed.enableThinking = false
                 default: throw ResearchArgumentError("--thinking must be on or off")
                 }
+            case "--show-thinking":
+                parsed.showThinking = true
             case "--output":
                 parsed.outputPath = try value(argument)
             case "--quiet":
@@ -98,6 +106,11 @@ public struct ResearchArguments: Equatable, Sendable {
                 words.append(argument)
             }
             index += 1
+        }
+        if parsed.showThinking {
+            // Reasoning shares the token limit with the answer and tool calls.
+            parsed.enableThinking = parsed.enableThinking ?? true
+            if !maxTokensGiven { parsed.maxTokens = 4_096 }
         }
         parsed.question = words.joined(separator: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)

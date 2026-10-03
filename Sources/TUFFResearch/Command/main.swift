@@ -27,6 +27,7 @@ if let path = arguments.outputPath, FileManager.default.fileExists(atPath: path)
 
 let transport = URLSessionResearchTransport()
 let quiet = arguments.quiet
+let showThinking = arguments.showThinking
 let agent = ResearchAgent(
     chat: ResearchChatClient(
         serverURL: arguments.serverURL,
@@ -40,6 +41,11 @@ let agent = ResearchAgent(
         guard !quiet else { return }
         switch event {
         case .modelTurn(let step): writeError("[\(step)] thinking…")
+        case .reasoning(let text):
+            guard showThinking else { return }
+            let indented = text.split(separator: "\n", omittingEmptySubsequences: false)
+                .map { "    │ " + $0 }.joined(separator: "\n")
+            writeError(indented)
         case .searching(let query): writeError("    searching: \(query)")
         case .reading(let url): writeError("    reading: \(url)")
         case .toolFailed(let message): writeError("    tool error: \(message)")

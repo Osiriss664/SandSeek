@@ -85,6 +85,9 @@ public struct ResearchReport: Equatable, Sendable {
 
 public enum ResearchEvent: Equatable, Sendable {
     case modelTurn(Int)
+    /// What the model thought before answering, for display only. It is
+    /// never sent back to the model.
+    case reasoning(String)
     case searching(String)
     case reading(String)
     case toolFailed(String)
@@ -243,14 +246,20 @@ public struct ResearchAgent: Sendable {
     private func complete(_ state: inout State,
                           allowTools: Bool) async throws -> ResearchAssistantTurn {
         state.compact(toFit: options.contextBudgetCharacters)
+        let turn: ResearchAssistantTurn
         do {
-            return try await chat.complete(
+            turn = try await chat.complete(
                 messages: state.messages, tools: Self.tools, allowTools: allowTools)
         } catch ResearchError.modelRequestFailed(_, _, "context_length_exceeded"?) {
             state.compact(toFit: options.contextBudgetCharacters / 2)
-            return try await chat.complete(
+            turn = try await chat.complete(
                 messages: state.messages, tools: Self.tools, allowTools: allowTools)
         }
+        if let reasoning = turn.reasoning?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !reasoning.isEmpty {
+            onEvent(.reasoning(reasoning))
+        }
+        return turn
     }
 
     static func isJSONObject(_ text: String) -> Bool {

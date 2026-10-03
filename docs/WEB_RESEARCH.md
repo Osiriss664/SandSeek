@@ -13,7 +13,9 @@ tuff research "How does Apple container isolate each container?"
 ```
 
 The answer is printed as Markdown with numbered sources. `--output notes.md`
-also writes it to a new file. Run `tuff research --help` for every option.
+also writes it to a new file. `--show-thinking` turns on the model's reasoning
+and prints it under each `[n] thinking…` line; it is not added to the report.
+Run `tuff research --help` for every option.
 
 ## Requirements
 
