@@ -302,7 +302,8 @@ import TUFFAppServer
         // nft may print service names, and SearXNG gets an IPv6 exception.
         #expect(ResearchSandboxController.firewallProblem(good
             .replacingOccurrences(of: "udp dport 53", with: "udp dport domain")
-            .replacingOccurrences(of: "\t\toifname", with: "\t\tip6 daddr fd00::5 tcp dport 8888 accept\n\t\toifname")) == nil)
+            .replacingOccurrences(of: "\t\toifname", with: "\t\tip6 daddr fd00::5 tcp dport ddi-tcp-1 accept\n\t\toifname")) == nil)
+        let reject = "\t\treject\n\t}"
 
         let problems = [
             good.replacingOccurrences(of: "policy drop", with: "policy accept"),
@@ -310,6 +311,14 @@ import TUFFAppServer
             good.replacingOccurrences(of: "\t\toifname", with: "\t\tip daddr 192.168.0.0/16 accept\n\t\toifname"),
             good.replacingOccurrences(of: "\t\toifname", with: "\t\taccept\n\t\toifname"),
             good.replacingOccurrences(of: "\t\toifname", with: "\t\tjump other\n\t\toifname"),
+            // The Mac, which is the DNS server, opened on another port.
+            good.replacingOccurrences(of: "\t\toifname", with: "\t\tip daddr 192.168.64.1 tcp dport 22 accept\n\t\toifname"),
+            // Two addresses besides DNS.
+            good.replacingOccurrences(of: "\t\toifname", with: "\t\tip daddr 10.0.0.5 tcp dport 8888 accept\n\t\tip daddr 10.0.0.6 tcp dport 8888 accept\n\t\toifname"),
+            // Anything allowed after the refusals, or handed elsewhere.
+            good.replacingOccurrences(of: reject, with: "\t\tip6 daddr fe80::/10 accept\n" + reject),
+            good.replacingOccurrences(of: reject, with: "\t\tqueue num 1\n" + reject),
+            good.replacingOccurrences(of: "ip daddr @private4 reject", with: "ip daddr != @private4 reject"),
             "",
         ]
         for listing in problems {

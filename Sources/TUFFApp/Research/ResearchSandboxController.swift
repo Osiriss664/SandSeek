@@ -288,9 +288,9 @@ public final class ResearchSandboxController {
 
     /// Reads `nft list table inet tuff_sandbox` and says what is wrong with
     /// it, or nil when it has the shape `firewall.nft` gives it: outbound
-    /// traffic dropped unless allowed, the private ranges refused, and
-    /// nothing allowed ahead of that refusal except loopback, replies, and
-    /// single-address exceptions for a port (DNS, SearXNG).
+    /// traffic dropped unless allowed, the private ranges refused, and no
+    /// rule but TUFF's own: loopback, replies, DNS to the name servers, one
+    /// SearXNG address and port, and public addresses after the refusals.
     static func firewallProblem(_ listing: String) -> String? {
         let lines = listing.split(whereSeparator: \.isNewline)
             .map { $0.trimmingCharacters(in: .whitespaces) }
@@ -311,35 +311,85 @@ public final class ResearchSandboxController {
         if let missing = requiredRefusedRanges.first(where: { !refused.contains($0) }) {
             return "does not list \(missing) among the refused addresses"
         }
+        // Every rule in the chain must be one firewall.nft or entrypoint.sh
+        // writes, so nothing can allow traffic before or after the refusal.
+        var refusesPrivate4 = false
+        var refusesRefused6 = false
+        var dnsAddresses: Set<String> = []
+        var otherExceptions: [String] = []
         for line in lines[(chainStart + 1)...] {
             if line == "}" { break }
-            if line.contains("@private4") && line.contains("reject") { return nil }
-            guard line.contains("accept") else { continue }
+            if line.isEmpty { continue }
+            if line.contains("!=") || line.contains("comment") {
+                return "has a rule TUFF does not expect (\(String(line.prefix(80))))"
+            }
+            if isRefusal(line) {
+                if line.contains("@private4") { refusesPrivate4 = true }
+                if line.contains("@refused6") { refusesRefused6 = true }
+                continue
+            }
             if line == "oifname \"lo\" accept" || line == "ct state established,related accept" {
                 continue
             }
-            if isSingleAddressException(line) { continue }
+            if let exception = singleAddressException(line) {
+                if exception.port == "53" || exception.port == "domain" {
+                    dnsAddresses.insert(exception.address)
+                } else {
+                    otherExceptions.append(exception.address)
+                }
+                continue
+            }
+            if line == "meta nfproto ipv4 accept", refusesPrivate4 { continue }
+            if ["ip6 daddr 2000::/3 accept", "meta nfproto ipv6 ip6 daddr 2000::/3 accept"]
+                .contains(line), refusesRefused6 {
+                continue
+            }
             return "allows more than TUFF's own rules (\(String(line.prefix(80))))"
         }
-        return "does not refuse the private addresses"
+        guard refusesPrivate4 else { return "does not refuse the private addresses" }
+        // Only SearXNG gets a port other than DNS, and never on a DNS
+        // server's address, which by default is the Mac.
+        if otherExceptions.count > 1
+            || otherExceptions.contains(where: { dnsAddresses.contains($0) }) {
+            return "allows more than DNS to the Mac or extra addresses"
+        }
+        return nil
+    }
+
+    /// `reject`, or a rule ending in it, such as
+    /// `ip daddr @private4 meta l4proto tcp reject with tcp reset`.
+    private static func isRefusal(_ line: String) -> Bool {
+        guard !line.contains("accept") else { return false }
+        return line.wholeMatch(of: #/(?:.* )?(?:reject(?: with [a-z0-9 -]+)?|drop)/#) != nil
     }
 
     /// `ip daddr 192.168.64.1 udp dport 53 accept` and the like: one address,
-    /// one protocol, one port.
-    private static func isSingleAddressException(_ line: String) -> Bool {
-        let words = line.split(separator: " ").map(String.init)
+    /// one protocol, one port. Returns the address and the port.
+    private static func singleAddressException(
+        _ line: String
+    ) -> (address: String, port: String)? {
+        var rule = Substring(line)
+        for prefix in ["meta nfproto ipv4 ", "meta nfproto ipv6 "] where rule.hasPrefix(prefix) {
+            rule = rule.dropFirst(prefix.count)
+        }
+        let words = rule.split(separator: " ").map(String.init)
         guard words.count == 7, ["ip", "ip6"].contains(words[0]), words[1] == "daddr",
               ["tcp", "udp"].contains(words[3]), words[4] == "dport",
               words[6] == "accept", isPort(words[5])
-        else { return false }
+        else { return nil }
         let address = words[2]
-        return !address.isEmpty && address.allSatisfy { $0.isHexDigit || $0 == "." || $0 == ":" }
+        guard !address.isEmpty,
+              address.allSatisfy({ $0.isHexDigit || $0 == "." || $0 == ":" }) else { return nil }
+        return (address: address, port: words[5])
     }
 
-    /// A port number, or a service name such as `domain` if nft prints one.
+    /// A port number, or a service name such as `domain` or `http-alt` if nft
+    /// prints one.
     private static func isPort(_ word: String) -> Bool {
         if let port = Int(word) { return (1...65_535).contains(port) }
-        return !word.isEmpty && word.allSatisfy { ($0.isLetter && $0.isLowercase) || $0 == "-" }
+        return !word.isEmpty && word.first!.isLetter && word.allSatisfy {
+            ($0.isLetter && $0.isLowercase) || $0.isNumber || "-_.+".contains($0)
+        }
     }
 
     /// The same check `research_sandbox.sh selftest` runs: the user id and
