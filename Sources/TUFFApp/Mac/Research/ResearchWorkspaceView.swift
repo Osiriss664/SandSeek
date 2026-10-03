@@ -51,12 +51,30 @@ struct ResearchWorkspaceView: View {
 
     private var composerCard: some View {
         VStack(alignment: .leading, spacing: 12) {
-            TextField("Your question", text: $question, axis: .vertical)
+            // A rounded-border TextField stays one line tall on macOS, so the
+            // question gets a real editor. Return adds a line; ⌘Return asks.
+            TextEditor(text: $question)
                 .appFont(.body)
-                .lineLimit(2...6)
-                .textFieldStyle(.roundedBorder)
+                .scrollContentBackground(.hidden)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 6)
+                .frame(minHeight: 96, maxHeight: 220)
+                .background(Color(nsColor: .textBackgroundColor),
+                            in: RoundedRectangle(cornerRadius: 6))
+                .overlay(alignment: .topLeading) {
+                    if question.isEmpty {
+                        Text("Your question")
+                            .appFont(.body)
+                            .foregroundStyle(.tertiary)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 6)
+                            .allowsHitTesting(false)
+                    }
+                }
+                .overlay(RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(Color(nsColor: .separatorColor)))
                 .disabled(research.run.isRunning)
-                .onSubmit(ask)
+                .accessibilityLabel("Your question")
                 .accessibilityIdentifier("research.question")
             HStack(spacing: 14) {
                 Picker("Model", selection: $selectedModel) {
