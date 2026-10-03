@@ -100,6 +100,8 @@ public enum ResearchEvent: Equatable, Sendable {
     case searching(String)
     case reading(String)
     case toolFailed(String)
+    /// A turn ended with no answer, and the model is asked once more.
+    case retryingEmptyAnswer
 }
 
 /// The research loop. The model can only search the web and read pages, and
@@ -213,7 +215,8 @@ public struct ResearchAgent: Sendable {
                     ]))
                     continue
                 }
-                return state.report(answer: turn.content ?? "", turns: step, exhausted: false)
+                let text = try await answer(from: turn, state: &state)
+                return state.report(answer: text, turns: step, exhausted: false)
             }
             state.messages.append(assistantMessage(turn))
             for (index, call) in turn.toolCalls.enumerated() {
@@ -238,9 +241,38 @@ public struct ResearchAgent: Sendable {
                     + "citing source numbers, and say what remains unverified."),
         ]))
         let final = try await complete(&state, allowTools: false)
-        return state.report(
-            answer: final.content ?? "", turns: options.maxSteps + 1, exhausted: true)
+        let text = try await answer(from: final, state: &state)
+        return state.report(answer: text, turns: options.maxSteps + 1, exhausted: true)
     }
+
+    /// The answer in a turn without tool calls. A turn that ends empty,
+    /// usually because reasoning used the whole token limit, is asked once
+    /// more for a short answer with reasoning off.
+    private func answer(from turn: ResearchAssistantTurn,
+                        state: inout State) async throws -> String {
+        if let content = turn.content, !Self.isBlank(content) { return content }
+        state.messages.append(.object([
+            "role": .string("assistant"),
+            "content": .string(turn.content ?? ""),
+        ]))
+        state.messages.append(.object([
+            "role": .string("user"),
+            "content": .string(Self.answerNowRequest),
+        ]))
+        onEvent(.retryingEmptyAnswer)
+        let retry = try await complete(&state, allowTools: false, thinking: false)
+        if let content = retry.content, !Self.isBlank(content) { return content }
+        throw ResearchError.noAnswer(
+            tokenLimit: turn.finishReason == "length" || retry.finishReason == "length")
+    }
+
+    private static func isBlank(_ text: String) -> Bool {
+        ResearchText.terminalSafe(text).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    static let answerNowRequest = "Your last reply ended before you wrote an answer. Answer the "
+        + "question now in Markdown from what you have read, citing source numbers, and keep "
+        + "it short."
 
     static let readPagesRequest = "You have only seen search snippets, which are short and can be "
         + "out of date, and no page has a source number yet. Open the most relevant pages with "
@@ -272,16 +304,19 @@ public struct ResearchAgent: Sendable {
     /// Sends the conversation, shortening old tool results to fit the budget.
     /// A context overflow the estimate missed gets one retry at half budget.
     private func complete(_ state: inout State,
-                          allowTools: Bool) async throws -> ResearchAssistantTurn {
+                          allowTools: Bool,
+                          thinking: Bool? = nil) async throws -> ResearchAssistantTurn {
         state.compact(toFit: options.contextBudgetCharacters)
         let turn: ResearchAssistantTurn
         do {
             turn = try await chat.complete(
-                messages: state.messages, tools: Self.tools, allowTools: allowTools)
+                messages: state.messages, tools: Self.tools, allowTools: allowTools,
+                thinking: thinking)
         } catch ResearchError.modelRequestFailed(_, _, "context_length_exceeded"?) {
             state.compact(toFit: options.contextBudgetCharacters / 2)
             turn = try await chat.complete(
-                messages: state.messages, tools: Self.tools, allowTools: allowTools)
+                messages: state.messages, tools: Self.tools, allowTools: allowTools,
+                thinking: thinking)
         }
         if let reasoning = turn.reasoning?.trimmingCharacters(in: .whitespacesAndNewlines),
            !reasoning.isEmpty {

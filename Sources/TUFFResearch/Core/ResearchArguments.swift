@@ -30,7 +30,7 @@ public struct ResearchArguments: Equatable, Sendable {
       --sandbox <url>          Web sandbox (default: http://127.0.0.1:9000).
       --max-steps <1...32>     Model turns that may use tools (default 8).
       --max-tokens <n>         Completion tokens per model turn (default 1024,
-                               or 4096 with --show-thinking).
+                               or 8192 with reasoning on).
       --page-chars <n>         Page text per read, 500...20000 (default 3000).
       --context-chars <n>      Prompt budget before old results are shortened
                                (default 16000).
@@ -108,9 +108,12 @@ public struct ResearchArguments: Equatable, Sendable {
             index += 1
         }
         if parsed.showThinking {
-            // Reasoning shares the token limit with the answer and tool calls.
             parsed.enableThinking = parsed.enableThinking ?? true
-            if !maxTokensGiven { parsed.maxTokens = 4_096 }
+        }
+        // Reasoning shares the token limit with the answer and tool calls; a
+        // slow model can think for several thousand tokens before answering.
+        if parsed.enableThinking == true, !maxTokensGiven {
+            parsed.maxTokens = 8_192
         }
         parsed.question = words.joined(separator: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)

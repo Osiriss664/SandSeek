@@ -12,6 +12,9 @@ public struct ResearchAssistantTurn: Equatable, Sendable {
     public let toolCalls: [ResearchToolCall]
     /// The model's reasoning, when the server returns `reasoning_content`.
     public var reasoning: String? = nil
+    /// Why the turn ended: `stop`, `tool_calls`, or `length` when it reached
+    /// the token limit.
+    public var finishReason: String? = nil
 }
 
 /// Talks to TUFF's OpenAI-compatible Chat Completions endpoint. It sends only
@@ -40,7 +43,8 @@ public struct ResearchChatClient: Sendable {
 
     func requestBody(messages: [ResearchJSON],
                      tools: [ResearchJSON],
-                     allowTools: Bool) -> ResearchJSON {
+                     allowTools: Bool,
+                     thinking: Bool? = nil) -> ResearchJSON {
         var body: [String: ResearchJSON] = [
             "model": .string(model),
             "messages": .array(messages),
@@ -51,17 +55,18 @@ public struct ResearchChatClient: Sendable {
             body["tools"] = .array(tools)
             body["tool_choice"] = .string(allowTools ? "auto" : "none")
         }
-        if let enableThinking {
-            body["enable_thinking"] = .bool(enableThinking)
+        if let thinking = thinking ?? enableThinking {
+            body["enable_thinking"] = .bool(thinking)
         }
         return .object(body)
     }
 
     public func complete(messages: [ResearchJSON],
                          tools: [ResearchJSON],
-                         allowTools: Bool = true) async throws -> ResearchAssistantTurn {
-        let body = try requestBody(messages: messages, tools: tools, allowTools: allowTools)
-            .encoded()
+                         allowTools: Bool = true,
+                         thinking: Bool? = nil) async throws -> ResearchAssistantTurn {
+        let body = try requestBody(messages: messages, tools: tools, allowTools: allowTools,
+                                   thinking: thinking).encoded()
         let response: ResearchHTTPResponse
         do {
             response = try await transport.send(method: "POST", url: endpoint, body: body)
@@ -77,7 +82,8 @@ public struct ResearchChatClient: Sendable {
                     ?? String(decoding: response.body.prefix(500), as: UTF8.self),
                 code: detail?["code"]?.stringValue)
         }
-        guard let message = reply?["choices"]?.arrayValue?.first?["message"] else {
+        let choice = reply?["choices"]?.arrayValue?.first
+        guard let message = choice?["message"] else {
             throw ResearchError.malformedModelReply("no choices[0].message")
         }
         let calls = try (message["tool_calls"]?.arrayValue ?? []).map { call in
@@ -89,6 +95,7 @@ public struct ResearchChatClient: Sendable {
             return ResearchToolCall(id: id, name: name, arguments: arguments)
         }
         return ResearchAssistantTurn(content: message["content"]?.stringValue, toolCalls: calls,
-                                     reasoning: message["reasoning_content"]?.stringValue)
+                                     reasoning: message["reasoning_content"]?.stringValue,
+                                     finishReason: choice?["finish_reason"]?.stringValue)
     }
 }

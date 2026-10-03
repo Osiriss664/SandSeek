@@ -52,6 +52,17 @@ private final class FakeServices: ResearchHTTPTransport, @unchecked Sendable {
         ])])]))
     }
 
+    /// A turn that ran out of tokens while reasoning: no answer, no calls.
+    static func cutOff() -> ResearchHTTPResponse {
+        json(200, .object(["choices": .array([.object([
+            "message": .object([
+                "role": .string("assistant"), "content": .string(""),
+                "reasoning_content": .string("Let me think about every party…"),
+            ]),
+            "finish_reason": .string("length"),
+        ])])]))
+    }
+
     static func calls(_ calls: [(String, String, String)]) -> ResearchHTTPResponse {
         json(200, .object(["choices": .array([.object([
             "message": .object([
@@ -460,6 +471,32 @@ struct ResearchAgentTests {
         #expect(last == "Skipped: at most 1 tool calls per turn.")
     }
 
+    @Test func anEmptyAnswerIsAskedForOnceWithoutThinking() async throws {
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
+            FakeServices.cutOff(),
+            FakeServices.answer("Each container is a VM [1]."),
+        ])
+        let log = EventLog()
+        let report = try await agent(services, events: log).run(question: "q")
+        #expect(report.answer == "Each container is a VM [1].")
+        #expect(report.sources.count == 1)
+        #expect(log.events.contains(.retryingEmptyAnswer))
+        let retry = try #require(services.modelRequests.last)
+        #expect(retry["enable_thinking"] == .bool(false))
+        #expect(retry["tool_choice"] == .string("none"))
+        #expect(messages(retry).last?["content"] == .string(ResearchAgent.answerNowRequest))
+
+        let silent = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
+            FakeServices.cutOff(),
+            FakeServices.cutOff(),
+        ])
+        await #expect(throws: ResearchError.noAnswer(tokenLimit: true)) {
+            try await agent(silent).run(question: "q")
+        }
+    }
+
     @Test func spentBudgetForcesAnAnswerWithoutTools() async throws {
         var options = ResearchOptions()
         options.maxSteps = 2
@@ -567,7 +604,8 @@ struct ResearchArgumentsTests {
         let shown = try ResearchArguments.parse(["q", "--show-thinking"])
         #expect(shown.showThinking)
         #expect(shown.enableThinking == true)
-        #expect(shown.maxTokens == 4_096)
+        #expect(shown.maxTokens == 8_192)
+        #expect(try ResearchArguments.parse(["q", "--thinking", "on"]).maxTokens == 8_192)
 
         let chosen = try ResearchArguments.parse(
             ["q", "--max-tokens", "2000", "--thinking", "off", "--show-thinking"])
