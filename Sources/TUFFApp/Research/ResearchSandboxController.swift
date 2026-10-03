@@ -485,18 +485,30 @@ public final class ResearchSandboxController {
     /// Nil when no container named `tuff-web-research` exists, running or
     /// stopped; otherwise what to tell the user.
     private func containerLeftOver() async -> String? {
-        let listed = try? await runner.run(
-            executable: URL(fileURLWithPath: "/usr/bin/env"),
-            arguments: ["container", "list", "--all"],
-            environment: environment, timeout: 30)
-        guard let listed, listed.status == 0 else {
-            return "The sandbox was stopped, but TUFF could not check that its container is "
-                + "gone. Run `container list --all` in Terminal to look."
+        // `--rm` may still be removing the container just after it stopped,
+        // so look a few times before calling it left over.
+        for attempt in 1...5 {
+            let listed = try? await runner.run(
+                executable: URL(fileURLWithPath: "/usr/bin/env"),
+                arguments: ["container", "list", "--all"],
+                environment: environment, timeout: 30)
+            guard let listed, listed.status == 0 else {
+                return "The sandbox was stopped, but TUFF could not check that its container is "
+                    + "gone. Run `container list --all` in Terminal to look."
+            }
+            guard Self.listsContainer(listed.output) else { return nil }
+            if attempt < 5 { try? await Task.sleep(for: .milliseconds(500)) }
         }
-        let names = listed.output.split(whereSeparator: { $0.isWhitespace }).map(String.init)
-        guard names.contains(Self.containerName) else { return nil }
         return "The sandbox's container is still there after stopping. Click Stop again, or run "
             + "`container stop \(Self.containerName)` and `container delete \(Self.containerName)` in Terminal."
+    }
+
+    /// Whether `container list --all` output has a row whose first column,
+    /// the container's ID, is the sandbox's name.
+    static func listsContainer(_ output: String) -> Bool {
+        output.split(whereSeparator: \.isNewline).contains { line in
+            line.split(whereSeparator: { $0.isWhitespace }).first.map(String.init) == containerName
+        }
     }
 
     public func runSelfTest() async {
@@ -518,15 +530,42 @@ public final class ResearchSandboxController {
     }
 
     /// Stops a sandbox this app started, without waiting, for app quit.
+    /// Stops the sandbox while the app quits, waiting a few seconds for it.
+    /// The marker is only removed once the container is confirmed gone, so
+    /// the next launch can still take over anything left running.
     public func stopWhenQuitting() {
         guard startedByApp, let script else { return }
+        guard Self.runAndWait("/bin/bash", [script.path, "stop"],
+                              environment: environment, timeout: 10)?.status == 0,
+              let listed = Self.runAndWait("/usr/bin/env", ["container", "list", "--all"],
+                                           environment: environment, timeout: 3),
+              listed.status == 0, !Self.listsContainer(listed.output)
+        else { return }
+        startedByApp = false
+        adoptedFromLastRun = false
+    }
+
+    /// Runs a command synchronously, for the quit path only, and gives up
+    /// after `timeout` seconds, leaving the process to finish on its own.
+    private static func runAndWait(_ executable: String, _ arguments: [String],
+                                   environment: [String: String],
+                                   timeout: TimeInterval) -> ResearchProcessResult? {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/bin/bash")
-        process.arguments = [script.path, "stop"]
+        let pipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
         process.environment = environment
-        process.standardOutput = FileHandle.nullDevice
+        process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
-        try? process.run()
+        do { try process.run() } catch { return nil }
+        let deadline = Date().addingTimeInterval(timeout)
+        while process.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        guard !process.isRunning else { return nil }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return ResearchProcessResult(status: process.terminationStatus,
+                                     output: String(decoding: data, as: UTF8.self))
     }
 
     private func runScript(_ script: URL, _ command: String) async -> ResearchProcessResult? {

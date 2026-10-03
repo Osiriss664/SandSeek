@@ -339,6 +339,33 @@ import TUFFAppServer
         #expect(runner.commands.contains(["env", "container", "list", "--all"]))
     }
 
+    @Test func onlyTheIDColumnCountsAsTheSandbox() {
+        let header = "ID                 IMAGE                     OS     STATE\n"
+        #expect(ResearchSandboxController.listsContainer(
+            header + "tuff-web-research  tuff-web-research:latest  linux  running\n"))
+        #expect(!ResearchSandboxController.listsContainer(
+            header + "other              tuff-web-research:latest  linux  running\n"))
+        #expect(!ResearchSandboxController.listsContainer(
+            header + "buildkit           builder                   linux  tuff-web-research\n"))
+        #expect(!ResearchSandboxController.listsContainer(""))
+    }
+
+    @Test func aStopCheckThatCannotRunIsReported() async throws {
+        let runner = FakeProcessRunner { command in
+            command.contains("list")
+                ? ResearchProcessResult(status: 1, output: "Error: not running")
+                : FakeProcessRunner.healthy(command)
+        }
+        let sandbox = try controller(runner: runner)
+        await sandbox.start()
+        await sandbox.stop()
+        guard case .failed(let message) = sandbox.state else {
+            Issue.record("expected a failure, got \(sandbox.state)")
+            return
+        }
+        #expect(message.contains("could not check"))
+    }
+
     @Test func aSandboxWithoutItsFirewallIsNotVerified() async throws {
         let runner = FakeProcessRunner { command in
             command.contains("nft")
