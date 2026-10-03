@@ -17,6 +17,33 @@ also writes it to a new file. `--show-thinking` turns on the model's reasoning
 and prints it under each `[n] thinking…` line; it is not added to the report.
 Run `tuff research --help` for every option.
 
+## In the TUFF app
+
+The **Research** screen (Command-2) does the same without Terminal. **Start
+Both** starts the model server and a fresh sandbox VM, **Run Safety Check**
+runs the `selftest` below, and each question shows its searches, page reads
+and, with **Show thinking**, the model's reasoning as it works. Finished
+reports are listed in the sidebar and saved as Markdown and JSON in
+`~/Library/Application Support/TUFF/Research Reports`.
+
+The screen runs `Scripts/research_sandbox.sh` from the checkout the app was
+built from, so build and run the app from a clone:
+
+```sh
+swift build -c release
+.build/release/TUFF
+```
+
+The first start builds the sandbox image, and it is rebuilt when anything in
+`Sandbox/web-research` changes. Without the packaged app's Background API, the
+screen starts the `TUFFServer` built beside the app and stops it when TUFF
+quits; its log is `~/Library/Logs/TUFF/research-server.log`. A server already
+running on the same port, such as one started in Terminal, is used as it is.
+
+The app shows web text as plain text only. Links in an answer do nothing,
+images are never loaded, and a source opens in your browser only after you
+confirm its full address.
+
 ## Requirements
 
 - An Apple Silicon Mac with macOS 26. Apple `container` needs macOS 26 for its

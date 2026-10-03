@@ -1,0 +1,719 @@
+import AppKit
+import SwiftUI
+import TUFFAppCore
+import TUFFAppResearch
+import TUFFMacPresentation
+import UniformTypeIdentifiers
+
+/// Web research: a local model searches and reads the web through the
+/// sandbox VM. Everything from the web is shown as plain text; nothing here
+/// renders a page, loads an image or follows a link on its own.
+struct ResearchWorkspaceView: View {
+    let model: AppModel
+    let research: ResearchWorkspace
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @AppStorage("ResearchQuestion") private var question = ""
+    @AppStorage("ResearchModel") private var selectedModel = ""
+    @AppStorage("ResearchShowThinking") private var showThinking = true
+    @AppStorage("ResearchMaxSteps") private var maxSteps = 8
+    @AppStorage("ResearchPageCharacters") private var pageCharacters = 3_000
+    @State private var showsOptions = false
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    WorkspaceTitle(
+                        title: "Research",
+                        subtitle: "Ask a question. A model on this Mac searches and reads the web through a sealed sandbox.")
+                    ResearchServicesCard(model: model, research: research)
+                    composerCard
+                    results(proxy: proxy)
+                }
+                .frame(maxWidth: 1_100, alignment: .leading)
+                .padding(28)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(Color(nsColor: .windowBackgroundColor))
+        .task {
+            while !Task.isCancelled {
+                await research.refresh()
+                pickModelIfNeeded()
+                do { try await Task.sleep(for: .seconds(2)) } catch { return }
+            }
+        }
+    }
+
+    // MARK: - Question
+
+    private var composerCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            TextField("Your question", text: $question, axis: .vertical)
+                .appFont(.body)
+                .lineLimit(2...6)
+                .textFieldStyle(.roundedBorder)
+                .disabled(research.run.isRunning)
+                .onSubmit(ask)
+                .accessibilityIdentifier("research.question")
+            HStack(spacing: 14) {
+                Picker("Model", selection: $selectedModel) {
+                    if research.server.models.isEmpty {
+                        Text("Start the model server").tag("")
+                    }
+                    ForEach(research.server.models) { served in
+                        Text(served.displayName).tag(served.id)
+                    }
+                }
+                .fixedSize()
+                .disabled(research.server.models.isEmpty || research.run.isRunning)
+                Toggle("Show thinking", isOn: $showThinking)
+                    .disabled(research.run.isRunning)
+                    .help("Turns the model's reasoning on and shows it with the progress. It is never added to the report.")
+                Button(showsOptions ? "Fewer Options" : "More Options") {
+                    showsOptions.toggle()
+                }
+                .buttonStyle(.link)
+                Spacer(minLength: 8)
+                if !research.servicesReady && !research.run.isRunning {
+                    Text("Start both services first.")
+                        .appFont(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                if research.run.isRunning {
+                    Button("Stop", role: .cancel) { research.run.stop() }
+                } else {
+                    Button("Research", action: ask)
+                        .buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.return, modifiers: .command)
+                        .disabled(!canAsk)
+                }
+            }
+            if showsOptions {
+                HStack(spacing: 24) {
+                    Stepper(value: $maxSteps, in: 1...16) {
+                        Text("Steps the model may take: \(maxSteps)")
+                            .appFont(.callout)
+                    }
+                    Picker("Page text per read", selection: $pageCharacters) {
+                        ForEach([2_000, 3_000, 5_000, 8_000], id: \.self) { size in
+                            Text("\(size.formatted()) characters").tag(size)
+                        }
+                    }
+                    .fixedSize()
+                    Spacer()
+                }
+                .disabled(research.run.isRunning)
+            }
+        }
+        .padding(18)
+        .background(cardBackground, in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    private var canAsk: Bool {
+        research.servicesReady && !research.run.isRunning
+            && !selectedModel.isEmpty
+            && !question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func ask() {
+        guard canAsk else { return }
+        research.ask(question, settings: ResearchRunSettings(
+            model: selectedModel,
+            showThinking: showThinking,
+            maxSteps: min(max(maxSteps, 1), 16),
+            pageCharacters: min(max(pageCharacters, 500), 20_000)))
+    }
+
+    /// Keeps the picked model when the server still lists it; otherwise
+    /// prefers the fast Gemma 4 E4B.
+    private func pickModelIfNeeded() {
+        let ids = research.server.models.map(\.id)
+        guard !ids.isEmpty, !ids.contains(selectedModel) else { return }
+        selectedModel = ids.first { $0.contains("e4b") } ?? ids[0]
+    }
+
+    // MARK: - Progress and answer
+
+    @ViewBuilder
+    private func results(proxy: ScrollViewProxy) -> some View {
+        let run = research.run
+        if run.phase == .idle && research.shownReport == nil {
+            Text("Each search, each page the model reads, and its thinking appear here while it works. The answer follows with numbered sources you can check.")
+                .appFont(.callout)
+                .foregroundStyle(.secondary)
+                .padding(.top, 4)
+        } else {
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 18) {
+                    progressCard.frame(minWidth: 300, idealWidth: 380, maxWidth: 440)
+                    answerCard(proxy: proxy).frame(minWidth: 420, maxWidth: .infinity)
+                }
+                VStack(alignment: .leading, spacing: 18) {
+                    answerCard(proxy: proxy)
+                    progressCard
+                }
+            }
+        }
+    }
+
+    private var shownSteps: [ResearchStep] {
+        if research.run.isRunning || research.selectedReportID == nil {
+            return research.run.steps.isEmpty
+                ? (research.shownReport?.steps ?? []) : research.run.steps
+        }
+        return research.shownReport?.steps ?? []
+    }
+
+    private var progressCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Progress").appFont(.headline)
+                Spacer()
+                progressClock
+            }
+            if shownSteps.isEmpty {
+                Text("Waiting for the model…")
+                    .appFont(.callout)
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(shownSteps) { step in
+                if step.kind != .thinking || showThinking {
+                    ResearchStepRow(step: step)
+                }
+            }
+            if research.run.isRunning {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Working").appFont(.callout).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(cardBackground, in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    @ViewBuilder
+    private var progressClock: some View {
+        if research.run.isRunning, let started = research.run.startedAt {
+            TimelineView(.periodic(from: started, by: 1)) { context in
+                Text("\(Int(context.date.timeIntervalSince(started))) s")
+                    .appFont(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+        } else if research.run.phase == .stopped {
+            Text("Stopped").appFont(.caption).foregroundStyle(.secondary)
+        } else if let report = research.shownReport {
+            Text("Finished in \(Int(report.durationSeconds.rounded())) s")
+                .appFont(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private func answerCard(proxy: ScrollViewProxy) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Answer").appFont(.headline)
+            switch research.run.phase {
+            case .running:
+                Text(research.run.question).appFont(.headline)
+                Text("The answer appears here when the model is done.")
+                    .appFont(.callout)
+                    .foregroundStyle(.secondary)
+            case .failed(let message) where research.selectedReportID == nil:
+                Label {
+                    Text(message).appFont(.callout).textSelection(.enabled)
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)
+                }
+            case .stopped where research.selectedReportID == nil:
+                Text("Stopped before an answer. Nothing was saved.")
+                    .appFont(.callout)
+                    .foregroundStyle(.secondary)
+            default:
+                if let report = research.shownReport {
+                    ResearchReportView(
+                        report: report,
+                        markdownURL: research.reports.markdownURL(for: report),
+                        saveError: report.id == research.run.report?.id ? research.run.saveError : nil,
+                        proxy: proxy)
+                }
+            }
+        }
+        .padding(18)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(cardBackground, in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    private var cardBackground: AnyShapeStyle {
+        TUFFMacTheme.surfaceStyle(reduceTransparency: reduceTransparency)
+    }
+}
+
+// MARK: - Services
+
+private struct ResearchServicesCard: View {
+    let model: AppModel
+    let research: ResearchWorkspace
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            serverRow
+            Divider()
+            sandboxRow
+            Divider()
+            HStack(spacing: 12) {
+                if research.anyServiceOn {
+                    Button("Stop Both") { Task { await research.stopServices() } }
+                        .disabled(research.server.state.isBusy || research.sandbox.state.isBusy)
+                } else {
+                    Button("Start Both") { Task { await research.startServices() } }
+                        .buttonStyle(.borderedProminent)
+                }
+                Button("Run Safety Check") { Task { await research.sandbox.runSelfTest() } }
+                    .disabled(research.sandbox.state != .ready || research.sandbox.isRunningSelfTest)
+                    .help("Checks that the sandbox cannot reach this Mac or your local network, and can still reach the web.")
+                if research.sandbox.isRunningSelfTest {
+                    ProgressView().controlSize(.small)
+                }
+                Spacer()
+                if research.sandbox.repository == nil {
+                    Button("Choose TUFF Folder…", action: chooseRepository)
+                }
+            }
+            if let result = research.sandbox.selfTest {
+                ResearchSelfTestView(result: result)
+            }
+        }
+        .padding(18)
+        .background(
+            TUFFMacTheme.surfaceStyle(reduceTransparency: reduceTransparency),
+            in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    private var serverRow: some View {
+        let server = research.server
+        return ResearchServiceRow(
+            title: "Model server",
+            systemImage: "desktopcomputer",
+            state: ServiceDisplay(server.state),
+            detail: serverDetail,
+            isOn: server.state != .off,
+            isBusy: server.state.isBusy,
+            toggle: { on in
+                Task {
+                    if on { await server.start() } else { await server.stop() }
+                }
+            })
+    }
+
+    private var serverDetail: String {
+        let server = research.server
+        switch server.state {
+        case .failed(let message):
+            return message
+        case .starting:
+            return "Starting on 127.0.0.1:\(server.port)…"
+        case .stopping:
+            return "Stopping…"
+        case .ready:
+            var text = "Ready on 127.0.0.1:\(server.port), only this Mac can reach it. "
+            switch server.owner {
+            case .backgroundAPI: text += "This is the Background API from the Server screen."
+            case .app: text += "Started by this screen; it stops when TUFF quits."
+            case .outside: text += "Started outside TUFF."
+            case .none: break
+            }
+            if model.loadState.isReady {
+                text += " The chat model is loaded too and shares memory; unload it from the Model menu if research is slow."
+            }
+            return text
+        case .off:
+            return server.canStart
+                ? "Runs the model on this Mac. Only this Mac can reach it (127.0.0.1:\(server.port))."
+                : "This build cannot start a server. Build everything with `swift build -c release`."
+        }
+    }
+
+    private var sandboxRow: some View {
+        let sandbox = research.sandbox
+        return ResearchServiceRow(
+            title: "Web sandbox",
+            systemImage: "shippingbox.and.arrow.backward",
+            state: ServiceDisplay(sandbox.state),
+            detail: sandboxDetail,
+            isOn: sandbox.state != .off,
+            isBusy: sandbox.state.isBusy,
+            toggle: { on in
+                Task {
+                    if on { await sandbox.start() } else { await sandbox.stop() }
+                }
+            })
+    }
+
+    private var sandboxDetail: String {
+        let sandbox = research.sandbox
+        switch sandbox.state {
+        case .failed(let message):
+            return message
+        case .preparing:
+            return "Building the sandbox image. The first time takes a few minutes."
+        case .starting:
+            return "Starting a fresh Linux VM…"
+        case .stopping:
+            return "Stopping the VM…"
+        case .ready:
+            return "A fresh VM is ready on 127.0.0.1:9000. It has no Mac folders and can only reach public web addresses."
+        case .off:
+            if sandbox.repository == nil {
+                return "Choose your TUFF folder so the app can find the web sandbox."
+            }
+            return "A fresh Linux VM in Apple container fetches pages. It cannot see your files."
+        }
+    }
+
+    private func chooseRepository() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose the TUFF folder you built this app from."
+        panel.prompt = "Choose"
+        if panel.runModal() == .OK, let url = panel.url {
+            research.sandbox.chooseRepository(url)
+        }
+    }
+}
+
+private struct ServiceDisplay: Equatable {
+    let label: String
+    let color: Color
+
+    init(_ state: ResearchModelServerController.State) {
+        switch state {
+        case .off: self.init("Off", .secondary)
+        case .starting: self.init("Starting", .orange)
+        case .stopping: self.init("Stopping", .orange)
+        case .ready: self.init("Ready", .green)
+        case .failed: self.init("Problem", .red)
+        }
+    }
+
+    init(_ state: ResearchSandboxController.State) {
+        switch state {
+        case .off: self.init("Off", .secondary)
+        case .preparing: self.init("Preparing", .orange)
+        case .starting: self.init("Starting", .orange)
+        case .stopping: self.init("Stopping", .orange)
+        case .ready: self.init("Ready", .green)
+        case .failed: self.init("Problem", .red)
+        }
+    }
+
+    private init(_ label: String, _ color: Color) {
+        self.label = label
+        self.color = color
+    }
+}
+
+private struct ResearchServiceRow: View {
+    let title: String
+    let systemImage: String
+    let state: ServiceDisplay
+    let detail: String
+    let isOn: Bool
+    let isBusy: Bool
+    let toggle: @MainActor @Sendable (Bool) -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: systemImage)
+                .appFont(.title3)
+                .foregroundStyle(.secondary)
+                .frame(width: 28)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 8) {
+                    Text(title).appFont(.headline)
+                    Text(state.label)
+                        .appFont(.caption.weight(.semibold))
+                        .foregroundStyle(state.color)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 1)
+                        .background(state.color.opacity(0.14), in: Capsule())
+                    if isBusy { ProgressView().controlSize(.small) }
+                }
+                Text(detail)
+                    .appFont(.callout)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer()
+            Toggle(title, isOn: Binding(get: { isOn }, set: { toggle($0) }))
+                .toggleStyle(.switch)
+                .labelsHidden()
+                .disabled(isBusy)
+        }
+        .accessibilityElement(children: .contain)
+    }
+}
+
+private struct ResearchSelfTestView: View {
+    let result: ResearchSelfTestResult
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label(result.passed ? "All safety checks passed" : "Some safety checks failed",
+                  systemImage: result.passed ? "checkmark.shield" : "exclamationmark.shield")
+                .appFont(.callout.weight(.semibold))
+                .foregroundStyle(result.passed ? Color.green : Color.red)
+            ForEach(result.checks) { check in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Image(systemName: symbol(for: check.outcome))
+                        .foregroundStyle(color(for: check.outcome))
+                    Text(check.text)
+                        .appFont(.caption)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            if !result.summary.isEmpty {
+                Text(result.summary).appFont(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func symbol(for outcome: ResearchSelfTestCheck.Outcome) -> String {
+        switch outcome {
+        case .passed: "checkmark.circle"
+        case .failed: "xmark.circle"
+        case .warning: "exclamationmark.circle"
+        }
+    }
+
+    private func color(for outcome: ResearchSelfTestCheck.Outcome) -> Color {
+        switch outcome {
+        case .passed: .green
+        case .failed: .red
+        case .warning: .orange
+        }
+    }
+}
+
+// MARK: - Steps
+
+private struct ResearchStepRow: View {
+    let step: ResearchStep
+    @State private var isExpanded = false
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text("\(Int(step.elapsed)) s")
+                .appFont(.caption2.monospacedDigit())
+                .foregroundStyle(.tertiary)
+                .frame(width: 38, alignment: .trailing)
+            Image(systemName: symbol)
+                .foregroundStyle(color)
+                .frame(width: 16)
+            content
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch step.kind {
+        case .turn:
+            Text(step.text).appFont(.callout.weight(.semibold))
+        case .thinking:
+            DisclosureGroup(isExpanded: $isExpanded) {
+                Text(step.text)
+                    .appFont(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 4)
+            } label: {
+                Text("Thinking").appFont(.callout).foregroundStyle(.secondary)
+            }
+        case .searching:
+            Text("Searching \(Text(step.text).font(.callout.monospaced()))")
+                .appFont(.callout)
+                .textSelection(.enabled)
+        case .reading:
+            Text("Reading \(Text(step.text).font(.callout.monospaced()))")
+                .appFont(.callout)
+                .lineLimit(2)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+        case .failed:
+            Text(step.text)
+                .appFont(.callout)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+        }
+    }
+
+    private var symbol: String {
+        switch step.kind {
+        case .turn: "circle.fill"
+        case .thinking: "ellipsis.bubble"
+        case .searching: "magnifyingglass"
+        case .reading: "doc.text"
+        case .failed: "exclamationmark.triangle"
+        }
+    }
+
+    private var color: Color {
+        switch step.kind {
+        case .turn: TUFFMacTheme.accentColor
+        case .thinking: .secondary
+        case .searching: TUFFMacTheme.accentColor
+        case .reading: .green
+        case .failed: .orange
+        }
+    }
+}
+
+// MARK: - Report
+
+private struct ResearchReportView: View {
+    let report: SavedResearchReport
+    let markdownURL: URL
+    let saveError: String?
+    let proxy: ScrollViewProxy
+    @State private var highlighted: Int?
+    @State private var sourceToOpen: SavedResearchReport.Source?
+    @State private var note: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(report.question)
+                .appFont(.title3.weight(.semibold))
+                .textSelection(.enabled)
+            Text(ResearchAnswerFormatter.attributed(
+                report.answer, sourceNumbers: Set(report.sources.map(\.number))))
+                .appFont(.body)
+                .lineSpacing(3)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+                // Every link in the answer comes through here. Citation
+                // numbers scroll to their source; nothing else opens.
+                .environment(\.openURL, OpenURLAction { url in
+                    if let number = ResearchAnswerFormatter.sourceNumber(from: url) {
+                        show(number)
+                    }
+                    return .handled
+                })
+            if !report.unknownCitations.isEmpty {
+                Text("The answer cites \(report.unknownCitations.map { "[\($0)]" }.joined(separator: ", ")), which is not a page the research read.")
+                    .appFont(.caption)
+                    .foregroundStyle(.orange)
+            }
+            if report.budgetExhausted {
+                Text("The research ran out of steps, so this answer may be incomplete.")
+                    .appFont(.caption)
+                    .foregroundStyle(.orange)
+            }
+            if !report.sources.isEmpty {
+                Text("Sources").appFont(.headline)
+                VStack(alignment: .leading, spacing: 6) {
+                    ForEach(report.sources) { source in
+                        sourceRow(source).id("research-source-\(source.number)")
+                    }
+                }
+            }
+            Label("Written from web pages by a local model (\(report.model)). Check the sources before you rely on it.",
+                  systemImage: "info.circle")
+                .appFont(.caption)
+                .foregroundStyle(.secondary)
+            HStack(spacing: 10) {
+                Button("Copy as Markdown") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(report.markdown, forType: .string)
+                    note = "Copied."
+                }
+                Button("Save As…", action: saveAs)
+                Button("Show in Finder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([markdownURL])
+                }
+                .disabled(!FileManager.default.fileExists(atPath: markdownURL.path))
+                if let message = saveError ?? note {
+                    Text(message)
+                        .appFont(.caption)
+                        .foregroundStyle(saveError == nil ? Color.secondary : Color.red)
+                }
+            }
+        }
+        .confirmationDialog(
+            "Open this source in your browser?",
+            isPresented: Binding(
+                get: { sourceToOpen != nil },
+                set: { if !$0 { sourceToOpen = nil } }),
+            presenting: sourceToOpen
+        ) { source in
+            Button("Open in Browser") {
+                if let url = source.webURL { NSWorkspace.shared.open(url) }
+                sourceToOpen = nil
+            }
+            Button("Cancel", role: .cancel) { sourceToOpen = nil }
+        } message: { source in
+            Text(source.webURL?.absoluteString ?? source.url)
+        }
+        .onChange(of: report.id) { note = nil }
+    }
+
+    private func sourceRow(_ source: SavedResearchReport.Source) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text("\(source.number)")
+                .appFont(.callout.monospacedDigit().weight(.semibold))
+                .foregroundStyle(TUFFMacTheme.accentColor)
+                .frame(minWidth: 18, alignment: .trailing)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(source.title.isEmpty ? source.host : source.title)
+                    .appFont(.callout.weight(.medium))
+                    .textSelection(.enabled)
+                Text(source.host)
+                    .appFont(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 8)
+            Button("Open…") { sourceToOpen = source }
+                .disabled(source.webURL == nil)
+        }
+        .padding(8)
+        .background(
+            highlighted == source.number
+                ? TUFFMacTheme.accentColor.opacity(0.14) : Color.secondary.opacity(0.06),
+            in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func show(_ number: Int) {
+        withAnimation(.smooth(duration: 0.25)) {
+            proxy.scrollTo("research-source-\(number)", anchor: .center)
+            highlighted = number
+        }
+        Task {
+            try? await Task.sleep(for: .seconds(1.5))
+            if highlighted == number { highlighted = nil }
+        }
+    }
+
+    private func saveAs() {
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "Research report.md"
+        panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try Data(report.markdown.utf8).write(to: url, options: .atomic)
+            note = "Saved."
+        } catch {
+            note = "Could not save: \(error.localizedDescription)"
+        }
+    }
+}
