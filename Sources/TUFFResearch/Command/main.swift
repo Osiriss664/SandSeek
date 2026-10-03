@@ -56,6 +56,8 @@ let agent = ResearchAgent(
         case .reading(let url): writeProgress("    reading: \(ResearchText.url(url))")
         case .toolFailed(let message): writeProgress("    tool error: \(message)")
         case .retryingEmptyAnswer: writeProgress("    no answer yet; asking for a short one")
+        case .askingToSearchFirst: writeProgress("    answered without searching; asking it to search")
+        case .askingToReadPages: writeProgress("    answered from search previews; asking it to read pages")
         }
     })
 

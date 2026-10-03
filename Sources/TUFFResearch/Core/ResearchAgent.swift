@@ -114,6 +114,10 @@ public enum ResearchEvent: Equatable, Sendable {
     case toolFailed(String)
     /// A turn ended with no answer, and the model is asked once more.
     case retryingEmptyAnswer
+    /// The model answered without searching, and is asked once to search.
+    case askingToSearchFirst
+    /// The model answered from search previews, and is asked once to open pages.
+    case askingToReadPages
 }
 
 /// The research loop. The model can only search the web and read pages, and
@@ -223,9 +227,11 @@ public struct ResearchAgent: Sendable {
                     if !calledTools, !askedToSearch {
                         askedToSearch = true
                         request = Self.searchFirstRequest
+                        onEvent(.askingToSearchFirst)
                     } else if state.searched, !askedToRead {
                         askedToRead = true
                         request = Self.readPagesRequest
+                        onEvent(.askingToReadPages)
                     }
                 }
                 if let request {
