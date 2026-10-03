@@ -319,6 +319,9 @@ import TUFFAppServer
             good.replacingOccurrences(of: reject, with: "\t\tip6 daddr fe80::/10 accept\n" + reject),
             good.replacingOccurrences(of: reject, with: "\t\tqueue num 1\n" + reject),
             good.replacingOccurrences(of: "ip daddr @private4 reject", with: "ip daddr != @private4 reject"),
+            // A refusal of only some traffic to the private ranges.
+            good.replacingOccurrences(of: "ip daddr @private4 meta l4proto tcp reject with tcp reset", with: "ip daddr @private4 tcp dport 22 reject")
+                .replacingOccurrences(of: "ip daddr @private4 reject", with: "ip saddr @private4 reject"),
             "",
         ]
         for listing in problems {

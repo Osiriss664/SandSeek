@@ -324,8 +324,13 @@ public final class ResearchSandboxController {
                 return "has a rule TUFF does not expect (\(String(line.prefix(80))))"
             }
             if isRefusal(line) {
-                if line.contains("@private4") { refusesPrivate4 = true }
-                if line.contains("@refused6") { refusesRefused6 = true }
+                // Only a refusal of every destination in the set counts.
+                if line.wholeMatch(of: #/(?:meta nfproto ipv4 )?ip daddr @private4 (?:meta l4proto tcp |ip protocol tcp )?reject(?: with [a-z0-9 -]+)?/#) != nil {
+                    refusesPrivate4 = true
+                }
+                if line.wholeMatch(of: #/(?:meta nfproto ipv6 )?ip6 daddr @refused6 (?:meta l4proto tcp |ip6 nexthdr tcp )?reject(?: with [a-z0-9 -]+)?/#) != nil {
+                    refusesRefused6 = true
+                }
                 continue
             }
             if line == "oifname \"lo\" accept" || line == "ct state established,related accept" {
