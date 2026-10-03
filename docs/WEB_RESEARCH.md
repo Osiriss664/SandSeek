@@ -68,11 +68,11 @@ sandbox mounts none.
 
 | Command | What `container` does |
 | --- | --- |
-| `build` | Builds the image `tuff-web-research` from `Sandbox/web-research/Containerfile`: a pinned Python base image, the firewall rules, and the sandbox server with hash-pinned packages. |
+| `build` | Builds the image `tuff-web-research` from `Sandbox/web-research/Containerfile`: a pinned Python base image, the firewall rules, and the sandbox server with hash-pinned packages. `container` runs the build in its own builder VM, which the script stops again afterwards unless it was already running. |
 | `start` | Starts a fresh VM from that image, named `tuff-web-research`, and deletes any older one. Its options: a read-only root filesystem with a scratch `/tmp`; 2 CPUs and 1 GB of memory; at most 512 processes; all Linux capabilities dropped except the four the start-up needs to load the firewall and switch to an unprivileged user; and the sandbox port published on the Mac's 127.0.0.1:9000 only (`TUFF_RESEARCH_SANDBOX_PORT` changes it), so only programs on your Mac can call it. `--rm` deletes the VM when it stops. |
 | `selftest` | Runs checks inside the running VM with `container exec`: that the firewall is loaded, that the server has no privileges, and that the VM cannot reach the Mac or your local network. See [Testing the boundaries](#testing-the-boundaries). |
 
-`stop` stops and deletes the VM. Nothing the VM downloaded survives that,
+`stop` stops and deletes the VM, and reports an error if it is still listed afterwards. Nothing the VM downloaded survives that,
 because it only ever wrote to its own `/tmp`.
 
 ## Security model

@@ -42,7 +42,18 @@ health() {
 case "${1:-}" in
   build)
     require_container
-    container build -t "$image" "$context"
+    # `container build` starts a builder VM (2 CPUs, 2 GB) that keeps running
+    # afterwards. Stop it again unless it was already running before.
+    builder_was_running=""
+    if [[ -n "$(container builder status --quiet 2>/dev/null)" ]]; then
+      builder_was_running=1
+    fi
+    build_status=0
+    container build -t "$image" "$context" || build_status=$?
+    if [[ -z "$builder_was_running" ]]; then
+      container builder stop >/dev/null 2>&1 || true
+    fi
+    exit "$build_status"
     ;;
   start)
     require_container
@@ -79,6 +90,10 @@ case "${1:-}" in
     require_container
     container stop "$name" >/dev/null 2>&1 || true
     container delete "$name" >/dev/null 2>&1 || true
+    if container list --all --quiet 2>/dev/null | grep -qx "$name"; then
+      echo "could not remove the sandbox; see: container list --all" >&2
+      exit 1
+    fi
     echo "web research sandbox stopped"
     ;;
   status)
