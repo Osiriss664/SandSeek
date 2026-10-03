@@ -5,8 +5,8 @@
 # The VM may reach public internet addresses only: not the Mac (the VM's
 # gateway), the local network, carrier-grade NAT, link-local or cloud
 # metadata addresses. Replies on connections the Mac opened to the published
-# port are allowed, and DNS goes to the public resolvers research_sandbox.sh
-# sets with --dns.
+# port are allowed. entrypoint.sh adds DNS (port 53 only) to the VM's
+# configured nameservers.
 
 table inet tuff_sandbox
 delete table inet tuff_sandbox

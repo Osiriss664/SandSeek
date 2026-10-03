@@ -37,13 +37,20 @@ public struct ResearchReport: Equatable, Sendable {
     /// True when the step budget ran out and the answer was forced.
     public let budgetExhausted: Bool
 
+    /// The report as Markdown that is safe to print and to open in a viewer:
+    /// no control or invisible characters, no images, no loading HTML tags.
     public var markdown: String {
-        var text = "# \(question)\n\n\(answer.trimmingCharacters(in: .whitespacesAndNewlines))\n"
+        let answer = ResearchText.inertMarkdown(
+            self.answer.trimmingCharacters(in: .whitespacesAndNewlines))
+        var text = "# \(question)\n\n\(answer)\n"
         if !sources.isEmpty {
             text += "\n## Sources\n\n"
             for source in sources {
-                let title = source.title.isEmpty ? source.url : source.title
-                text += "\(source.number). [\(title)](\(source.url))\n"
+                let url = ResearchText.markdownURL(source.url)
+                let title = source.title.isEmpty ? url : ResearchText.inertMarkdown(
+                    source.title.replacingOccurrences(of: "[", with: "(")
+                        .replacingOccurrences(of: "]", with: ")"))
+                text += "\(source.number). [\(title)](\(url))\n"
             }
         }
         let unknown = unknownCitations
@@ -54,7 +61,7 @@ public struct ResearchReport: Equatable, Sendable {
         if budgetExhausted {
             text += "\n_The research step budget ran out; this answer may be incomplete._\n"
         }
-        return text
+        return ResearchText.terminalSafe(text)
     }
 
     /// Citation numbers in the answer that match no source, such as a model

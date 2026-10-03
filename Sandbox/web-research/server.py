@@ -35,6 +35,7 @@ import html
 import http.client
 import ipaddress
 import json
+import multiprocessing
 import os
 import re
 import socket
@@ -64,6 +65,11 @@ FETCH_TIMEOUT = float(os.environ.get("FETCH_TIMEOUT", "15"))
 # The whole request, so a server that drips one byte at a time cannot hold a
 # fetch open; FETCH_TIMEOUT alone only limits each wait.
 FETCH_DEADLINE = float(os.environ.get("FETCH_DEADLINE", "45"))
+# Extraction runs in a separate process with its own limit, because a
+# hostile page can keep the extractor busy for a long time and Python threads
+# cannot be stopped. Only the first MAX_EXTRACT_CHARS of a page are read.
+EXTRACT_TIMEOUT = float(os.environ.get("EXTRACT_TIMEOUT", "15"))
+MAX_EXTRACT_CHARS = 2_000_000
 MAX_DOWNLOAD_BYTES = int(os.environ.get("MAX_DOWNLOAD_BYTES", str(5 * 1024 * 1024)))
 MAX_REDIRECTS = 5
 MAX_REQUEST_BYTES = 64 * 1024
@@ -298,14 +304,34 @@ def charset_of(content_type: str) -> str:
     return "utf-8"
 
 
+META_CHARSET = re.compile(rb"""<meta[^>]{0,200}?charset\s*=\s*["']?([\w.:-]+)""", re.I)
+
+
+def page_charset(content_type: str, body: bytes) -> str:
+    """The HTTP header's charset, else the page's own <meta charset>, else UTF-8."""
+    if "charset=" in content_type.lower():
+        return charset_of(content_type)
+    match = META_CHARSET.search(body[:4096])
+    if match:
+        return charset_of("charset=" + match.group(1).decode("ascii", "replace"))
+    return "utf-8"
+
+
 # C0 and C1 controls other than tab and newline, and the Unicode bidi
-# overrides. A page title holding ESC sequences could otherwise rewrite the
-# terminal the report is printed in.
-CONTROL_CHARACTERS = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
+# overrides: a page title holding ESC sequences could otherwise rewrite the
+# terminal the report is printed in. Also invisible characters: the soft
+# hyphen, zero-width characters, the byte order mark and the Unicode tag
+# block, which can spell out instructions the model reads but a person
+# reviewing the text cannot see.
+CONTROL_CHARACTERS = re.compile(
+    "[\x00-\x08\x0b-\x1f\x7f-\x9f\xad\u200b-\u200f\u202a-\u202e\u2060-\u2069"
+    "\ufeff\U000e0000-\U000e007f]")
 
 
 def clean_text(text: str) -> str:
-    return CONTROL_CHARACTERS.sub("", text.replace("\r\n", "\n").replace("\r", "\n"))
+    for separator in ("\r\n", "\r", "\u2028", "\u2029"):
+        text = text.replace(separator, "\n")
+    return CONTROL_CHARACTERS.sub("", text)
 
 
 # --- Extraction -------------------------------------------------------------
@@ -369,10 +395,52 @@ def extract_text(markup: str, url: str) -> str:
             favor_recall=True, deduplicate=True)
         if text and text.strip():
             return clean_text(text).strip()
+    return fallback_text(markup)
+
+
+def fallback_text(markup: str) -> str:
     parser = _FallbackText()
     parser.feed(markup)
     parser.close()
     return clean_text(parser.text())
+
+
+def _extract_in_child(sender, extractor, markup: str, url: str) -> None:
+    try:
+        sender.send(extractor(markup, url))
+    except Exception:
+        sender.send(None)  # The parent falls back to the simple parser.
+    finally:
+        sender.close()
+
+
+def extract_text_bounded(markup: str, url: str, timeout: float | None = None,
+                         extractor: Callable[[str, str], str] = extract_text) -> str:
+    """Runs `extractor` in a child process and stops it after `timeout`
+    seconds. A page the extractor cannot finish in time, or fails on, is read
+    with the simple fallback parser instead, which is linear."""
+    markup = markup[:MAX_EXTRACT_CHARS]
+    context = multiprocessing.get_context("forkserver")
+    receiver, sender = context.Pipe(duplex=False)
+    child = context.Process(target=_extract_in_child, args=(sender, extractor, markup, url),
+                            daemon=True)
+    child.start()
+    sender.close()
+    text = None
+    try:
+        if receiver.poll(EXTRACT_TIMEOUT if timeout is None else timeout):
+            text = receiver.recv()
+    except (EOFError, OSError):
+        pass
+    finally:
+        receiver.close()
+        if child.is_alive():
+            child.kill()
+        child.join(5)
+    if isinstance(text, str):
+        return text
+    sys.stderr.write(f"extraction of {url} timed out or failed; used the fallback parser\n")
+    return fallback_text(markup)
 
 
 # --- Tools ------------------------------------------------------------------
@@ -431,11 +499,12 @@ class WebTools:
         if not content_type.startswith(TEXT_TYPES):
             kind = content_type.split(";")[0] or "unknown"
             raise ToolError(f"{final_url} is {kind}, not a web page", "unsupported_content")
-        raw = decode_body(response).decode(charset_of(content_type), errors="replace")
+        body = decode_body(response)
+        raw = body.decode(page_charset(content_type, body), errors="replace")
         if content_type.startswith("text/plain"):
             page = Page(final_url, "", clean_text(raw).strip())
         else:
-            page = Page(final_url, extract_title(raw), extract_text(raw, final_url))
+            page = Page(final_url, extract_title(raw), extract_text_bounded(raw, final_url))
         with self.lock:
             for key in {url, final_url}:
                 self.cache[key] = page

@@ -19,9 +19,10 @@ set -euo pipefail
 image="tuff-web-research:latest"
 name="tuff-web-research"
 port="${TUFF_RESEARCH_SANDBOX_PORT:-9000}"
-# Public resolvers: the firewall refuses the Mac, which is the VM's default
-# DNS server. Space-separated; override with TUFF_RESEARCH_DNS.
-dns_servers="${TUFF_RESEARCH_DNS:-1.1.1.1 9.9.9.9}"
+# DNS servers for the VM, space-separated. Unset, the VM asks the Mac, which
+# uses the same DNS as the rest of the Mac; set it (for example to
+# "1.1.1.1 9.9.9.9") to use public resolvers instead.
+dns_servers="${TUFF_RESEARCH_DNS:-}"
 script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 context="$script_directory/../Sandbox/web-research"
 
@@ -157,7 +158,8 @@ for path in glob.glob("/proc/[0-9]*/cmdline"):
 
     # These run as the server's user, as code that took the server over would.
     echo "Direct connections from inside the VM, which must fail:"
-    for target in "$gateway:8080" "$gateway:22" "$gateway:5000" "$gateway:53" \
+    # The Mac's DNS port (53) is the one exception, when the VM uses it.
+    for target in "$gateway:8080" "$gateway:22" "$gateway:5000" "$gateway:443" \
                   "192.168.1.1:80" "192.168.0.1:80" "10.0.0.1:80" "169.254.169.254:80"; do
       if container exec --user 10001:10001 "$name" python3 -c "
 import socket, sys

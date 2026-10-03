@@ -7,6 +7,16 @@ if ! nft -f /app/firewall.nft; then
   echo "could not load the sandbox firewall; refusing to start" >&2
   exit 1
 fi
+# The VM's DNS servers. By default that is the Mac, which forwards to the
+# same DNS the rest of the Mac uses; the firewall refuses the Mac, so its
+# address gets an exception for DNS (port 53) only. Public resolvers set
+# with TUFF_RESEARCH_DNS are allowed anyway and need no exception.
+for server in $(awk '$1 == "nameserver" { print $2 }' /etc/resolv.conf); do
+  family="$(python3 -c 'import ipaddress, sys; print("ip6" if ipaddress.ip_address(sys.argv[1]).version == 6 else "ip")' "$server")" \
+    || { echo "unreadable nameserver $server; refusing to start" >&2; exit 1; }
+  nft insert rule inet tuff_sandbox output "$family" daddr "$server" udp dport 53 accept
+  nft insert rule inet tuff_sandbox output "$family" daddr "$server" tcp dport 53 accept
+done
 # A SearXNG instance is the operator's own service and usually sits on a
 # private address, so it gets the one exception: its address and port only.
 if [ -n "${SEARXNG_URL:-}" ]; then

@@ -69,20 +69,29 @@ what it downloads. The design limits what either can reach:
   block early, even by splitting a marker around another copy. The markers
   are advice to the model, not a guarantee; the guarantee is that the model
   has no tool that could do harm.
-- **Web text cannot drive your terminal.** Control characters, such as the
-  escape sequences that can clear the screen or change the window title, are
-  removed from page titles, page text and search results in the sandbox, and
-  again from everything `tuff research` prints or saves.
+- **Web text cannot drive your terminal or hide from you.** Control
+  characters, such as the escape sequences that can clear the screen or change
+  the window title, are removed from page titles, page text and search results
+  in the sandbox, and again from everything `tuff research` prints or saves.
+  So are invisible characters (zero-width characters and the Unicode tag
+  block), which can spell out instructions the model reads but you would not
+  see when checking a page or a log.
+- **Saved reports load nothing when opened.** Markdown images in the answer
+  become plain links, and HTML tags that load something (`<img>`,
+  `<iframe>` and the like) become text, so a page cannot steer the model into
+  a report that contacts a tracker when you open it in a Markdown viewer.
 - **Pages are fetched in a VM.** The sandbox runs in its own Linux VM with a
   read-only root filesystem, 1 GB of memory, a process limit and no Mac
-  folders mounted. `Scripts/research_sandbox.sh start` replaces it with a
+  folders mounted. Pages are turned into text in a separate process that is
+  stopped after 15 seconds, so a page built to slow the extractor down cannot
+  hold the sandbox. `Scripts/research_sandbox.sh start` replaces it with a
   fresh VM each time.
 - **The VM can reach the public internet only.** A firewall inside the VM
   refuses connections to the Mac, the local network (your router, printers,
   NAS), carrier-grade NAT, link-local and cloud metadata addresses, so even
-  code that took over the sandbox could not reach them. DNS goes to public
-  resolvers (1.1.1.1 and 9.9.9.9; set `TUFF_RESEARCH_DNS` to change them),
-  because the VM's default resolver is the Mac. The firewall is loaded before
+  code that took over the sandbox could not reach them. The one exception is
+  DNS (port 53) to the VM's name server, which is the Mac; see
+  [DNS](#dns). The firewall is loaded before
   the server starts, and the sandbox refuses to start without it. The server
   then runs as a non-root user with no Linux capabilities and cannot regain
   any, so it cannot change the firewall.
@@ -122,6 +131,23 @@ What this does not cover:
 - The image's Python packages and base image are pinned by hash and digest,
   but `nftables` comes from Debian's current packages when the image is built.
 
+### DNS
+
+The VM looks up names through the Mac by default, so it uses the same DNS as
+the rest of your Mac: your router's, or a filter such as Pi-hole or a
+company DNS. That works on networks that block outside DNS. The firewall lets
+the VM reach the Mac on the DNS port only.
+
+To keep the VM away from the Mac entirely, use public resolvers instead:
+
+```sh
+TUFF_RESEARCH_DNS="1.1.1.1 9.9.9.9" Scripts/research_sandbox.sh start
+```
+
+Then Cloudflare (1.1.1.1) and Quad9 (9.9.9.9) see which sites the research
+looks up, your own DNS filtering no longer applies to the sandbox, and on a
+network that blocks outside DNS every fetch fails with `dns_error`.
+
 ## Testing the boundaries
 
 ### Unwanted connections
@@ -137,7 +163,7 @@ port), loopback, private ranges, cloud metadata addresses, a name that resolves
 to 127.0.0.1, non-standard ports and non-http schemes. Every request must be
 refused. It checks that the firewall is loaded and that the server runs as
 user 10001 with no capabilities. As that user, it then opens raw connections
-from inside the VM to the Mac (the TUFF port, SSH, AirPlay and DNS), common
+from inside the VM to the Mac (the TUFF port, SSH, AirPlay and HTTPS), common
 router addresses and the cloud metadata address, all of which must fail. It
 checks that the API refuses a foreign `Host` header and a browser-style POST,
 and that a public page still loads.
