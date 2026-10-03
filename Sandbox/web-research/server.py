@@ -98,6 +98,10 @@ TEXT_CHARSETS = {
 }
 
 
+SEARCH_RETRY_CODES = {"fetch_failed", "fetch_timeout"}
+SEARCH_RETRY_DELAY = 1.0
+
+
 class ToolError(Exception):
     """A request the tool refuses or cannot complete, reported to the caller."""
 
@@ -547,7 +551,16 @@ class WebTools:
         if not isinstance(max_results, int) or not 1 <= max_results <= MAX_SEARCH_RESULTS:
             raise ToolError(f"max_results must be between 1 and {MAX_SEARCH_RESULTS}",
                             "invalid_argument")
-        results = self._searxng(query) if self.searxng_url else self._duckduckgo(query)
+        backend = self._searxng if self.searxng_url else self._duckduckgo
+        try:
+            results = backend(query)
+        except ToolError as error:
+            # A dropped connection or a stalled answer is often a one-off on
+            # the search engine's side; try once more before giving up.
+            if error.code not in SEARCH_RETRY_CODES:
+                raise
+            time.sleep(SEARCH_RETRY_DELAY)
+            results = backend(query)
         seen: set[str] = set()
         unique = []
         for result in results:

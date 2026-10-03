@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import unittest
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -339,6 +340,37 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(method, "POST")
         self.assertEqual(body, b"q=bounded+experts")
         self.assertEqual(headers["Content-Type"], "application/x-www-form-urlencoded")
+
+    def test_search_is_retried_once_after_a_dropped_connection(self):
+        class Flaky:
+            def __init__(self, failures, code="fetch_failed"):
+                self.failures, self.code, self.calls = failures, code, 0
+
+            def __call__(self, method, target, headers, body):
+                self.calls += 1
+                if self.calls <= self.failures:
+                    raise ToolError("request to html.duckduckgo.com failed: "
+                                    "[Errno 104] Connection reset by peer", self.code, 502)
+                return page(DDG)
+
+        resolve = resolver({"html.duckduckgo.com": ["52.142.124.215"]})
+        with mock.patch.object(server, "SEARCH_RETRY_DELAY", 0):
+            once = Flaky(1)
+            tools = WebTools(resolver=resolve, transport=once, searxng_url="")
+            self.assertTrue(tools.search("bounded experts", 1)["results"])
+            self.assertEqual(once.calls, 2)
+
+            twice = Flaky(2)
+            tools = WebTools(resolver=resolve, transport=twice, searxng_url="")
+            with self.assertRaises(ToolError):
+                tools.search("bounded experts", 1)
+            self.assertEqual(twice.calls, 2)
+
+            refused = Flaky(1, code="blocked_address")
+            tools = WebTools(resolver=resolve, transport=refused, searxng_url="")
+            with self.assertRaises(ToolError):
+                tools.search("bounded experts", 1)
+            self.assertEqual(refused.calls, 1)
 
     def test_query_bounds(self):
         tools = WebTools(resolver=resolver({}), transport=FakeTransport({}), searxng_url="")

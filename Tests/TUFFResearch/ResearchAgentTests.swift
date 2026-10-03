@@ -216,7 +216,7 @@ struct ResearchAgentTests {
 
         #expect(log.events == [
             .modelTurn(1), .reasoning("I should search first."), .searching("tuff"),
-            .modelTurn(2), .modelTurn(3),
+            .modelTurn(2), .askingToReadPages, .modelTurn(3),
         ])
         let history = messages(services.modelRequests.last!)
         #expect(history.allSatisfy { $0["reasoning_content"] == nil })
@@ -441,8 +441,11 @@ struct ResearchAgentTests {
             FakeServices.calls([("b", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
             FakeServices.answer("Read it [1]."),
         ])
-        let report = try await agent(services).run(question: "q")
+        let log = EventLog()
+        let report = try await agent(services, events: log).run(question: "q")
         #expect(report.answer == "Read it [1].")
+        #expect(log.events.filter { $0 == .askingToSearchFirst }.count == 1)
+        #expect(log.events.filter { $0 == .askingToReadPages }.count == 1)
         #expect(report.sources.count == 1)
         let nudge = messages(services.modelRequests[1]).suffix(2)
         #expect(nudge.first?["content"] == .string("From memory: the CDU won."))

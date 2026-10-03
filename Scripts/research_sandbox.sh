@@ -43,10 +43,12 @@ case "${1:-}" in
   build)
     require_container
     # `container build` starts a builder VM (2 CPUs, 2 GB) that keeps running
-    # afterwards. Stop it again unless it was already running before.
-    builder_was_running=""
-    if [[ -n "$(container builder status --quiet 2>/dev/null)" ]]; then
-      builder_was_running=1
+    # afterwards. Stop it again unless it was already running before. With
+    # --quiet, `container builder status` prints the builder's ID only while
+    # it runs; if the check itself fails, the builder is left alone.
+    builder_was_running=1
+    if builder="$(container builder status --quiet 2>/dev/null)" && [[ -z "$builder" ]]; then
+      builder_was_running=""
     fi
     build_status=0
     container build -t "$image" "$context" || build_status=$?
@@ -90,8 +92,9 @@ case "${1:-}" in
     require_container
     container stop "$name" >/dev/null 2>&1 || true
     container delete "$name" >/dev/null 2>&1 || true
-    if container list --all --quiet 2>/dev/null | grep -qx "$name"; then
-      echo "could not remove the sandbox; see: container list --all" >&2
+    if ! remaining="$(container list --all --quiet 2>/dev/null)" \
+        || grep -qx "$name" <<<"$remaining"; then
+      echo "could not confirm the sandbox was removed; see: container list --all" >&2
       exit 1
     fi
     echo "web research sandbox stopped"
