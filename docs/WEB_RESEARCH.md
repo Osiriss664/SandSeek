@@ -280,7 +280,8 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
 - A model that answers from memory without searching is asked once to search,
   and one that answers from search previews alone is asked once to open
   pages. If it answers the same way again, that answer is kept, and the report
-  notes any citations that match no page the research read.
+  says that no page was read and notes any citations that match no page the
+  research read.
 - Reasoning shares each turn's token limit with the answer. With reasoning on,
   the limit defaults to 8192 tokens. If a turn still ends without an answer,
   the model is asked once more for a short answer with reasoning off; if that
