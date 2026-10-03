@@ -190,13 +190,15 @@ struct ResearchAgentTests {
             ]),
             "finish_reason": .string("tool_calls"),
         ])])]))
-        let services = FakeServices(modelReplies: [thought, FakeServices.answer("Done.")])
+        let services = FakeServices(modelReplies: [
+            thought, FakeServices.answer("Done."), FakeServices.answer("Done."),
+        ])
         let log = EventLog()
         _ = try await agent(services, events: log).run(question: "What is TUFF?")
 
         #expect(log.events == [
             .modelTurn(1), .reasoning("I should search first."), .searching("tuff"),
-            .modelTurn(2),
+            .modelTurn(2), .modelTurn(3),
         ])
         let history = messages(services.modelRequests.last!)
         #expect(history.allSatisfy { $0["reasoning_content"] == nil })
@@ -331,6 +333,34 @@ struct ResearchAgentTests {
         #expect(body["tool_choice"] == nil)
     }
 
+    @Test func answersFromSnippetsAloneAreSentBackOnce() async throws {
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"apple container"}"#)]),
+            FakeServices.answer("From the snippets [1][3]."),
+            FakeServices.calls([("b", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
+            FakeServices.answer("It runs each container in a VM [1]."),
+        ])
+        let report = try await agent(services).run(question: "q")
+        #expect(report.answer == "It runs each container in a VM [1].")
+        #expect(report.sources.count == 1)
+        let nudge = messages(services.modelRequests[2]).suffix(2)
+        #expect(nudge.first?["content"] == .string("From the snippets [1][3]."))
+        #expect(nudge.last?["content"] == .string(ResearchAgent.readPagesRequest))
+        let search = messages(services.modelRequests[1]).last?["content"]?.stringValue ?? ""
+        #expect(search.contains("- Apple container\n  https://github.com/apple/container"))
+        #expect(!search.contains("1. "))
+
+        // Asked once only: a second snippet answer is accepted, with a note.
+        let stubborn = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"x"}"#)]),
+            FakeServices.answer("Snippets [1]."),
+            FakeServices.answer("Still snippets [1][2]."),
+        ])
+        let accepted = try await agent(stubborn).run(question: "q")
+        #expect(accepted.answer == "Still snippets [1][2].")
+        #expect(accepted.markdown.contains("cites [1], [2], which are not pages the research read."))
+    }
+
     @Test func toolFailuresGoBackToTheModel() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([
@@ -370,10 +400,11 @@ struct ResearchAgentTests {
                 ("b", "web_search", #"{"query":"two"}"#),
             ]),
             FakeServices.answer("ok"),
+            FakeServices.answer("ok"),
         ])
         _ = try await agent(services, options: options).run(question: "q")
         #expect(services.requests.filter { $0.url.path == "/v1/search" }.count == 1)
-        let last = messages(services.modelRequests.last!).last?["content"]?.stringValue
+        let last = messages(services.modelRequests[1]).last?["content"]?.stringValue
         #expect(last == "Skipped: at most 1 tool calls per turn.")
     }
 

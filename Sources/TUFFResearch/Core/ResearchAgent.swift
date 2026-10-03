@@ -56,7 +56,9 @@ public struct ResearchReport: Equatable, Sendable {
         let unknown = unknownCitations
         if !unknown.isEmpty {
             let listed = unknown.map { "[\($0)]" }.joined(separator: ", ")
-            text += "\n_The answer cites \(listed), which is not a page the research read._\n"
+            text += unknown.count == 1
+                ? "\n_The answer cites \(listed), which is not a page the research read._\n"
+                : "\n_The answer cites \(listed), which are not pages the research read._\n"
         }
         if budgetExhausted {
             text += "\n_The research step budget ran out; this answer may be incomplete._\n"
@@ -192,10 +194,25 @@ public struct ResearchAgent: Sendable {
             .object(["role": .string("user"), "content": .string(question)]),
         ]
 
+        var askedToRead = false
         for step in 1...max(1, options.maxSteps) {
             onEvent(.modelTurn(step))
             let turn = try await complete(&state, allowTools: true)
             guard !turn.toolCalls.isEmpty else {
+                // Snippets are short and often stale, and an answer built on
+                // them has no sources to check. Ask once for real pages.
+                if !askedToRead, state.searched, state.sources.isEmpty, step < options.maxSteps {
+                    askedToRead = true
+                    state.messages.append(.object([
+                        "role": .string("assistant"),
+                        "content": .string(turn.content ?? ""),
+                    ]))
+                    state.messages.append(.object([
+                        "role": .string("user"),
+                        "content": .string(Self.readPagesRequest),
+                    ]))
+                    continue
+                }
                 return state.report(answer: turn.content ?? "", turns: step, exhausted: false)
             }
             state.messages.append(assistantMessage(turn))
@@ -224,6 +241,10 @@ public struct ResearchAgent: Sendable {
         return state.report(
             answer: final.content ?? "", turns: options.maxSteps + 1, exhausted: true)
     }
+
+    static let readPagesRequest = "You have only seen search snippets, which are short and can be "
+        + "out of date, and no page has a source number yet. Open the most relevant pages with "
+        + "open_page, then answer from what they say, citing the source numbers open_page gives."
 
     private func assistantMessage(_ turn: ResearchAssistantTurn) -> ResearchJSON {
         var message: [String: ResearchJSON] = [
@@ -289,6 +310,7 @@ public struct ResearchAgent: Sendable {
                 onEvent(.searching(query))
                 let results = try await sandbox.search(
                     query: query, maxResults: options.searchResults)
+                state.searched = state.searched || !results.isEmpty
                 return Self.formatSearch(query: query, results: results)
             case "open_page":
                 guard let url = arguments["url"]?.stringValue?
@@ -334,9 +356,11 @@ public struct ResearchAgent: Sendable {
             return "No results for \"\(sanitized(query))\". Try different search terms."
         }
         var lines = ["Search results for \"\(sanitized(query))\":", untrustedOpen]
-        for (index, result) in results.enumerated() {
-            lines.append("\(index + 1). \(sanitized(result.title))\n   "
-                + "\(sanitized(ResearchText.url(result.url)))\n   " + sanitized(result.snippet))
+        // Bullets, not numbers: only pages read with open_page get source
+        // numbers, and numbered results get cited as if they were sources.
+        for result in results {
+            lines.append("- \(sanitized(result.title))\n  "
+                + "\(sanitized(ResearchText.url(result.url)))\n  " + sanitized(result.snippet))
         }
         lines.append(untrustedClose)
         lines.append("Open the most promising pages with open_page before answering.")
@@ -368,6 +392,8 @@ public struct ResearchAgent: Sendable {
         let question: String
         var messages: [ResearchJSON] = []
         var sources: [ResearchSource] = []
+        /// Whether a search returned results, so the model had pages to open.
+        var searched = false
 
         init(question: String) {
             self.question = question
