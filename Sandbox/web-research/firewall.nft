@@ -2,7 +2,7 @@
 # before the server drops its privileges. server.py already refuses these
 # addresses; this table holds even if code in the VM were taken over.
 #
-# The VM may reach public internet addresses only: not the Mac (the VM's
+# The VM may reach public internet addresses, not the Mac (the VM's
 # gateway), the local network, carrier-grade NAT, link-local or cloud
 # metadata addresses. Replies on connections the Mac opened to the published
 # port are allowed. entrypoint.sh adds DNS (port 53 only) to the VM's
@@ -33,10 +33,15 @@ table inet tuff_sandbox {
         type filter hook output priority filter; policy drop;
         oifname "lo" accept
         ct state established,related accept
+        # TCP gets a reset, which fails a connection at once; the kernel
+        # rate-limits the ICMP errors other refusals send.
+        meta nfproto ipv4 ip daddr @private4 meta l4proto tcp reject with tcp reset
         meta nfproto ipv4 ip daddr @private4 reject
         meta nfproto ipv4 accept
+        meta nfproto ipv6 ip6 daddr @refused6 meta l4proto tcp reject with tcp reset
         meta nfproto ipv6 ip6 daddr @refused6 reject
         meta nfproto ipv6 ip6 daddr 2000::/3 accept
+        meta l4proto tcp reject with tcp reset
         reject
     }
 }

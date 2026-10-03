@@ -77,16 +77,18 @@ what it downloads. The design limits what either can reach:
   block), which can spell out instructions the model reads but you would not
   see when checking a page or a log.
 - **Saved reports load nothing when opened.** Markdown images in the answer
-  become plain links, and HTML tags that load something (`<img>`,
-  `<iframe>` and the like) become text, so a page cannot steer the model into
-  a report that contacts a tracker when you open it in a Markdown viewer.
+  become plain links, every `<` is escaped so no HTML is rendered, and links
+  to anything but `http` and `https` (such as `javascript:` or `file:`) are
+  reduced to their text. A page cannot steer the model into a report that
+  contacts a tracker or runs something when you open it in a Markdown viewer.
 - **Pages are fetched in a VM.** The sandbox runs in its own Linux VM with a
   read-only root filesystem, 1 GB of memory, a process limit and no Mac
   folders mounted. Pages are turned into text in a separate process that is
   stopped after 15 seconds, so a page built to slow the extractor down cannot
   hold the sandbox. `Scripts/research_sandbox.sh start` replaces it with a
   fresh VM each time.
-- **The VM can reach the public internet only.** A firewall inside the VM
+- **The VM can reach the public internet, plus DNS on the Mac.** A firewall
+  inside the VM
   refuses connections to the Mac, the local network (your router, printers,
   NAS), carrier-grade NAT, link-local and cloud metadata addresses, so even
   code that took over the sandbox could not reach them. The one exception is
@@ -164,7 +166,9 @@ to 127.0.0.1, non-standard ports and non-http schemes. Every request must be
 refused. It checks that the firewall is loaded and that the server runs as
 user 10001 with no capabilities. As that user, it then opens raw connections
 from inside the VM to the Mac (the TUFF port, SSH, AirPlay and HTTPS), common
-router addresses and the cloud metadata address, all of which must fail. It
+router addresses and the cloud metadata address, all of which must fail, and
+tries every TCP port on the Mac: only DNS (53) may answer, and only when the
+VM uses the Mac for DNS. It
 checks that the API refuses a foreign `Host` header and a browser-style POST,
 and that a public page still loads.
 

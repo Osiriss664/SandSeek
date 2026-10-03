@@ -254,19 +254,39 @@ struct ResearchAgentTests {
         let report = ResearchReport(
             question: "q",
             answer: "See ![chart](https://tracker.example/?q=secret) and "
-                + "<img src=\"https://tracker.example/a\"> or < IMG src=x> but 2 < 3 [1].",
+                + "<img src=\"https://tracker.example/a\"> or "
+                + "<div style=\"background:url(https://tracker.example/c)\">x</div> "
+                + "<javascript:alert(1)> [run](javascript:alert(1)) [f](<file:///etc/passwd>) "
+                + "[ok](https://example.com/ok) but 2 < 3 [1].\n[r]: file:///etc/passwd",
             sources: [ResearchSource(
                 number: 1, title: "A ![t](https://t.example/x) [title]",
                 url: "https://example.com/a)![i](https://tracker.example/b")],
             modelTurns: 1, budgetExhausted: false)
         let markdown = report.markdown
         #expect(!markdown.contains("!["))
-        #expect(!markdown.lowercased().contains("<img"))
-        #expect(!markdown.lowercased().contains("< img"))
+        // Every < is escaped, so no HTML tag or autolink is rendered.
+        let scalars = Array(markdown.unicodeScalars)
+        for (index, scalar) in scalars.enumerated() where scalar == "<" {
+            #expect(index > 0 && scalars[index - 1] == "\\")
+        }
         #expect(markdown.contains("[chart](https://tracker.example/?q=secret)"))
-        #expect(markdown.contains("2 < 3 [1]."))
+        #expect(markdown.contains("[ok](https://example.com/ok)"))
+        #expect(markdown.contains("run (link removed)"))
+        #expect(markdown.contains("f (link removed)"))
+        #expect(markdown.contains("\\[r\\]: (link removed)"))
+        #expect(!markdown.contains("](javascript:"))
+        #expect(!markdown.contains("file:///"))
+        #expect(markdown.contains("2 \\< 3 [1]."))
         #expect(markdown.contains(
             "1. [A !(t)(https://t.example/x) (title)](https://example.com/a%29!%5Bi%5D%28https://tracker.example/b)"))
+    }
+
+    @Test func remainingInvisibleCharactersAreRemoved() {
+        let hidden = String(String.UnicodeScalarView((0..<5).map { Unicode.Scalar(0xE0100 + $0)! }))
+        let text = "a\(hidden)\u{34F}\u{61C}\u{115F}\u{1160}\u{17B4}\u{17B5}\u{180B}\u{180F}"
+            + "\u{2800}\u{3164}\u{FFA0}b"
+        #expect(ResearchText.terminalSafe(text) == "ab")
+        #expect(ResearchText.terminalSafe("ok \u{2764}\u{FE0F}") == "ok \u{2764}\u{FE0F}")
     }
 
     @Test func characterRangeCountsLikeTheSandbox() {

@@ -21,7 +21,8 @@ of reach.
 
 Those checks live in this process, so they would not bind code that took it
 over. firewall.nft, loaded by entrypoint.sh before this server starts, applies
-the same rule to the whole VM, and the server then drops root and every Linux
+the same rule to the whole VM, with one exception for DNS to the VM's name
+server, and the server then drops root and every Linux
 capability so it cannot change the firewall.
 """
 
@@ -320,12 +321,14 @@ def page_charset(content_type: str, body: bytes) -> str:
 # C0 and C1 controls other than tab and newline, and the Unicode bidi
 # overrides: a page title holding ESC sequences could otherwise rewrite the
 # terminal the report is printed in. Also invisible characters: the soft
-# hyphen, zero-width characters, the byte order mark and the Unicode tag
-# block, which can spell out instructions the model reads but a person
-# reviewing the text cannot see.
+# hyphen, zero-width characters, fillers, the byte order mark, the Unicode
+# tag block and the supplementary variation selectors, which can spell out
+# instructions the model reads but a person reviewing the text cannot see.
+# The emoji variation selector U+FE0F is ordinary text and stays.
 CONTROL_CHARACTERS = re.compile(
-    "[\x00-\x08\x0b-\x1f\x7f-\x9f\xad\u200b-\u200f\u202a-\u202e\u2060-\u2069"
-    "\ufeff\U000e0000-\U000e007f]")
+    "[\x00-\x08\x0b-\x1f\x7f-\x9f\xad\u034f\u061c\u115f\u1160\u17b4\u17b5"
+    "\u180b-\u180f\u200b-\u200f\u202a-\u202e\u2060-\u2069\u2800\u3164\ufeff\uffa0"
+    "\U000e0000-\U000e007f\U000e0100-\U000e01ef]")
 
 
 def clean_text(text: str) -> str:
@@ -406,10 +409,14 @@ def fallback_text(markup: str) -> str:
 
 
 def _extract_in_child(sender, extractor, markup: str, url: str) -> None:
+    # Raw UTF-8 bytes, never a pickle: the child parses hostile pages, and
+    # unpickling what it sends would let an exploited parser run code in the
+    # server. An empty message means "failed" and the parent falls back.
     try:
-        sender.send(extractor(markup, url))
+        text = extractor(markup, url)
+        sender.send_bytes(b"\x01" + text.encode("utf-8", "replace") if isinstance(text, str) else b"")
     except Exception:
-        sender.send(None)  # The parent falls back to the simple parser.
+        sender.send_bytes(b"")
     finally:
         sender.close()
 
@@ -429,7 +436,10 @@ def extract_text_bounded(markup: str, url: str, timeout: float | None = None,
     text = None
     try:
         if receiver.poll(EXTRACT_TIMEOUT if timeout is None else timeout):
-            text = receiver.recv()
+            # recv_bytes never unpickles; maxlength bounds what is read.
+            message = receiver.recv_bytes(4 * MAX_EXTRACT_CHARS + 1)
+            if message.startswith(b"\x01"):
+                text = clean_text(message[1:].decode("utf-8", "replace"))
     except (EOFError, OSError):
         pass
     finally:
