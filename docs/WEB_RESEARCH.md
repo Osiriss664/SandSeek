@@ -4,6 +4,8 @@
 a local TUFF model. The model runs on your Mac as usual. Everything that
 touches the web runs in a separate Linux VM managed by Apple's
 [`container`](https://github.com/apple/container) tool.
+For a short overview of the design and how it was checked, see
+[WEB_RESEARCH_OVERVIEW.md](WEB_RESEARCH_OVERVIEW.md).
 
 ```sh
 Scripts/research_sandbox.sh build      # once, and after updating TUFF
