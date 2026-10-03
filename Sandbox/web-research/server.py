@@ -1,0 +1,547 @@
+#!/usr/bin/env python3
+"""Web tool server for `tuff research`.
+
+This process is the only part of web research that touches the internet. It
+runs inside an Apple `container` Linux VM and is published to the Mac's
+loopback address, so the host-side research loop calls in and nothing in the
+VM can call out to the host. The model never sees raw HTML: pages come back
+as extracted text in bounded slices.
+
+Endpoints (JSON in, JSON out):
+  GET  /health
+  POST /v1/search  {"query": str, "max_results": int?}
+  POST /v1/fetch   {"url": str, "offset": int?, "max_chars": int?}
+
+Fetches refuse anything but http(s) on ports 80 and 443, and refuse every
+address that is not globally routable. The resolved address is the one
+connected to, so a DNS answer cannot change between the check and the
+connection. Redirects are followed by hand and checked the same way. That keeps
+the Mac (the VM's gateway), the local network and cloud metadata addresses out
+of reach.
+"""
+
+from __future__ import annotations
+
+import gzip
+import html
+import http.client
+import ipaddress
+import json
+import os
+import re
+import socket
+import ssl
+import sys
+import threading
+import urllib.parse
+import zlib
+from collections import OrderedDict
+from dataclasses import dataclass, field
+from html.parser import HTMLParser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Callable
+
+try:
+    import trafilatura
+except ImportError:  # The extractor is optional so tests can run without it.
+    trafilatura = None
+
+PORT = int(os.environ.get("PORT", "9000"))
+SEARXNG_URL = os.environ.get("SEARXNG_URL", "").rstrip("/")
+USER_AGENT = os.environ.get(
+    "USER_AGENT",
+    "Mozilla/5.0 (compatible; TUFF-web-research/1.0; +https://github.com/rexmhall09/TUFF)")
+FETCH_TIMEOUT = float(os.environ.get("FETCH_TIMEOUT", "15"))
+MAX_DOWNLOAD_BYTES = int(os.environ.get("MAX_DOWNLOAD_BYTES", str(5 * 1024 * 1024)))
+MAX_REDIRECTS = 5
+MAX_REQUEST_BYTES = 64 * 1024
+DEFAULT_SLICE_CHARS = 6000
+MAX_SLICE_CHARS = 20000
+MAX_SEARCH_RESULTS = 10
+PAGE_CACHE_SIZE = 32
+ALLOWED_PORTS = {"http": 80, "https": 443}
+TEXT_TYPES = ("text/html", "application/xhtml+xml", "text/plain")
+LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
+
+
+class ToolError(Exception):
+    """A request the tool refuses or cannot complete, reported to the caller."""
+
+    def __init__(self, message: str, code: str, status: int = 422):
+        super().__init__(message)
+        self.message = message
+        self.code = code
+        self.status = status
+
+
+# --- Address policy ---------------------------------------------------------
+
+def is_public_address(address: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return ip.is_global and not ip.is_multicast
+
+
+def system_resolver(host: str, port: int) -> list[str]:
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as error:
+        raise ToolError(f"could not resolve {host}: {error.strerror}", "dns_error", 502)
+    return [info[4][0] for info in infos]
+
+
+@dataclass(frozen=True)
+class Target:
+    scheme: str
+    host: str
+    port: int
+    path: str
+    address: str
+
+    @property
+    def url(self) -> str:
+        default = ALLOWED_PORTS[self.scheme]
+        netloc = self.host if self.port == default else f"{self.host}:{self.port}"
+        return f"{self.scheme}://{netloc}{self.path}"
+
+
+def check_url(url: str, resolver: Callable[[str, int], list[str]]) -> Target:
+    """Parses `url` and pins it to one public address, or refuses it."""
+    if not isinstance(url, str) or len(url) > 4096:
+        raise ToolError("url must be a string of at most 4096 characters", "invalid_url")
+    parts = urllib.parse.urlsplit(url.strip())
+    scheme = parts.scheme.lower()
+    if scheme not in ALLOWED_PORTS:
+        raise ToolError("only http and https URLs can be fetched", "invalid_url")
+    if parts.username or parts.password:
+        raise ToolError("URLs with credentials are refused", "invalid_url")
+    host = (parts.hostname or "").rstrip(".").lower()
+    if not host:
+        raise ToolError("URL has no host", "invalid_url")
+    try:
+        port = parts.port or ALLOWED_PORTS[scheme]
+    except ValueError:
+        raise ToolError("URL has an invalid port", "invalid_url")
+    if port != ALLOWED_PORTS[scheme]:
+        raise ToolError(f"only port {ALLOWED_PORTS[scheme]} is allowed for {scheme}", "blocked_port")
+    addresses = resolver(host, port)
+    if not addresses:
+        raise ToolError(f"could not resolve {host}", "dns_error", 502)
+    # Every answer must be public: picking the one public answer out of a
+    # mixed set would still let a rebinding name aim at the host next time.
+    blocked = [a for a in addresses if not is_public_address(a)]
+    if blocked:
+        raise ToolError(f"{host} resolves to a non-public address", "blocked_address", 403)
+    path = parts.path or "/"
+    if parts.query:
+        path += "?" + parts.query
+    return Target(scheme, host, port, path, addresses[0])
+
+
+# --- Transport --------------------------------------------------------------
+
+@dataclass
+class Response:
+    status: int
+    headers: dict[str, str]
+    body: bytes
+    truncated: bool = False
+
+
+Transport = Callable[[str, Target, dict[str, str], bytes | None], Response]
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, target: Target, timeout: float):
+        super().__init__(target.host, target.port, timeout=timeout)
+        self._address = target.address
+
+    def connect(self):
+        self.sock = socket.create_connection((self._address, self.port), self.timeout)
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, target: Target, timeout: float):
+        super().__init__(target.host, target.port, timeout=timeout,
+                         context=ssl.create_default_context())
+        self._address = target.address
+
+    def connect(self):
+        sock = socket.create_connection((self._address, self.port), self.timeout)
+        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+
+
+def pinned_transport(method: str, target: Target, headers: dict[str, str],
+                     body: bytes | None) -> Response:
+    cls = _PinnedHTTPSConnection if target.scheme == "https" else _PinnedHTTPConnection
+    connection = cls(target, FETCH_TIMEOUT)
+    try:
+        connection.request(method, target.path, body=body, headers=headers)
+        response = connection.getresponse()
+        data = response.read(MAX_DOWNLOAD_BYTES + 1)
+        return Response(
+            status=response.status,
+            headers={k.lower(): v for k, v in response.getheaders()},
+            body=data[:MAX_DOWNLOAD_BYTES],
+            truncated=len(data) > MAX_DOWNLOAD_BYTES)
+    except (OSError, http.client.HTTPException) as error:
+        raise ToolError(f"request to {target.host} failed: {error}", "fetch_failed", 502)
+    finally:
+        connection.close()
+
+
+def decode_body(response: Response) -> bytes:
+    encoding = response.headers.get("content-encoding", "identity").lower()
+    if encoding in ("", "identity"):
+        return response.body
+    if encoding not in ("gzip", "deflate"):
+        raise ToolError(f"unsupported content encoding {encoding}", "unsupported_content")
+    wbits = 16 + zlib.MAX_WBITS if encoding == "gzip" else zlib.MAX_WBITS
+    try:
+        inflater = zlib.decompressobj(wbits)
+        # Bounded so a small compressed bomb cannot fill the VM's memory.
+        return inflater.decompress(response.body, MAX_DOWNLOAD_BYTES)
+    except (zlib.error, gzip.BadGzipFile):
+        raise ToolError("response body could not be decompressed", "unsupported_content", 502)
+
+
+def charset_of(content_type: str) -> str:
+    match = re.search(r"charset=([\w.-]+)", content_type, re.I)
+    if match:
+        try:
+            "".encode(match.group(1))
+            return match.group(1)
+        except LookupError:
+            pass
+    return "utf-8"
+
+
+# --- Extraction -------------------------------------------------------------
+
+class _FallbackText(HTMLParser):
+    """Plain-text fallback when trafilatura is missing or finds no article."""
+
+    SKIP = {"script", "style", "noscript", "template", "svg", "head"}
+    BLOCK = {"p", "div", "li", "br", "h1", "h2", "h3", "h4", "h5", "h6", "tr",
+             "section", "article", "blockquote", "pre"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self.skipping = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self.SKIP:
+            self.skipping += 1
+        elif tag in self.BLOCK:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in self.SKIP and self.skipping:
+            self.skipping -= 1
+        elif tag in self.BLOCK:
+            self.parts.append("\n")
+
+    def handle_data(self, data):
+        if not self.skipping:
+            self.parts.append(data)
+
+    def text(self) -> str:
+        joined = "".join(self.parts)
+        lines = (re.sub(r"[ \t\r\f\v]+", " ", line).strip() for line in joined.split("\n"))
+        return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+
+
+def extract_title(markup: str) -> str:
+    match = re.search(r"<title[^>]*>(.*?)</title>", markup, re.I | re.S)
+    return html.unescape(re.sub(r"\s+", " ", match.group(1))).strip()[:300] if match else ""
+
+
+def extract_text(markup: str, url: str) -> str:
+    if trafilatura is not None:
+        text = trafilatura.extract(
+            markup, url=url, include_comments=False, include_tables=True,
+            favor_recall=True, deduplicate=True)
+        if text and text.strip():
+            return text.strip()
+    parser = _FallbackText()
+    parser.feed(markup)
+    parser.close()
+    return parser.text()
+
+
+# --- Tools ------------------------------------------------------------------
+
+@dataclass
+class Page:
+    url: str
+    title: str
+    text: str
+
+
+@dataclass
+class WebTools:
+    resolver: Callable[[str, int], list[str]] = system_resolver
+    transport: Transport = pinned_transport
+    searxng_url: str = SEARXNG_URL
+    cache: OrderedDict = field(default_factory=OrderedDict)
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def request(self, method: str, url: str, body: bytes | None = None,
+                content_type: str | None = None) -> tuple[str, Response]:
+        """Follows up to MAX_REDIRECTS redirects, checking every hop."""
+        current = url
+        for _ in range(MAX_REDIRECTS + 1):
+            target = check_url(current, self.resolver)
+            headers = {
+                "Host": target.host,
+                "User-Agent": USER_AGENT,
+                "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.1",
+                "Accept-Encoding": "gzip",
+                "Accept-Language": "en;q=0.9,*;q=0.5",
+            }
+            if content_type:
+                headers["Content-Type"] = content_type
+            response = self.transport(method, target, headers, body)
+            if response.status in (301, 302, 303, 307, 308):
+                location = response.headers.get("location")
+                if not location:
+                    raise ToolError("redirect without a location", "fetch_failed", 502)
+                current = urllib.parse.urljoin(target.url, location)
+                if response.status == 303 or (response.status in (301, 302) and method == "POST"):
+                    method, body, content_type = "GET", None, None
+                continue
+            return target.url, response
+        raise ToolError("too many redirects", "too_many_redirects", 502)
+
+    def load_page(self, url: str) -> Page:
+        with self.lock:
+            if url in self.cache:
+                self.cache.move_to_end(url)
+                return self.cache[url]
+        final_url, response = self.request("GET", url)
+        if response.status >= 400:
+            raise ToolError(f"{final_url} answered HTTP {response.status}", "http_error", 502)
+        content_type = response.headers.get("content-type", "").lower()
+        if not content_type.startswith(TEXT_TYPES):
+            kind = content_type.split(";")[0] or "unknown"
+            raise ToolError(f"{final_url} is {kind}, not a web page", "unsupported_content")
+        raw = decode_body(response).decode(charset_of(content_type), errors="replace")
+        if content_type.startswith("text/plain"):
+            page = Page(final_url, "", raw.strip())
+        else:
+            page = Page(final_url, extract_title(raw), extract_text(raw, final_url))
+        with self.lock:
+            for key in {url, final_url}:
+                self.cache[key] = page
+                self.cache.move_to_end(key)
+            while len(self.cache) > PAGE_CACHE_SIZE:
+                self.cache.popitem(last=False)
+        return page
+
+    def fetch(self, url: str, offset: int = 0, max_chars: int = DEFAULT_SLICE_CHARS) -> dict:
+        if not isinstance(offset, int) or offset < 0:
+            raise ToolError("offset must be a non-negative integer", "invalid_argument")
+        if not isinstance(max_chars, int) or not 1 <= max_chars <= MAX_SLICE_CHARS:
+            raise ToolError(f"max_chars must be between 1 and {MAX_SLICE_CHARS}", "invalid_argument")
+        page = self.load_page(url)
+        total = len(page.text)
+        start = min(offset, total)
+        end = min(start + max_chars, total)
+        return {
+            "url": page.url,
+            "title": page.title,
+            "text": page.text[start:end],
+            "offset": start,
+            "next_offset": end if end < total else None,
+            "total_chars": total,
+        }
+
+    def search(self, query: str, max_results: int = 6) -> dict:
+        if not isinstance(query, str) or not query.strip() or len(query) > 400:
+            raise ToolError("query must be 1 to 400 characters", "invalid_argument")
+        if not isinstance(max_results, int) or not 1 <= max_results <= MAX_SEARCH_RESULTS:
+            raise ToolError(f"max_results must be between 1 and {MAX_SEARCH_RESULTS}",
+                            "invalid_argument")
+        results = self._searxng(query) if self.searxng_url else self._duckduckgo(query)
+        seen: set[str] = set()
+        unique = []
+        for result in results:
+            if result["url"] not in seen:
+                seen.add(result["url"])
+                unique.append(result)
+        return {"query": query, "results": unique[:max_results]}
+
+    def _duckduckgo(self, query: str) -> list[dict]:
+        body = urllib.parse.urlencode({"q": query}).encode()
+        _, response = self.request(
+            "POST", "https://html.duckduckgo.com/html/", body,
+            "application/x-www-form-urlencoded")
+        if response.status >= 400:
+            raise ToolError(f"search answered HTTP {response.status}", "search_failed", 502)
+        markup = decode_body(response).decode("utf-8", errors="replace")
+        return parse_duckduckgo(markup)
+
+    def _searxng(self, query: str) -> list[dict]:
+        # SearXNG is the operator's own service, usually another container on a
+        # private address, so it is the one destination exempt from the
+        # public-address rule. Only its fixed search path is ever requested.
+        import urllib.request
+        url = f"{self.searxng_url}/search?" + urllib.parse.urlencode(
+            {"q": query, "format": "json"})
+        request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        try:
+            with urllib.request.urlopen(request, timeout=FETCH_TIMEOUT) as response:
+                payload = json.loads(response.read(MAX_DOWNLOAD_BYTES))
+        except (OSError, ValueError) as error:
+            raise ToolError(f"SearXNG search failed: {error}", "search_failed", 502)
+        return [
+            {"title": str(item.get("title", ""))[:300],
+             "url": str(item.get("url", "")),
+             "snippet": str(item.get("content", ""))[:500]}
+            for item in payload.get("results", [])
+            if str(item.get("url", "")).startswith(("http://", "https://"))
+        ]
+
+
+class _DuckDuckGoResults(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.results: list[dict] = []
+        self._field: str | None = None
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        classes = (attributes.get("class") or "").split()
+        if tag == "a" and "result__a" in classes:
+            url = unwrap_duckduckgo(attributes.get("href") or "")
+            if url:
+                self.results.append({"title": "", "url": url, "snippet": ""})
+                self._field = "title"
+        elif "result__snippet" in classes and self.results:
+            self._field = "snippet"
+
+    def handle_endtag(self, tag):
+        if tag in ("a", "td", "div"):
+            self._field = None
+
+    def handle_data(self, data):
+        if self._field and self.results:
+            self.results[-1][self._field] += data
+
+
+def unwrap_duckduckgo(href: str) -> str | None:
+    if href.startswith("//"):
+        href = "https:" + href
+    parts = urllib.parse.urlsplit(href)
+    if parts.netloc.endswith("duckduckgo.com"):
+        if parts.path.startswith("/y.js"):
+            return None  # Advertisement.
+        target = urllib.parse.parse_qs(parts.query).get("uddg", [None])[0]
+        href = target or ""
+    return href if href.startswith(("http://", "https://")) else None
+
+
+def parse_duckduckgo(markup: str) -> list[dict]:
+    parser = _DuckDuckGoResults()
+    parser.feed(markup)
+    parser.close()
+    return [
+        {"title": re.sub(r"\s+", " ", r["title"]).strip()[:300],
+         "url": r["url"],
+         "snippet": re.sub(r"\s+", " ", r["snippet"]).strip()[:500]}
+        for r in parser.results
+    ]
+
+
+# --- HTTP API ---------------------------------------------------------------
+
+def host_allowed(header: str | None) -> bool:
+    """Only loopback Host names, so a web page in a Mac browser cannot reach
+    this API through DNS rebinding."""
+    if not header:
+        return False
+    host = header.strip().lower()
+    if host.startswith("["):
+        host = host[: host.find("]") + 1]
+    elif ":" in host:
+        host = host.rsplit(":", 1)[0]
+    return host in LOOPBACK_HOSTS
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "TUFFWebResearch/1.0"
+    tools: WebTools = WebTools()
+
+    def log_message(self, fmt, *args):
+        sys.stderr.write("%s %s\n" % (self.command, fmt % args))
+
+    def _send(self, status: int, payload: dict):
+        data = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _error(self, error: ToolError):
+        self._send(error.status, {"error": {"message": error.message, "code": error.code}})
+
+    def do_GET(self):
+        if not host_allowed(self.headers.get("Host")):
+            return self._error(ToolError("forbidden host", "forbidden_host", 403))
+        if self.path == "/health":
+            return self._send(200, {"status": "ok"})
+        self._error(ToolError("not found", "not_found", 404))
+
+    def do_POST(self):
+        try:
+            if not host_allowed(self.headers.get("Host")):
+                raise ToolError("forbidden host", "forbidden_host", 403)
+            # A browser cannot send application/json cross-origin without a
+            # preflight, which this server never answers.
+            if not (self.headers.get("Content-Type") or "").startswith("application/json"):
+                raise ToolError("Content-Type must be application/json", "invalid_request", 415)
+            length = int(self.headers.get("Content-Length") or 0)
+            if not 0 < length <= MAX_REQUEST_BYTES:
+                raise ToolError("request body is missing or too large", "invalid_request", 413)
+            try:
+                request = json.loads(self.rfile.read(length))
+            except ValueError:
+                raise ToolError("request body is not JSON", "invalid_request", 400)
+            if not isinstance(request, dict):
+                raise ToolError("request body must be a JSON object", "invalid_request", 400)
+            if self.path == "/v1/search":
+                result = self.tools.search(
+                    request.get("query"), request.get("max_results", 6))
+            elif self.path == "/v1/fetch":
+                result = self.tools.fetch(
+                    request.get("url"), request.get("offset", 0),
+                    request.get("max_chars", DEFAULT_SLICE_CHARS))
+            else:
+                raise ToolError("not found", "not_found", 404)
+            self._send(200, result)
+        except ToolError as error:
+            self._error(error)
+        except Exception as error:  # Never leak a traceback to the caller.
+            sys.stderr.write(f"internal error: {error!r}\n")
+            self._error(ToolError("internal error", "internal_error", 500))
+
+
+def main():
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    server.daemon_threads = True
+    sys.stderr.write(f"TUFF web research sandbox listening on :{PORT}\n")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()
