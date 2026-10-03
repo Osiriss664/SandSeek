@@ -236,7 +236,9 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
 - Reasoning shares each turn's token limit with the answer. With reasoning on,
   the limit defaults to 8192 tokens. If a turn still ends without an answer,
   the model is asked once more for a short answer with reasoning off; if that
-  is empty too, the run stops with an error instead of an empty report.
+  is empty too, the run stops with an error instead of an empty report. An
+  answer that stops at the token limit is kept, with a note that it may be cut
+  off.
 - Pages are fetched without running JavaScript, so sites that build their
   content in the browser return little text.
 - DuckDuckGo's HTML results can change shape or rate-limit. Set `SEARXNG_URL`

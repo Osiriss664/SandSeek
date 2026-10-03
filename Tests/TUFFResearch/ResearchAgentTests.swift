@@ -63,6 +63,13 @@ private final class FakeServices: ResearchHTTPTransport, @unchecked Sendable {
         ])])]))
     }
 
+    static func answer(_ text: String, finishReason: String) -> ResearchHTTPResponse {
+        json(200, .object(["choices": .array([.object([
+            "message": .object(["role": .string("assistant"), "content": .string(text)]),
+            "finish_reason": .string(finishReason),
+        ])])]))
+    }
+
     static func calls(_ calls: [(String, String, String)]) -> ResearchHTTPResponse {
         json(200, .object(["choices": .array([.object([
             "message": .object([
@@ -495,6 +502,38 @@ struct ResearchAgentTests {
         await #expect(throws: ResearchError.noAnswer(tokenLimit: true)) {
             try await agent(silent).run(question: "q")
         }
+    }
+
+    @Test func aRetryRefusedForEnableThinkingIsSentWithoutIt() async throws {
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
+            FakeServices.cutOff(),
+            FakeServices.json(400, .object(["error": .object([
+                "message": .string("enable_thinking is not supported by GPT-OSS; use reasoning_effort"),
+                "param": .string("enable_thinking"),
+                "code": .string("unsupported_parameter"),
+            ])])),
+            FakeServices.answer("Each container is a VM [1]."),
+        ])
+        let report = try await agent(services).run(question: "q")
+        #expect(report.answer == "Each container is a VM [1].")
+        let last = try #require(services.modelRequests.last)
+        #expect(last["enable_thinking"] == nil)
+        #expect(last["tool_choice"] == .string("none"))
+    }
+
+    @Test func anAnswerAtTheTokenLimitIsMarkedAsCutOff() async throws {
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
+            FakeServices.answer("Each container runs in", finishReason: "length"),
+        ])
+        let report = try await agent(services).run(question: "q")
+        #expect(report.answerCutOff)
+        #expect(report.markdown.contains("reached the model's token limit and may be cut off"))
+        let whole = FakeServices(modelReplies: [FakeServices.answer("Done.")])
+        let done = try await agent(whole).run(question: "q")
+        #expect(!done.answerCutOff)
+        #expect(!done.markdown.contains("cut off"))
     }
 
     @Test func spentBudgetForcesAnAnswerWithoutTools() async throws {
