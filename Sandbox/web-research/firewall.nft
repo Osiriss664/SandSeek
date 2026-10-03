@@ -1,0 +1,42 @@
+# Outbound rules for the web research VM, loaded by entrypoint.sh as root
+# before the server drops its privileges. server.py already refuses these
+# addresses; this table holds even if code in the VM were taken over.
+#
+# The VM may reach public internet addresses only: not the Mac (the VM's
+# gateway), the local network, carrier-grade NAT, link-local or cloud
+# metadata addresses. Replies on connections the Mac opened to the published
+# port are allowed, and DNS goes to the public resolvers research_sandbox.sh
+# sets with --dns.
+
+table inet tuff_sandbox
+delete table inet tuff_sandbox
+
+table inet tuff_sandbox {
+    set private4 {
+        type ipv4_addr
+        flags interval
+        elements = {
+            0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16,
+            172.16.0.0/12, 192.0.0.0/24, 192.0.2.0/24, 192.88.99.0/24,
+            192.168.0.0/16, 198.18.0.0/15, 198.51.100.0/24, 203.0.113.0/24,
+            224.0.0.0/3
+        }
+    }
+
+    set refused6 {
+        type ipv6_addr
+        flags interval
+        elements = { 2001::/32, 2001:db8::/32, 2002::/16 }
+    }
+
+    chain output {
+        type filter hook output priority filter; policy drop;
+        oifname "lo" accept
+        ct state established,related accept
+        meta nfproto ipv4 ip daddr @private4 reject
+        meta nfproto ipv4 accept
+        meta nfproto ipv6 ip6 daddr @refused6 reject
+        meta nfproto ipv6 ip6 daddr 2000::/3 accept
+        reject
+    }
+}

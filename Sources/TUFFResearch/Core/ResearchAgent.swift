@@ -309,9 +309,17 @@ public struct ResearchAgent: Sendable {
         }
     }
 
+    /// Removes the untrusted-content markers until none is left, so a page
+    /// cannot rebuild one from pieces (`<<<END UNT<<<END ...>>>RUSTED ...`),
+    /// along with control characters.
     static func sanitized(_ text: String) -> String {
-        text.replacingOccurrences(of: untrustedOpen, with: "")
-            .replacingOccurrences(of: untrustedClose, with: "")
+        var current = ResearchText.terminalSafe(text)
+        while true {
+            let next = current.replacingOccurrences(of: untrustedOpen, with: "")
+                .replacingOccurrences(of: untrustedClose, with: "")
+            if next == current { return current }
+            current = next
+        }
     }
 
     static func formatSearch(query: String, results: [ResearchSearchResult]) -> String {
@@ -320,8 +328,8 @@ public struct ResearchAgent: Sendable {
         }
         var lines = ["Search results for \"\(sanitized(query))\":", untrustedOpen]
         for (index, result) in results.enumerated() {
-            lines.append("\(index + 1). \(sanitized(result.title))\n   \(result.url)\n   "
-                + sanitized(result.snippet))
+            lines.append("\(index + 1). \(sanitized(result.title))\n   "
+                + "\(sanitized(ResearchText.url(result.url)))\n   " + sanitized(result.snippet))
         }
         lines.append(untrustedClose)
         lines.append("Open the most promising pages with open_page before answering.")
@@ -331,13 +339,16 @@ public struct ResearchAgent: Sendable {
     static func formatPage(_ page: ResearchPageSlice,
                            source: ResearchSource,
                            alreadyNumbered: Bool = false) -> String {
-        let end = page.offset + page.text.count
-        var header = "Source [\(source.number)]: \(sanitized(page.title.isEmpty ? page.url : page.title))\n"
+        // The sandbox counts Unicode scalars (Python code points), not
+        // grapheme clusters, so offsets match what it expects.
+        let end = page.offset + page.text.unicodeScalars.count
+        let url = sanitized(ResearchText.url(page.url))
+        var header = "Source [\(source.number)]: \(page.title.isEmpty ? url : sanitized(page.title))\n"
         if alreadyNumbered {
             header += "This is the same page as source [\(source.number)]; cite it only as "
                 + "[\(source.number)].\n"
         }
-        header += "URL: \(page.url)\n"
+        header += "URL: \(url)\n"
             + "Characters \(page.offset)-\(end) of \(page.totalCharacters)."
         if let next = page.nextOffset {
             header += " More text: call open_page with offset \(next)."

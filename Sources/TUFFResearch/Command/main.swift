@@ -5,6 +5,12 @@ private func writeError(_ text: String) {
     FileHandle.standardError.write(Data((text + "\n").utf8))
 }
 
+/// Progress lines carry text from the web and the model, so control
+/// characters are removed before they reach the terminal.
+private func writeProgress(_ text: String) {
+    writeError(ResearchText.terminalSafe(text))
+}
+
 let arguments: ResearchArguments
 do {
     arguments = try ResearchArguments.parse(Array(CommandLine.arguments.dropFirst()))
@@ -45,16 +51,17 @@ let agent = ResearchAgent(
             guard showThinking else { return }
             let indented = text.split(separator: "\n", omittingEmptySubsequences: false)
                 .map { "    │ \($0)" }.joined(separator: "\n")
-            writeError(indented)
-        case .searching(let query): writeError("    searching: \(query)")
-        case .reading(let url): writeError("    reading: \(url)")
-        case .toolFailed(let message): writeError("    tool error: \(message)")
+            writeProgress(indented)
+        case .searching(let query): writeProgress("    searching: \(query)")
+        case .reading(let url): writeProgress("    reading: \(ResearchText.url(url))")
+        case .toolFailed(let message): writeProgress("    tool error: \(message)")
         }
     })
 
 do {
     let report = try await agent.run(question: arguments.question)
-    let markdown = report.markdown
+    // The answer and source titles come from the model and the web.
+    let markdown = ResearchText.terminalSafe(report.markdown)
     print(markdown)
     if let path = arguments.outputPath {
         try Data(markdown.utf8).write(
@@ -62,6 +69,6 @@ do {
         writeError("report written to \(path)")
     }
 } catch {
-    writeError("error: \(error)")
+    writeProgress("error: \(error)")
     exit(1)
 }

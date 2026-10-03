@@ -9,15 +9,19 @@
 #                                        the local network and metadata addresses
 #
 # The sandbox is the only part of `tuff research` with internet access. It runs
-# in its own Linux VM with a read-only root, no Linux capabilities, a non-root
-# user and no Mac folders mounted. Its port is published to the Mac's loopback
-# address only. See docs/WEB_RESEARCH.md.
+# in its own Linux VM with a read-only root and no Mac folders mounted. A
+# firewall inside the VM lets it reach public internet addresses only, and the
+# server runs as a non-root user with no Linux capabilities. Its port is
+# published to the Mac's loopback address only. See docs/WEB_RESEARCH.md.
 
 set -euo pipefail
 
 image="tuff-web-research:latest"
 name="tuff-web-research"
 port="${TUFF_RESEARCH_SANDBOX_PORT:-9000}"
+# Public resolvers: the firewall refuses the Mac, which is the VM's default
+# DNS server. Space-separated; override with TUFF_RESEARCH_DNS.
+dns_servers="${TUFF_RESEARCH_DNS:-1.1.1.1 9.9.9.9}"
 script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 context="$script_directory/../Sandbox/web-research"
 
@@ -42,13 +46,19 @@ case "${1:-}" in
     require_container
     container stop "$name" >/dev/null 2>&1 || true
     container delete "$name" >/dev/null 2>&1 || true
+    # The entrypoint starts as root with these four capabilities only, to load
+    # the firewall; the server then gives them all up and runs as user 10001.
     run_options=(
       --detach --rm --name "$name"
       --read-only --tmpfs /tmp
-      --cap-drop ALL --user 10001:10001
+      --cap-drop ALL --cap-add NET_ADMIN --cap-add SETUID --cap-add SETGID --cap-add SETPCAP
+      --ulimit nproc=512
       --cpus 2 --memory 1G
       --publish "127.0.0.1:$port:9000"
     )
+    for server in $dns_servers; do
+      run_options+=(--dns "$server")
+    done
     if [[ -n "${SEARXNG_URL:-}" ]]; then
       run_options+=(--env "SEARXNG_URL=$SEARXNG_URL")
     fi
@@ -120,9 +130,36 @@ for line in open("/proc/net/route").read().splitlines()[1:]:
       esac
     done
 
-    echo "Direct connections from inside the VM:"
-    for target in "$gateway:8080" "$gateway:22" "$gateway:5000"; do
-      if container exec "$name" python3 -c "
+    echo "The VM's own protection:"
+    if container exec "$name" nft list table inet tuff_sandbox >/dev/null 2>&1; then
+      pass "the firewall is loaded"
+    else
+      fail "the firewall is not loaded"
+    fi
+    privileges="$(container exec "$name" python3 -c '
+import glob
+for path in glob.glob("/proc/[0-9]*/cmdline"):
+    try:
+        if b"/app/server.py" not in open(path, "rb").read().split(b"\0"):
+            continue
+        status = dict(l.split(":", 1) for l in open(path[:-7] + "status") if ":" in l)
+    except OSError:
+        continue
+    caps = [n for n in ("CapPrm", "CapEff", "CapBnd", "CapAmb") if int(status[n], 16)]
+    print(status["Uid"].split()[0], ",".join(caps) or "none")
+    break
+' 2>/dev/null || true)"
+    if [[ "$privileges" == "10001 none" ]]; then
+      pass "the server runs as user 10001 with no capabilities"
+    else
+      fail "the server's user and capabilities are not as expected: ${privileges:-not found}"
+    fi
+
+    # These run as the server's user, as code that took the server over would.
+    echo "Direct connections from inside the VM, which must fail:"
+    for target in "$gateway:8080" "$gateway:22" "$gateway:5000" "$gateway:53" \
+                  "192.168.1.1:80" "192.168.0.1:80" "10.0.0.1:80" "169.254.169.254:80"; do
+      if container exec --user 10001:10001 "$name" python3 -c "
 import socket, sys
 host, port = sys.argv[1].rsplit(':', 1)
 try:
@@ -130,15 +167,9 @@ try:
 except OSError:
     sys.exit(1)
 " "$target" >/dev/null 2>&1; then
-        if [[ "$target" == *:8080 ]]; then
-          fail "the VM can open a connection to the TUFF server port at $target"
-        else
-          # Not a sandbox failure: some Mac service listens on every interface.
-          # Fetches still refuse it, but the VM itself can connect.
-          echo "  warn  the VM can connect to a Mac service at $target; consider turning it off"
-        fi
+        fail "the VM can open a connection to $target"
       else
-        pass "the VM cannot connect to the Mac at $target"
+        pass "the VM cannot connect to $target"
       fi
     done
 

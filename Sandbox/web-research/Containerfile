@@ -1,6 +1,10 @@
 # Web tool server for `tuff research`. Built and run with Apple `container`
 # by Scripts/research_sandbox.sh; see docs/WEB_RESEARCH.md.
-FROM docker.io/library/python:3.12-slim
+#
+# The base image is pinned by digest (python:3.12-slim) and every Python
+# package by hash, so a rebuild installs the same code. To update, change the
+# digest and regenerate requirements.txt as requirements.in describes.
+FROM docker.io/library/python:3.12-slim@sha256:dddfd7e07f9d15aeeca61529320492139d21cac7f0070c00609243e51e4e0016
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -8,12 +12,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 COPY requirements.txt /app/requirements.txt
-RUN pip install -r /app/requirements.txt \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends nftables \
+    && rm -rf /var/lib/apt/lists/* \
+    && pip install --require-hashes --no-deps -r /app/requirements.txt \
     && useradd --uid 10001 --no-create-home --home-dir /nonexistent \
        --shell /usr/sbin/nologin sandbox
 
-COPY server.py /app/server.py
+COPY server.py firewall.nft entrypoint.sh /app/
 
-USER 10001:10001
+# Starts as root only to load firewall.nft; server.py then switches to user
+# 10001 and drops every capability before it serves a request.
 EXPOSE 9000
-ENTRYPOINT ["python3", "/app/server.py"]
+ENTRYPOINT ["/app/entrypoint.sh"]

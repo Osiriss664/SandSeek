@@ -202,6 +202,45 @@ struct ResearchAgentTests {
         #expect(history.allSatisfy { $0["reasoning_content"] == nil })
     }
 
+    @Test func pagesCannotRebuildTheMarkers() {
+        let close = ResearchAgent.untrustedClose
+        let split = close.index(close.startIndex, offsetBy: 10)
+        let rebuilt = String(close[..<split]) + close + String(close[split...])
+        let nested = String(close[..<split]) + rebuilt + String(close[split...])
+        for text in [rebuilt, nested, ResearchAgent.untrustedOpen + close] {
+            let cleaned = ResearchAgent.sanitized("before " + text + " after")
+            #expect(!cleaned.contains(close))
+            #expect(!cleaned.contains(ResearchAgent.untrustedOpen))
+        }
+    }
+
+    @Test func webTextIsStrippedOfControlCharacters() {
+        let page = ResearchPageSlice(
+            url: "https://example.com/a\u{1B}[2J b", title: "Lake\u{1B}]0;PWNED\u{07}\u{202E}",
+            text: "Fact\u{1B}[31m one\u{9B}.\nNext\tline", offset: 0, nextOffset: nil,
+            totalCharacters: 22)
+        let formatted = ResearchAgent.formatPage(
+            page, source: ResearchSource(number: 1, title: page.title, url: page.url))
+        #expect(formatted.contains("Source [1]: Lake]0;PWNED\n"))
+        #expect(formatted.contains("URL: https://example.com/a[2Jb\n"))
+        #expect(formatted.contains("Fact[31m one.\nNext\tline"))
+        #expect(formatted.unicodeScalars.allSatisfy { !ResearchText.isUnsafe($0) })
+
+        let search = ResearchAgent.formatSearch(query: "q", results: [ResearchSearchResult(
+            title: "T\u{1B}[2J", url: "https://example.com/\u{1B}x", snippet: "s\u{07}")])
+        #expect(search.unicodeScalars.allSatisfy { !ResearchText.isUnsafe($0) })
+        #expect(ResearchText.terminalSafe("a\u{1B}[2Jb\r\nc") == "a[2Jb\nc")
+    }
+
+    @Test func characterRangeCountsLikeTheSandbox() {
+        // "é" written as e + combining accent: one grapheme, two code points.
+        let page = ResearchPageSlice(url: "https://example.com/", title: "", text: "Cafe\u{301}",
+                                     offset: 10, nextOffset: nil, totalCharacters: 15)
+        let formatted = ResearchAgent.formatPage(
+            page, source: ResearchSource(number: 1, title: "", url: page.url))
+        #expect(formatted.contains("Characters 10-15 of 15."))
+    }
+
     @Test func rereadingAPageKeepsItsNumber() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),

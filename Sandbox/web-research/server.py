@@ -3,9 +3,9 @@
 
 This process is the only part of web research that touches the internet. It
 runs inside an Apple `container` Linux VM and is published to the Mac's
-loopback address, so the host-side research loop calls in and nothing in the
-VM can call out to the host. The model never sees raw HTML: pages come back
-as extracted text in bounded slices.
+loopback address, so the host-side research loop calls in. The model never
+sees raw HTML: pages come back as extracted text in bounded slices, with
+control characters removed.
 
 Endpoints (JSON in, JSON out):
   GET  /health
@@ -18,10 +18,18 @@ connected to, so a DNS answer cannot change between the check and the
 connection. Redirects are followed by hand and checked the same way. That keeps
 the Mac (the VM's gateway), the local network and cloud metadata addresses out
 of reach.
+
+Those checks live in this process, so they would not bind code that took it
+over. firewall.nft, loaded by entrypoint.sh before this server starts, applies
+the same rule to the whole VM, and the server then drops root and every Linux
+capability so it cannot change the firewall.
 """
 
 from __future__ import annotations
 
+import codecs
+import ctypes
+import errno
 import gzip
 import html
 import http.client
@@ -33,6 +41,7 @@ import socket
 import ssl
 import sys
 import threading
+import time
 import urllib.parse
 import zlib
 from collections import OrderedDict
@@ -52,6 +61,9 @@ USER_AGENT = os.environ.get(
     "USER_AGENT",
     "Mozilla/5.0 (compatible; TUFF-web-research/1.0; +https://github.com/rexmhall09/TUFF)")
 FETCH_TIMEOUT = float(os.environ.get("FETCH_TIMEOUT", "15"))
+# The whole request, so a server that drips one byte at a time cannot hold a
+# fetch open; FETCH_TIMEOUT alone only limits each wait.
+FETCH_DEADLINE = float(os.environ.get("FETCH_DEADLINE", "45"))
 MAX_DOWNLOAD_BYTES = int(os.environ.get("MAX_DOWNLOAD_BYTES", str(5 * 1024 * 1024)))
 MAX_REDIRECTS = 5
 MAX_REQUEST_BYTES = 64 * 1024
@@ -62,6 +74,21 @@ PAGE_CACHE_SIZE = 32
 ALLOWED_PORTS = {"http": 80, "https": 443}
 TEXT_TYPES = ("text/html", "application/xhtml+xml", "text/plain")
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
+# Titles sit in the head; searching further only gives a hostile page more
+# text to make the search slow.
+TITLE_SEARCH_CHARS = 32 * 1024
+SANDBOX_UID = 10001
+# Names Python decodes as text. Anything else (idna, rot13, base64...) falls
+# back to UTF-8 instead of failing or decoding into something odd.
+TEXT_CHARSETS = {
+    "ascii", "utf-8", "utf-16", "utf-16-le", "utf-16-be", "utf-32", "iso8859-1",
+    "iso8859-2", "iso8859-3", "iso8859-4", "iso8859-5", "iso8859-6", "iso8859-7",
+    "iso8859-8", "iso8859-9", "iso8859-10", "iso8859-13", "iso8859-14",
+    "iso8859-15", "iso8859-16", "cp1250", "cp1251", "cp1252", "cp1253", "cp1254",
+    "cp1255", "cp1256", "cp1257", "cp1258", "cp874", "koi8-r", "koi8-u",
+    "mac-roman", "shift_jis", "cp932", "euc_jp", "iso2022_jp", "euc_kr", "cp949",
+    "gb2312", "gbk", "gb18030", "big5", "big5hkscs",
+}
 
 
 class ToolError(Exception):
@@ -76,13 +103,25 @@ class ToolError(Exception):
 
 # --- Address policy ---------------------------------------------------------
 
+IPV6_UNICAST = ipaddress.ip_network("2000::/3")
+# Inside 2000::/3 but carrying an IPv4 address a gateway could route to
+# (6to4, Teredo), or reserved for documentation.
+IPV6_REFUSED = [ipaddress.ip_network(n) for n in ("2002::/16", "2001::/32", "2001:db8::/32")]
+
+
 def is_public_address(address: str) -> bool:
     try:
         ip = ipaddress.ip_address(address)
     except ValueError:
         return False
-    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
-        ip = ip.ipv4_mapped
+    if isinstance(ip, ipaddress.IPv6Address):
+        if ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        # is_global alone accepts forms such as ::127.0.0.1 and the NAT64
+        # prefix, which a gateway can turn into a private IPv4 address. Only
+        # the global unicast range is allowed.
+        elif ip not in IPV6_UNICAST or any(ip in net for net in IPV6_REFUSED):
+            return False
     return ip.is_global and not ip.is_multicast
 
 
@@ -119,9 +158,17 @@ def check_url(url: str, resolver: Callable[[str, int], list[str]]) -> Target:
         raise ToolError("only http and https URLs can be fetched", "invalid_url")
     if parts.username or parts.password:
         raise ToolError("URLs with credentials are refused", "invalid_url")
+    if CONTROL_CHARACTERS.search(url) or any(c.isspace() for c in url.strip()):
+        raise ToolError("URL contains spaces or control characters", "invalid_url")
     host = (parts.hostname or "").rstrip(".").lower()
     if not host:
         raise ToolError("URL has no host", "invalid_url")
+    if not host.isascii():
+        # Internationalised names are sent as punycode, as browsers do.
+        try:
+            host = host.encode("idna").decode("ascii")
+        except UnicodeError:
+            raise ToolError("URL has an invalid internationalised host name", "invalid_url")
     try:
         port = parts.port or ALLOWED_PORTS[scheme]
     except ValueError:
@@ -139,7 +186,9 @@ def check_url(url: str, resolver: Callable[[str, int], list[str]]) -> Target:
     path = parts.path or "/"
     if parts.query:
         path += "?" + parts.query
-    return Target(scheme, host, port, path, addresses[0])
+    # IPv4 first: the VM may have no IPv6 route, and every answer is public.
+    preferred = sorted(addresses, key=lambda a: ":" in a)[0]
+    return Target(scheme, host, port, path, preferred)
 
 
 # --- Transport --------------------------------------------------------------
@@ -176,21 +225,49 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
 
 
 def pinned_transport(method: str, target: Target, headers: dict[str, str],
-                     body: bytes | None) -> Response:
+                     body: bytes | None, deadline: float | None = None) -> Response:
     cls = _PinnedHTTPSConnection if target.scheme == "https" else _PinnedHTTPConnection
     connection = cls(target, FETCH_TIMEOUT)
+    limit = FETCH_DEADLINE if deadline is None else deadline
+    expired = threading.Event()
+
+    def expire():
+        # Shutting the socket down wakes a read blocked in another thread.
+        expired.set()
+        if connection.sock is not None:
+            try:
+                connection.sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    timer = threading.Timer(limit, expire)
+    timer.daemon = True
+    timer.start()
+    too_slow = ToolError(f"{target.host} took longer than {limit:g} s", "fetch_timeout", 504)
     try:
         connection.request(method, target.path, body=body, headers=headers)
         response = connection.getresponse()
-        data = response.read(MAX_DOWNLOAD_BYTES + 1)
+        chunks, size = [], 0
+        while size <= MAX_DOWNLOAD_BYTES and not expired.is_set():
+            chunk = response.read1(min(65536, MAX_DOWNLOAD_BYTES + 1 - size))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            size += len(chunk)
+        if expired.is_set():
+            raise too_slow
+        data = b"".join(chunks)
         return Response(
             status=response.status,
             headers={k.lower(): v for k, v in response.getheaders()},
             body=data[:MAX_DOWNLOAD_BYTES],
             truncated=len(data) > MAX_DOWNLOAD_BYTES)
-    except (OSError, http.client.HTTPException) as error:
+    except (OSError, http.client.HTTPException, ValueError) as error:
+        if expired.is_set():
+            raise too_slow
         raise ToolError(f"request to {target.host} failed: {error}", "fetch_failed", 502)
     finally:
+        timer.cancel()
         connection.close()
 
 
@@ -210,14 +287,25 @@ def decode_body(response: Response) -> bytes:
 
 
 def charset_of(content_type: str) -> str:
-    match = re.search(r"charset=([\w.-]+)", content_type, re.I)
+    match = re.search(r"charset=\"?([\w.:-]+)", content_type, re.I)
     if match:
         try:
-            "".encode(match.group(1))
-            return match.group(1)
+            name = codecs.lookup(match.group(1)).name
         except LookupError:
-            pass
+            return "utf-8"
+        if name in TEXT_CHARSETS:
+            return name
     return "utf-8"
+
+
+# C0 and C1 controls other than tab and newline, and the Unicode bidi
+# overrides. A page title holding ESC sequences could otherwise rewrite the
+# terminal the report is printed in.
+CONTROL_CHARACTERS = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
+
+
+def clean_text(text: str) -> str:
+    return CONTROL_CHARACTERS.sub("", text.replace("\r\n", "\n").replace("\r", "\n"))
 
 
 # --- Extraction -------------------------------------------------------------
@@ -256,9 +344,22 @@ class _FallbackText(HTMLParser):
         return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
 
 
+TITLE_OPEN = re.compile(r"<title(?:\s[^<>]{0,500})?>", re.I)
+
+
 def extract_title(markup: str) -> str:
-    match = re.search(r"<title[^>]*>(.*?)</title>", markup, re.I | re.S)
-    return html.unescape(re.sub(r"\s+", " ", match.group(1))).strip()[:300] if match else ""
+    # A bounded, linear search: a lazy `<title>(.*?)</title>` over the whole
+    # page takes hours on a page of unclosed <title> tags, and holds the
+    # interpreter lock while it runs.
+    head = markup[:TITLE_SEARCH_CHARS]
+    match = TITLE_OPEN.search(head)
+    if not match:
+        return ""
+    end = head.lower().find("</title>", match.end())
+    if end < 0:
+        return ""
+    title = html.unescape(head[match.end():end])
+    return clean_text(re.sub(r"\s+", " ", title)).strip()[:300]
 
 
 def extract_text(markup: str, url: str) -> str:
@@ -267,11 +368,11 @@ def extract_text(markup: str, url: str) -> str:
             markup, url=url, include_comments=False, include_tables=True,
             favor_recall=True, deduplicate=True)
         if text and text.strip():
-            return text.strip()
+            return clean_text(text).strip()
     parser = _FallbackText()
     parser.feed(markup)
     parser.close()
-    return parser.text()
+    return clean_text(parser.text())
 
 
 # --- Tools ------------------------------------------------------------------
@@ -332,7 +433,7 @@ class WebTools:
             raise ToolError(f"{final_url} is {kind}, not a web page", "unsupported_content")
         raw = decode_body(response).decode(charset_of(content_type), errors="replace")
         if content_type.startswith("text/plain"):
-            page = Page(final_url, "", raw.strip())
+            page = Page(final_url, "", clean_text(raw).strip())
         else:
             page = Page(final_url, extract_title(raw), extract_text(raw, final_url))
         with self.lock:
@@ -400,11 +501,11 @@ class WebTools:
         except (OSError, ValueError) as error:
             raise ToolError(f"SearXNG search failed: {error}", "search_failed", 502)
         return [
-            {"title": str(item.get("title", ""))[:300],
+            {"title": clean_text(str(item.get("title", ""))).strip()[:300],
              "url": str(item.get("url", "")),
-             "snippet": str(item.get("content", ""))[:500]}
+             "snippet": clean_text(str(item.get("content", ""))).strip()[:500]}
             for item in payload.get("results", [])
-            if str(item.get("url", "")).startswith(("http://", "https://"))
+            if is_plain_web_url(str(item.get("url", "")))
         ]
 
 
@@ -443,7 +544,12 @@ def unwrap_duckduckgo(href: str) -> str | None:
             return None  # Advertisement.
         target = urllib.parse.parse_qs(parts.query).get("uddg", [None])[0]
         href = target or ""
-    return href if href.startswith(("http://", "https://")) else None
+    return href if is_plain_web_url(href) else None
+
+
+def is_plain_web_url(url: str) -> bool:
+    return (url.startswith(("http://", "https://")) and len(url) <= 4096
+            and not CONTROL_CHARACTERS.search(url) and not any(c.isspace() for c in url))
 
 
 def parse_duckduckgo(markup: str) -> list[dict]:
@@ -451,9 +557,9 @@ def parse_duckduckgo(markup: str) -> list[dict]:
     parser.feed(markup)
     parser.close()
     return [
-        {"title": re.sub(r"\s+", " ", r["title"]).strip()[:300],
+        {"title": clean_text(re.sub(r"\s+", " ", r["title"])).strip()[:300],
          "url": r["url"],
-         "snippet": re.sub(r"\s+", " ", r["snippet"]).strip()[:500]}
+         "snippet": clean_text(re.sub(r"\s+", " ", r["snippet"])).strip()[:500]}
         for r in parser.results
     ]
 
@@ -533,7 +639,33 @@ class Handler(BaseHTTPRequestHandler):
             self._error(ToolError("internal error", "internal_error", 500))
 
 
+def drop_privileges(uid: int = SANDBOX_UID) -> None:
+    """Started as root so entrypoint.sh can load the firewall; from here on
+    the server runs as an unprivileged user with no capabilities and cannot
+    regain any, so it cannot change the firewall either."""
+    if os.getuid() != 0:
+        return
+    libc = ctypes.CDLL(None, use_errno=True)
+    pr_capbset_drop, pr_set_no_new_privs = 24, 38
+    for capability in range(64):
+        if libc.prctl(pr_capbset_drop, capability, 0, 0, 0) != 0:
+            if ctypes.get_errno() == errno.EINVAL:
+                break  # Past the last capability this kernel knows.
+            raise OSError(ctypes.get_errno(), "could not drop a capability")
+    os.setgroups([])
+    os.setgid(uid)
+    os.setuid(uid)
+    if libc.prctl(pr_set_no_new_privs, 1, 0, 0, 0) != 0:
+        raise OSError(ctypes.get_errno(), "could not set no_new_privs")
+    with open("/proc/self/status") as status:
+        fields = dict(line.split(":", 1) for line in status if ":" in line)
+    for name in ("CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"):
+        if int(fields.get(name, "0").strip(), 16) != 0:
+            raise OSError(errno.EPERM, f"{name} is not empty after dropping privileges")
+
+
 def main():
+    drop_privileges()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     server.daemon_threads = True
     sys.stderr.write(f"TUFF web research sandbox listening on :{PORT}\n")

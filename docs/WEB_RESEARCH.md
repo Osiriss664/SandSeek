@@ -50,7 +50,8 @@ The loop gives the model two tools and no others:
 | `web_search(query)` | Searches the web. Uses DuckDuckGo's HTML results, or a SearXNG instance when `SEARXNG_URL` is set for the sandbox. |
 | `open_page(url, offset)` | Reads a page as extracted text, in slices of `--page-chars` characters. |
 
-The loop calls the sandbox. The sandbox never calls the Mac.
+The loop calls the sandbox. The sandbox's code never calls the Mac, and a
+firewall inside the VM stops anything else running there from doing so.
 
 ## Security model
 
@@ -64,17 +65,35 @@ what it downloads. The design limits what either can reach:
   exist yet.
 - **Tool results are marked untrusted.** Every page is wrapped in markers the
   system prompt tells the model to treat as information only. Copies of the
-  markers inside a page are removed, so a page cannot close the block early.
+  markers inside a page are removed, repeatedly, so a page cannot close the
+  block early, even by splitting a marker around another copy. The markers
+  are advice to the model, not a guarantee; the guarantee is that the model
+  has no tool that could do harm.
+- **Web text cannot drive your terminal.** Control characters, such as the
+  escape sequences that can clear the screen or change the window title, are
+  removed from page titles, page text and search results in the sandbox, and
+  again from everything `tuff research` prints or saves.
 - **Pages are fetched in a VM.** The sandbox runs in its own Linux VM with a
-  read-only root filesystem, no Linux capabilities, a non-root user, 1 GB of
-  memory and no Mac folders mounted. `Scripts/research_sandbox.sh start`
-  replaces it with a fresh VM each time.
+  read-only root filesystem, 1 GB of memory, a process limit and no Mac
+  folders mounted. `Scripts/research_sandbox.sh start` replaces it with a
+  fresh VM each time.
+- **The VM can reach the public internet only.** A firewall inside the VM
+  refuses connections to the Mac, the local network (your router, printers,
+  NAS), carrier-grade NAT, link-local and cloud metadata addresses, so even
+  code that took over the sandbox could not reach them. DNS goes to public
+  resolvers (1.1.1.1 and 9.9.9.9; set `TUFF_RESEARCH_DNS` to change them),
+  because the VM's default resolver is the Mac. The firewall is loaded before
+  the server starts, and the sandbox refuses to start without it. The server
+  then runs as a non-root user with no Linux capabilities and cannot regain
+  any, so it cannot change the firewall.
 - **The sandbox fetches public addresses only.** It refuses loopback, private,
   link-local, carrier-grade NAT, multicast and reserved addresses, including
   the VM's gateway, which is the Mac. Every DNS answer must be public, the
   connection goes to the address that was checked, and every redirect is
   checked again. Only http on port 80 and https on port 443 are allowed.
-  Responses are capped at 5 MB, and only HTML and plain text are read.
+  Responses are capped at 5 MB and 45 seconds per request, and only HTML and
+  plain text are read. IPv6 addresses must be global unicast; forms that
+  embed an IPv4 address, such as NAT64, 6to4 and Teredo, are refused.
 - **Both local services stay on loopback.** `tuff research` refuses a
   `--server` or `--sandbox` URL that is not on 127.0.0.1, localhost or ::1.
   The TUFF server already binds to 127.0.0.1 only, so the VM cannot reach it.
@@ -94,8 +113,14 @@ What this does not cover:
 - The sandbox does not filter by domain. To restrict where it can go, run an
   egress proxy in another container and attach the sandbox to an `--internal`
   network.
+- A steered model can still send what it has read, and your question, to any
+  public address as part of a URL it asks to open. No Mac files can leak,
+  because the model has no file tool.
 - A flaw in the Linux kernel or Apple's virtualization layer could let code
-  escape the VM. That is the same risk as any VM.
+  escape the VM, or let code in the VM remove the firewall. That is the same
+  risk as any VM.
+- The image's Python packages and base image are pinned by hash and digest,
+  but `nftables` comes from Debian's current packages when the image is built.
 
 ## Testing the boundaries
 
@@ -110,11 +135,12 @@ Scripts/research_sandbox.sh selftest
 This asks the sandbox to fetch the Mac (the VM's gateway, including the TUFF
 port), loopback, private ranges, cloud metadata addresses, a name that resolves
 to 127.0.0.1, non-standard ports and non-http schemes. Every request must be
-refused. It also opens raw connections from inside the VM to the Mac's TUFF
-port, which must fail, and to a few common Mac service ports. Those only warn,
-because they depend on what else you run. It checks that the API refuses a
-foreign `Host` header and a browser-style POST, and that a public page still
-loads.
+refused. It checks that the firewall is loaded and that the server runs as
+user 10001 with no capabilities. As that user, it then opens raw connections
+from inside the VM to the Mac (the TUFF port, SSH, AirPlay and DNS), common
+router addresses and the cloud metadata address, all of which must fail. It
+checks that the API refuses a foreign `Host` header and a browser-style POST,
+and that a public page still loads.
 
 ### Prompt injection
 
@@ -158,6 +184,8 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
   content in the browser return little text.
 - DuckDuckGo's HTML results can change shape or rate-limit. Set `SEARXNG_URL`
   before `Scripts/research_sandbox.sh start` to use your own SearXNG instead.
+  The firewall makes one exception for it, its address and port only. Give it
+  as an IP address if the name only resolves on your local network.
 - Long pages are read in slices, and older tool results are shortened once the
   conversation approaches `--context-chars`. Models with small catalog
   contexts get fewer pages per answer.

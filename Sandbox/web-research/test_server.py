@@ -6,10 +6,12 @@ import gzip
 import http.client
 import json
 import os
+import socket
 import sys
 import threading
+import time
 import unittest
-from http.server import ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import server  # noqa: E402
@@ -51,8 +53,40 @@ class AddressPolicyTests(unittest.TestCase):
             self.assertFalse(server.is_public_address(address), address)
 
     def test_public_addresses_are_allowed(self):
-        for address in ["93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946"]:
+        for address in ["93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946",
+                        "2001:4860:4860::8888", "::ffff:8.8.8.8"]:
             self.assertTrue(server.is_public_address(address), address)
+
+    def test_ipv6_forms_that_hide_private_addresses_are_refused(self):
+        # Python's is_global accepts all of these.
+        for address in ["::127.0.0.1", "::10.0.0.1", "64:ff9b::a00:1", "64:ff9b::c0a8:1",
+                        "64:ff9b:1::a00:1", "fec0::1", "::ffff:0:127.0.0.1",
+                        "2002:c0a8:101::1", "2001:0:4136:e378:8000:63bf:3fff:fdd2",
+                        "2001:db8::1"]:
+            self.assertFalse(server.is_public_address(address), address)
+
+    def test_ipv4_answer_is_preferred(self):
+        resolve = resolver({"dual.example": ["2606:2800:220:1::1", "93.184.216.34"]})
+        self.assertEqual(server.check_url("https://dual.example/", resolve).address, "93.184.216.34")
+
+    def test_international_host_names_become_punycode(self):
+        seen = []
+
+        def resolve(host, port):
+            seen.append(host)
+            return ["93.184.216.34"]
+        target = server.check_url("https://Bücher.de/suche", resolve)
+        self.assertEqual(seen, ["xn--bcher-kva.de"])
+        self.assertEqual(target.url, "https://xn--bcher-kva.de/suche")
+        with self.assertRaises(ToolError) as caught:
+            server.check_url("https://a..b\u0300.de/", resolve)
+        self.assertEqual(caught.exception.code, "invalid_url")
+
+    def test_control_characters_in_urls_are_refused(self):
+        resolve = resolver({"example.com": ["93.184.216.34"]})
+        for url in ["https://example.com/a\x1b[2J", "https://example.com/a b"]:
+            with self.assertRaises(ToolError, msg=url):
+                server.check_url(url, resolve)
 
     def test_host_gateway_name_is_refused(self):
         resolve = resolver({"host.container.internal": ["192.168.64.1"]})
@@ -155,6 +189,38 @@ class FetchTests(unittest.TestCase):
             200, {"content-type": "text/html", "content-encoding": "gzip"}, body)})
         self.assertIn("bounded", tools.fetch("https://example.com/z")["text"])
 
+    def test_unusual_charsets_fall_back_to_utf8(self):
+        self.assertEqual(server.charset_of("text/html; charset=idna"), "utf-8")
+        self.assertEqual(server.charset_of("text/html; charset=rot13"), "utf-8")
+        self.assertEqual(server.charset_of('text/html; charset="ISO-8859-1"'), "iso8859-1")
+        tools = self.tools({"https://example.com/c": page("<p>ok</p>", content_type="text/html; charset=idna")})
+        self.assertIn("ok", tools.fetch("https://example.com/c")["text"])
+
+    def test_control_characters_are_removed(self):
+        hostile = "<html><head><title>Lake\x1b]0;PWNED\x07\x1b[2J \u202eevil</title></head>" \
+                  "<body><p>Fact\x1b[31m one\x9b.</p></body></html>"
+        tools = self.tools({
+            "https://example.com/h": page(hostile),
+            "https://example.com/t": page("plain\x1b[2J\r\ntext", content_type="text/plain"),
+        })
+        result = tools.fetch("https://example.com/h")
+        self.assertEqual(result["title"], "Lake]0;PWNED[2J evil")
+        for text in (result["title"], result["text"], tools.fetch("https://example.com/t")["text"]):
+            self.assertIsNone(server.CONTROL_CHARACTERS.search(text), repr(text))
+        self.assertEqual(tools.fetch("https://example.com/t")["text"], "plain[2J\ntext")
+        fallback = server._FallbackText()
+        fallback.feed("<p>a\x1bb</p>")
+        self.assertEqual(server.clean_text(fallback.text()), "ab")
+
+    def test_unclosed_titles_do_not_stall_the_server(self):
+        started = time.monotonic()
+        self.assertEqual(server.extract_title("<title" * 1_000_000), "")
+        self.assertEqual(server.extract_title("<title>" + "x" * 5_000_000), "")
+        self.assertEqual(server.extract_title("<title " + "a" * 5_000_000), "")
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertEqual(server.extract_title('<TITLE lang="de">Nachrichten &amp; mehr</TITLE>'),
+                         "Nachrichten & mehr")
+
     def test_argument_bounds(self):
         tools = self.tools({})
         for offset, max_chars in [(-1, 10), (0, 0), (0, server.MAX_SLICE_CHARS + 1), ("1", 10)]:
@@ -179,6 +245,14 @@ class SearchTests(unittest.TestCase):
             {"title": "Other", "url": "https://other.example/page", "snippet": "Second."},
         ])
 
+    def test_result_text_is_cleaned_and_odd_urls_dropped(self):
+        markup = """<div class="result"><a class="result__a" href="https://example.com/\x1b[2J">X</a></div>
+<div class="result"><a class="result__a" href="https://example.com/ok">T\x1b]0;x\x07itle</a>
+<div class="result__snippet">S\x1b[2Jnip</div></div>"""
+        self.assertEqual(server.parse_duckduckgo(markup), [
+            {"title": "T]0;xitle", "url": "https://example.com/ok", "snippet": "S[2Jnip"},
+        ])
+
     def test_search_posts_to_duckduckgo_and_limits_results(self):
         resolve = resolver({"html.duckduckgo.com": ["52.142.124.215"]})
         transport = FakeTransport({"https://html.duckduckgo.com/html/": page(DDG)})
@@ -195,6 +269,60 @@ class SearchTests(unittest.TestCase):
         for query, count in [("", 5), ("x" * 401, 5), ("ok", 0), ("ok", 11), (None, 5)]:
             with self.assertRaises(ToolError):
                 tools.search(query, count)
+
+
+class _DripHandler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", "1000")
+        self.end_headers()
+        if self.path == "/drip":
+            try:
+                for _ in range(1000):
+                    self.wfile.write(b"x")
+                    self.wfile.flush()
+                    time.sleep(0.2)
+            except OSError:
+                pass
+        else:
+            self.wfile.write(b"y" * 1000)
+
+
+class PinnedTransportTests(unittest.TestCase):
+    """Uses a real socket on loopback, which check_url would refuse, so the
+    target is built by hand."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), _DripHandler)
+        cls.httpd.daemon_threads = True
+        cls.port = cls.httpd.server_address[1]
+        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+
+    def target(self, path):
+        # The name does not resolve: the connection must go to the pinned address.
+        return server.Target("http", "pinned.invalid", self.port, path, "127.0.0.1")
+
+    def test_connects_to_the_pinned_address(self):
+        response = server.pinned_transport(
+            "GET", self.target("/"), {"Host": "pinned.invalid"}, None, deadline=5)
+        self.assertEqual((response.status, response.body), (200, b"y" * 1000))
+
+    def test_slow_drip_hits_the_overall_deadline(self):
+        started = time.monotonic()
+        with self.assertRaises(ToolError) as caught:
+            server.pinned_transport("GET", self.target("/drip"), {}, None, deadline=1)
+        self.assertEqual(caught.exception.code, "fetch_timeout")
+        self.assertLess(time.monotonic() - started, 3)
 
 
 class InjectionFixtureTests(unittest.TestCase):
