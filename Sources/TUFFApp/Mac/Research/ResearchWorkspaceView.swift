@@ -83,7 +83,8 @@ struct ResearchWorkspaceView: View {
                 .buttonStyle(.link)
                 Spacer(minLength: 8)
                 if !research.servicesReady && !research.run.isRunning {
-                    Text("Start both services first.")
+                    Text(research.sandbox.state == .ready && research.server.state == .ready
+                         ? "Waiting for the sandbox check." : "Start both services first.")
                         .appFont(.callout)
                         .foregroundStyle(.secondary)
                 }
@@ -324,8 +325,15 @@ private struct ResearchServicesCard: View {
         case .ready:
             var text = "Ready on 127.0.0.1:\(server.port), only this Mac can reach it. "
             switch server.owner {
-            case .backgroundAPI: text += "This is the Background API from the Server screen."
-            case .app: text += "Started by this screen; it stops when TUFF quits."
+            case .backgroundAPI:
+                text += "This is the Background API from the Server screen"
+                text += server.backgroundAPIWasOn
+                    ? "; it was already on, and stopping it here turns it off."
+                    : "; stopping it here turns it off again."
+            case .app:
+                text += server.adoptedFromLastRun
+                    ? "Left running when TUFF last closed unexpectedly; it stops when TUFF quits."
+                    : "Started by this screen; it stops when TUFF quits."
             case .outside: text += "Started outside TUFF."
             case .none: break
             }
@@ -345,7 +353,7 @@ private struct ResearchServicesCard: View {
         return ResearchServiceRow(
             title: "Web sandbox",
             systemImage: "shippingbox.and.arrow.backward",
-            state: ServiceDisplay(sandbox.state),
+            state: ServiceDisplay(sandbox.state, protection: sandbox.protection),
             detail: sandboxDetail,
             isOn: sandbox.state != .off,
             isBusy: sandbox.state.isBusy,
@@ -368,7 +376,18 @@ private struct ResearchServicesCard: View {
         case .stopping:
             return "Stopping the VM…"
         case .ready:
-            return "A fresh VM is ready on 127.0.0.1:9000. It has no Mac folders and can only reach public web addresses."
+            let leftOver = sandbox.adoptedFromLastRun
+                ? " It was left running when TUFF last closed unexpectedly; it stops when TUFF quits." : ""
+            switch sandbox.protection {
+            case .verified:
+                return "Ready on 127.0.0.1:9000, with no Mac folders. Checked: its firewall is on and "
+                    + "the web server runs without privileges. It can reach public web addresses, "
+                    + "and on this Mac only the DNS port when it uses the Mac's DNS." + leftOver
+            case .checking, .unknown:
+                return "Checking the sandbox's firewall and privileges…" + leftOver
+            case .notVerified(let message):
+                return "Not verified: " + message + " Questions stay off until the check passes."
+            }
         case .off:
             if sandbox.repository == nil {
                 return "Choose your TUFF folder so the app can find the web sandbox."
@@ -382,7 +401,8 @@ private struct ResearchServicesCard: View {
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
-        panel.message = "Choose the TUFF folder you built this app from."
+        panel.message = "Choose the TUFF folder you built this app from. TUFF runs that folder's "
+            + "Scripts/research_sandbox.sh to build and start the sandbox, so choose only your own checkout."
         panel.prompt = "Choose"
         if panel.runModal() == .OK, let url = panel.url {
             research.sandbox.chooseRepository(url)
@@ -404,7 +424,16 @@ private struct ServiceDisplay: Equatable {
         }
     }
 
-    init(_ state: ResearchSandboxController.State) {
+    init(_ state: ResearchSandboxController.State,
+         protection: ResearchSandboxController.Protection) {
+        if state == .ready {
+            switch protection {
+            case .verified: self.init("Ready", .green)
+            case .checking, .unknown: self.init("Checking", .orange)
+            case .notVerified: self.init("Not verified", .red)
+            }
+            return
+        }
         switch state {
         case .off: self.init("Off", .secondary)
         case .preparing: self.init("Preparing", .orange)
@@ -415,7 +444,7 @@ private struct ServiceDisplay: Equatable {
         }
     }
 
-    private init(_ label: String, _ color: Color) {
+    fileprivate init(_ label: String, _ color: Color) {
         self.label = label
         self.color = color
     }

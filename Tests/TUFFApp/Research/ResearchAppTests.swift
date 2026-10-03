@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 @testable import TUFFAppResearch
@@ -226,6 +227,17 @@ import TUFFAppServer
         return defaults
     }
 
+    private func controller(runner: FakeProcessRunner = FakeProcessRunner(),
+                            services: FakeResearchServices = FakeResearchServices(),
+                            checkout: URL? = nil,
+                            stateDirectory: URL = temporaryDirectory()) throws
+        -> ResearchSandboxController {
+        ResearchSandboxController(
+            runner: runner, transport: services, defaults: defaults(),
+            environment: [:], searchStart: [try checkout ?? fakeCheckout()],
+            stateDirectory: stateDirectory)
+    }
+
     @Test func findsTheCheckoutAboveABuildFolder() throws {
         let root = try fakeCheckout()
         let build = root.appendingPathComponent(".build/arm64-apple-macosx/release", isDirectory: true)
@@ -237,35 +249,104 @@ import TUFFAppServer
             startingAt: temporaryDirectory(), fileExists: { _ in false }) == nil)
     }
 
-    @Test func firstStartBuildsTheImageThenStarts() async throws {
+    @Test func firstStartBuildsTheImageThenStartsAndChecksProtection() async throws {
         let root = try fakeCheckout()
         let runner = FakeProcessRunner()
-        let services = FakeResearchServices()
-        let settings = defaults()
-        let controller = ResearchSandboxController(
-            runner: runner, transport: services, defaults: settings,
-            environment: [:], searchStart: [root])
-        #expect(controller.repository != nil)
+        let sandbox = try controller(runner: runner, checkout: root)
+        #expect(sandbox.repository != nil)
 
-        await controller.start()
-        #expect(controller.state == .ready)
-        #expect(controller.startedByApp)
-        #expect(runner.commands.map { $0.last } == ["build", "start"])
+        await sandbox.start()
+        #expect(sandbox.state == .ready)
+        #expect(sandbox.protection == .verified)
+        #expect(sandbox.startedByApp)
+        #expect(runner.scriptCommands == ["build", "start"])
+        #expect(runner.commands.contains {
+            $0.starts(with: ["env", "container", "exec", "tuff-web-research", "nft"])
+        })
 
         // Unchanged files and an existing image: no rebuild.
-        await controller.stop()
-        #expect(controller.state == .off)
-        await controller.start()
-        #expect(runner.commands.map { $0.last } == [
-            "build", "start", "stop", ResearchSandboxController.imageName, "start",
-        ])
+        await sandbox.stop()
+        #expect(sandbox.state == .off)
+        #expect(sandbox.protection == .unknown)
+        await sandbox.start()
+        #expect(runner.scriptCommands == ["build", "start", "stop", "start"])
+        #expect(runner.commands.contains { $0.last == ResearchSandboxController.imageName })
 
         // A changed sandbox file is rebuilt before the next start.
-        await controller.stop()
+        await sandbox.stop()
         try Data("print('changed')\n".utf8).write(
             to: root.appendingPathComponent("Sandbox/web-research/server.py"))
-        await controller.start()
-        #expect(runner.commands.suffix(2).map { $0.last } == ["build", "start"])
+        await sandbox.start()
+        #expect(runner.scriptCommands.suffix(2) == ["build", "start"])
+    }
+
+    @Test func aSandboxWithoutItsFirewallIsNotVerified() async throws {
+        let runner = FakeProcessRunner { command in
+            command.contains("nft")
+                ? ResearchProcessResult(status: 1, output: "Error: No such file or directory")
+                : FakeProcessRunner.healthy(command)
+        }
+        let sandbox = try controller(runner: runner)
+        await sandbox.start()
+        #expect(sandbox.state == .ready)
+        guard case .notVerified(let message) = sandbox.protection else {
+            Issue.record("expected not verified, got \(sandbox.protection)")
+            return
+        }
+        #expect(message.contains("firewall"))
+    }
+
+    @Test func aPrivilegedServerIsNotVerified() async throws {
+        let runner = FakeProcessRunner { command in
+            command.contains("python3")
+                ? ResearchProcessResult(status: 0, output: "0 CapPrm,CapEff\n")
+                : FakeProcessRunner.healthy(command)
+        }
+        let sandbox = try controller(runner: runner)
+        await sandbox.start()
+        guard case .notVerified(let message) = sandbox.protection else {
+            Issue.record("expected not verified, got \(sandbox.protection)")
+            return
+        }
+        #expect(message.contains("0 CapPrm,CapEff"))
+    }
+
+    @Test func aSandboxAlreadyAnsweringIsCheckedBeforeUse() async throws {
+        let services = FakeResearchServices(sandboxHealthy: true)
+        let sandbox = try controller(services: services)
+        await sandbox.refresh()
+        #expect(sandbox.state == .ready)
+        #expect(sandbox.protection == .verified)
+        services.setSandboxHealthy(false)
+        await sandbox.refresh()
+        #expect(sandbox.state == .off)
+        #expect(sandbox.protection == .unknown)
+    }
+
+    @Test func aSandboxLeftFromACrashIsAdoptedAndStoppedAtQuit() async throws {
+        let state = temporaryDirectory()
+        let checkout = try fakeCheckout()
+        let first = try controller(checkout: checkout, stateDirectory: state)
+        await first.start()
+        #expect(first.startedByApp)
+
+        // The app "crashed": a new controller finds the marker.
+        let services = FakeResearchServices(sandboxHealthy: true)
+        let second = try controller(services: services, checkout: checkout, stateDirectory: state)
+        #expect(second.startedByApp)
+        #expect(second.adoptedFromLastRun)
+        await second.refresh()
+        #expect(second.state == .ready)
+
+        // If the VM is gone, the marker is dropped.
+        let third = try controller(
+            services: FakeResearchServices(sandboxHealthy: false),
+            checkout: checkout, stateDirectory: state)
+        await third.refresh()
+        #expect(!third.startedByApp)
+        #expect(!third.adoptedFromLastRun)
+        let fourth = try controller(checkout: checkout, stateDirectory: state)
+        #expect(!fourth.startedByApp)
     }
 
     @Test func reportsAMissingContainerTool() async throws {
@@ -274,41 +355,29 @@ import TUFFAppServer
                 status: 1,
                 output: "Apple container is not installed; see https://github.com/apple/container\n")
         }
-        let controller = ResearchSandboxController(
-            runner: runner, transport: FakeResearchServices(sandboxHealthy: false),
-            defaults: defaults(), environment: [:], searchStart: [try fakeCheckout()])
-        await controller.start()
-        guard case .failed(let message) = controller.state else {
-            Issue.record("expected a failure, got \(controller.state)")
+        let sandbox = try controller(
+            runner: runner, services: FakeResearchServices(sandboxHealthy: false))
+        await sandbox.start()
+        guard case .failed(let message) = sandbox.state else {
+            Issue.record("expected a failure, got \(sandbox.state)")
             return
         }
         #expect(message.contains("Apple container is not installed"))
-        #expect(!controller.startedByApp)
+        #expect(!sandbox.startedByApp)
     }
 
     @Test func withoutACheckoutItAsksForTheFolder() async {
-        let controller = ResearchSandboxController(
+        let sandbox = ResearchSandboxController(
             runner: FakeProcessRunner(), transport: FakeResearchServices(sandboxHealthy: false),
-            defaults: defaults(), environment: [:], searchStart: [temporaryDirectory()])
-        #expect(controller.repository == nil)
-        await controller.start()
-        guard case .failed(let message) = controller.state else {
-            Issue.record("expected a failure, got \(controller.state)")
+            defaults: defaults(), environment: [:], searchStart: [temporaryDirectory()],
+            stateDirectory: temporaryDirectory())
+        #expect(sandbox.repository == nil)
+        await sandbox.start()
+        guard case .failed(let message) = sandbox.state else {
+            Issue.record("expected a failure, got \(sandbox.state)")
             return
         }
         #expect(message.contains("TUFF folder"))
-    }
-
-    @Test func refreshFollowsTheHealthCheck() async throws {
-        let services = FakeResearchServices(sandboxHealthy: true)
-        let controller = ResearchSandboxController(
-            runner: FakeProcessRunner(), transport: services,
-            defaults: defaults(), environment: [:], searchStart: [try fakeCheckout()])
-        await controller.refresh()
-        #expect(controller.state == .ready)
-        services.setSandboxHealthy(false)
-        await controller.refresh()
-        #expect(controller.state == .off)
     }
 
     @Test func pathIncludesWhereContainerInstalls() {
@@ -318,20 +387,65 @@ import TUFFAppServer
         #expect(path.contains("/opt/homebrew/bin"))
         #expect(Set(path).count == path.count)
     }
+
+    @Test func aHungCommandIsEnded() async throws {
+        let started = ContinuousClock.now
+        let result = try await FoundationProcessRunner().run(
+            executable: URL(fileURLWithPath: "/bin/sleep"), arguments: ["30"],
+            environment: [:], timeout: 0.5)
+        #expect(result.status != 0)
+        #expect(ContinuousClock.now - started < .seconds(10))
+    }
 }
 
 @Suite @MainActor struct ResearchModelServerControllerTests {
+    private func server(listedModels: [String]?,
+                        stateDirectory: URL = temporaryDirectory(),
+                        processName: @escaping (pid_t) -> String? = { _ in nil })
+        -> ResearchModelServerController {
+        ResearchModelServerController(
+            backgroundAPI: backgroundAPI(),
+            transport: FakeResearchServices(listedModels: listedModels),
+            serverExecutable: nil, modelsRoot: nil,
+            logURL: temporaryDirectory().appendingPathComponent("server.log"),
+            stateDirectory: stateDirectory,
+            processName: processName)
+    }
+
+    @Test func aServerLeftFromACrashIsTakenOver() async throws {
+        let state = temporaryDirectory()
+        try FileManager.default.createDirectory(at: state, withIntermediateDirectories: true)
+        try Data("4242".utf8).write(to: state.appendingPathComponent("server.pid"))
+        let controller = server(listedModels: ["gemma-4-e4b-it"], stateDirectory: state,
+                                processName: { $0 == 4242 ? "TUFFServer" : nil })
+        #expect(controller.adoptedFromLastRun)
+        await controller.refresh()
+        #expect(controller.owner == .app)
+    }
+
+    @Test func aMarkerNamingAnotherProgramIsIgnored() throws {
+        let state = temporaryDirectory()
+        try FileManager.default.createDirectory(at: state, withIntermediateDirectories: true)
+        let marker = state.appendingPathComponent("server.pid")
+        try Data("4242".utf8).write(to: marker)
+        let controller = server(listedModels: nil, stateDirectory: state,
+                                processName: { _ in "Safari" })
+        #expect(!controller.adoptedFromLastRun)
+        #expect(!FileManager.default.fileExists(atPath: marker.path))
+    }
+
+    @Test func readsTheNameOfARunningProcess() {
+        #expect(ResearchModelServerController.processName(getpid()) != nil)
+        #expect(ResearchModelServerController.processName(999_999) == nil)
+    }
+
     private func backgroundAPI() -> AppBackgroundAPIController {
         AppBackgroundAPIController(
             settingsURL: temporaryDirectory().appendingPathComponent("server.json"))
     }
 
     @Test func aServerStartedElsewhereIsUsedButNotStopped() async {
-        let controller = ResearchModelServerController(
-            backgroundAPI: backgroundAPI(),
-            transport: FakeResearchServices(listedModels: ["gemma-4-e4b-it", "qwen-x"]),
-            serverExecutable: nil, modelsRoot: nil,
-            logURL: temporaryDirectory().appendingPathComponent("server.log"))
+        let controller = server(listedModels: ["gemma-4-e4b-it", "qwen-x"])
         await controller.refresh()
         #expect(controller.state == .ready)
         #expect(controller.owner == .outside)
@@ -347,11 +461,7 @@ import TUFFAppServer
     }
 
     @Test func withNoServerToStartItSaysHowToBuildOne() async {
-        let controller = ResearchModelServerController(
-            backgroundAPI: backgroundAPI(),
-            transport: FakeResearchServices(listedModels: nil),
-            serverExecutable: nil, modelsRoot: nil,
-            logURL: temporaryDirectory().appendingPathComponent("server.log"))
+        let controller = server(listedModels: nil)
         #expect(!controller.canStart)
         await controller.refresh()
         #expect(controller.state == .off)

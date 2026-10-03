@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Observation
 import TUFFAppServer
@@ -41,6 +42,12 @@ public final class ResearchModelServerController {
     public private(set) var state: State = .off
     public private(set) var owner: Owner = .none
     public private(set) var models: [ResearchServedModel] = []
+    /// True when a server this screen started was still running from an
+    /// earlier session that did not quit normally, and was taken over.
+    public private(set) var adoptedFromLastRun = false
+    /// Whether the Background API was already on when the app opened, so
+    /// the screen can say that stopping here turns it off.
+    public let backgroundAPIWasOn: Bool
     /// Where a server this screen started keeps its log.
     public let logURL: URL
 
@@ -49,17 +56,61 @@ public final class ResearchModelServerController {
     private let serverExecutable: URL?
     private let modelsRoot: URL?
     private var process: Process?
+    /// A server this screen started in an earlier session, by process id.
+    private var adoptedPID: pid_t?
+    private let stateDirectory: URL
+    private let processName: (pid_t) -> String?
+
+    static let markerName = "server.pid"
 
     public init(backgroundAPI: AppBackgroundAPIController,
                 transport: any ResearchHTTPTransport = URLSessionResearchTransport(timeout: 3),
                 serverExecutable: URL? = ResearchModelServerController.findServerExecutable(),
                 modelsRoot: URL? = ResearchModelServerController.preferredModelsRoot(),
-                logURL: URL = ResearchModelServerController.defaultLogURL()) {
+                logURL: URL = ResearchModelServerController.defaultLogURL(),
+                stateDirectory: URL = ResearchSandboxController.defaultStateDirectory(),
+                processName: @escaping (pid_t) -> String? = ResearchModelServerController.processName) {
         self.backgroundAPI = backgroundAPI
+        self.stateDirectory = stateDirectory
+        self.processName = processName
+        backgroundAPIWasOn = backgroundAPI.isAvailable && backgroundAPI.settings.enabled
         self.transport = transport
         self.serverExecutable = serverExecutable
         self.modelsRoot = modelsRoot
         self.logURL = logURL
+        // A crash or force-quit skips the cleanup at quit. The marker names
+        // the server it left behind, which is taken over only if that
+        // process is still a TUFFServer.
+        let marker = stateDirectory.appendingPathComponent(Self.markerName)
+        if let text = try? String(contentsOf: marker, encoding: .utf8),
+           let pid = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 1,
+           processName(pid) == "TUFFServer" {
+            adoptedPID = pid
+            adoptedFromLastRun = true
+        } else {
+            try? FileManager.default.removeItem(at: marker)
+        }
+    }
+
+    private var markerURL: URL { stateDirectory.appendingPathComponent(Self.markerName) }
+
+    private var appServerIsRunning: Bool {
+        if process?.isRunning == true { return true }
+        guard let adoptedPID else { return false }
+        return processName(adoptedPID) == "TUFFServer"
+    }
+
+    /// The short name of a running process, or nil when there is none.
+    public nonisolated static func processName(_ pid: pid_t) -> String? {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        guard sysctl(&mib, u_int(mib.count), &info, &size, nil, 0) == 0, size > 0 else {
+            return nil
+        }
+        return withUnsafeBytes(of: info.kp_proc.p_comm) { bytes in
+            String(decoding: bytes.prefix { $0 != 0 }, as: UTF8.self)
+        }
     }
 
     public var port: Int { backgroundAPI.settings.port }
@@ -81,7 +132,7 @@ public final class ResearchModelServerController {
         if let listed {
             models = listed
             state = .ready
-            if process?.isRunning == true {
+            if appServerIsRunning {
                 owner = .app
             } else if backgroundAPI.isAvailable && backgroundAPI.settings.enabled {
                 owner = .backgroundAPI
@@ -92,6 +143,11 @@ public final class ResearchModelServerController {
             models = []
             owner = .none
             if state == .ready { state = .off }
+            if let adoptedPID, processName(adoptedPID) != "TUFFServer" {
+                self.adoptedPID = nil
+                adoptedFromLastRun = false
+                try? FileManager.default.removeItem(at: markerURL)
+            }
         }
     }
 
@@ -201,10 +257,15 @@ public final class ResearchModelServerController {
         }
         try process.run()
         self.process = process
+        adoptedPID = nil
+        adoptedFromLastRun = false
+        try? FileManager.default.createDirectory(at: stateDirectory, withIntermediateDirectories: true)
+        try? Data(String(process.processIdentifier).utf8).write(to: markerURL, options: .atomic)
     }
 
     private func processEnded() {
         process = nil
+        try? FileManager.default.removeItem(at: markerURL)
         if owner == .app, state == .ready {
             state = .failed("The model server stopped. " + tailOfLog())
             owner = .none
@@ -213,6 +274,12 @@ public final class ResearchModelServerController {
     }
 
     private func stopProcess() {
+        if let adoptedPID, processName(adoptedPID) == "TUFFServer" {
+            kill(adoptedPID, SIGTERM)
+        }
+        adoptedPID = nil
+        adoptedFromLastRun = false
+        try? FileManager.default.removeItem(at: markerURL)
         guard let process, process.isRunning else {
             self.process = nil
             return

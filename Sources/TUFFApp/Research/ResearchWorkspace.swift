@@ -33,8 +33,11 @@ public final class ResearchWorkspace {
             run: ResearchRunController(store: reports))
     }
 
+    /// Questions need both services, and a sandbox whose firewall and
+    /// privileges were checked from outside the VM.
     public var servicesReady: Bool {
-        sandbox.state == .ready && server.state == .ready && !server.models.isEmpty
+        sandbox.state == .ready && sandbox.protection == .verified
+            && server.state == .ready && !server.models.isEmpty
     }
 
     public var anyServiceOn: Bool {

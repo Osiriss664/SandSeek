@@ -99,17 +99,27 @@ final class FakeProcessRunner: ResearchProcessRunning, @unchecked Sendable {
     private let reply: @Sendable ([String]) -> ResearchProcessResult
     private var recorded: [[String]] = []
 
-    init(reply: @escaping @Sendable ([String]) -> ResearchProcessResult = { _ in
-        ResearchProcessResult(status: 0, output: "")
-    }) {
+    /// By default every command succeeds, and the in-VM privilege check
+    /// reports the unprivileged user the sandbox should run as.
+    init(reply: @escaping @Sendable ([String]) -> ResearchProcessResult = FakeProcessRunner.healthy) {
         self.reply = reply
     }
 
     var commands: [[String]] { lock.withLock { recorded } }
 
+    @Sendable static func healthy(_ command: [String]) -> ResearchProcessResult {
+        ResearchProcessResult(status: 0, output: command.contains("python3") ? "10001 none\n" : "")
+    }
+
+    /// The script commands only: build, start, stop, selftest.
+    var scriptCommands: [String] {
+        commands.filter { $0.first == "bash" }.compactMap(\.last)
+    }
+
     func run(executable: URL,
              arguments: [String],
-             environment: [String: String]) async throws -> ResearchProcessResult {
+             environment: [String: String],
+             timeout: TimeInterval) async throws -> ResearchProcessResult {
         let command = [executable.lastPathComponent] + arguments
         lock.withLock { recorded.append(command) }
         return reply(command)

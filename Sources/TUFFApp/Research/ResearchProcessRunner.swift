@@ -20,9 +20,12 @@ public struct ResearchProcessResult: Equatable, Sendable {
 /// Runs a command-line tool to completion. Tests replace it with a fake; the
 /// app uses `FoundationProcessRunner`.
 public protocol ResearchProcessRunning: Sendable {
+    /// Ends the process with SIGTERM if it is still running after `timeout`
+    /// seconds, so a hung `container` command cannot block the screen.
     func run(executable: URL,
              arguments: [String],
-             environment: [String: String]) async throws -> ResearchProcessResult
+             environment: [String: String],
+             timeout: TimeInterval) async throws -> ResearchProcessResult
 }
 
 public struct FoundationProcessRunner: ResearchProcessRunning {
@@ -33,13 +36,15 @@ public struct FoundationProcessRunner: ResearchProcessRunning {
     /// never reach end-of-file.
     public func run(executable: URL,
                     arguments: [String],
-                    environment: [String: String]) async throws -> ResearchProcessResult {
+                    environment: [String: String],
+                    timeout: TimeInterval) async throws -> ResearchProcessResult {
         let log = FileManager.default.temporaryDirectory
             .appendingPathComponent("tuff-research-\(UUID().uuidString).log")
         guard FileManager.default.createFile(atPath: log.path, contents: nil) else {
             throw CocoaError(.fileWriteUnknown)
         }
         let handle = try FileHandle(forWritingTo: log)
+        let finished = ProcessFinishedFlag()
         return try await withCheckedThrowingContinuation { continuation in
             let process = Process()
             process.executableURL = executable
@@ -48,16 +53,22 @@ public struct FoundationProcessRunner: ResearchProcessRunning {
             process.standardInput = FileHandle.nullDevice
             process.standardOutput = handle
             process.standardError = handle
-            process.terminationHandler = { finished in
+            process.terminationHandler = { ended in
+                finished.set()
                 try? handle.close()
                 let data = (try? Data(contentsOf: log)) ?? Data()
                 try? FileManager.default.removeItem(at: log)
                 continuation.resume(returning: ResearchProcessResult(
-                    status: finished.terminationStatus,
+                    status: ended.terminationStatus,
                     output: String(decoding: data, as: UTF8.self)))
             }
             do {
                 try process.run()
+                let pid = process.processIdentifier
+                DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
+                    // The flag keeps a reused process id from being signalled.
+                    if !finished.isSet { kill(pid, SIGTERM) }
+                }
             } catch {
                 try? handle.close()
                 try? FileManager.default.removeItem(at: log)
@@ -83,4 +94,12 @@ public enum ResearchCommandEnvironment {
         environment["PATH"] = path.joined(separator: ":")
         return environment
     }
+}
+
+private final class ProcessFinishedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    var isSet: Bool { lock.withLock { value } }
+    func set() { lock.withLock { value = true } }
 }

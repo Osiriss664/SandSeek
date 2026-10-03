@@ -83,18 +83,40 @@ public final class ResearchSandboxController {
         }
     }
 
+    /// Whether the running VM's protection was checked from outside it.
+    public enum Protection: Equatable, Sendable {
+        case unknown
+        case checking
+        case verified
+        case notVerified(String)
+    }
+
     public static let imageName = "tuff-web-research:latest"
+    public static let containerName = "tuff-web-research"
     public static let defaultURL = URL(string: "http://127.0.0.1:9000")!
     static let repositoryKey = "ResearchRepositoryPath"
     static let fingerprintKey = "ResearchSandboxImageFingerprint"
+    static let markerName = "sandbox-started-by-app"
 
-    public private(set) var state: State = .off
+    public private(set) var state: State = .off {
+        didSet {
+            if state != .ready { protection = .unknown }
+        }
+    }
+    public private(set) var protection: Protection = .unknown
+    /// True when a sandbox this app started was still running from an
+    /// earlier session that did not quit normally.
+    public private(set) var adoptedFromLastRun = false
     public private(set) var repository: URL?
     public private(set) var selfTest: ResearchSelfTestResult?
     public private(set) var isRunningSelfTest = false
     /// True once this app started the sandbox, so quitting stops it again.
-    public private(set) var startedByApp = false
+    /// A marker file keeps it across a crash or force-quit.
+    public private(set) var startedByApp = false {
+        didSet { writeMarker() }
+    }
     public let baseURL: URL
+    private let stateDirectory: URL
 
     private let runner: any ResearchProcessRunning
     private let transport: any ResearchHTTPTransport
@@ -106,8 +128,10 @@ public final class ResearchSandboxController {
                 transport: any ResearchHTTPTransport = URLSessionResearchTransport(timeout: 3),
                 defaults: UserDefaults = .standard,
                 environment: [String: String] = ResearchCommandEnvironment.environment(),
-                searchStart: [URL] = ResearchSandboxController.defaultSearchStart()) {
+                searchStart: [URL] = ResearchSandboxController.defaultSearchStart(),
+                stateDirectory: URL = ResearchSandboxController.defaultStateDirectory()) {
         self.baseURL = baseURL
+        self.stateDirectory = stateDirectory
         self.runner = runner
         self.transport = transport
         self.defaults = defaults
@@ -119,6 +143,28 @@ public final class ResearchSandboxController {
         repository = candidates.lazy.compactMap {
             Self.findRepository(startingAt: $0, fileExists: FileManager.default.fileExists(atPath:))
         }.first
+        // Set directly: didSet observers do not run in an initializer.
+        startedByApp = FileManager.default.fileExists(atPath: markerURL.path)
+        adoptedFromLastRun = startedByApp
+    }
+
+    /// Where the app keeps small state files about what it started.
+    public nonisolated static func defaultStateDirectory() -> URL {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first ?? FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Application Support", isDirectory: true)
+        return support.appendingPathComponent("TUFF/Research", isDirectory: true)
+    }
+
+    private var markerURL: URL { stateDirectory.appendingPathComponent(Self.markerName) }
+
+    private func writeMarker() {
+        if startedByApp {
+            try? FileManager.default.createDirectory(at: stateDirectory, withIntermediateDirectories: true)
+            FileManager.default.createFile(atPath: markerURL.path, contents: Data())
+        } else {
+            try? FileManager.default.removeItem(at: markerURL)
+        }
     }
 
     /// Where a TUFF checkout is likely to be: above the running app when it
@@ -175,10 +221,65 @@ public final class ResearchSandboxController {
         guard !state.isBusy else { return }
         if healthy {
             state = .ready
-        } else if state == .ready {
-            state = .off
+            if protection == .unknown { await verifyProtection() }
+        } else {
+            if state == .ready { state = .off }
+            if adoptedFromLastRun {
+                // The marker outlived the VM; nothing is left to stop.
+                adoptedFromLastRun = false
+                startedByApp = false
+            }
         }
     }
+
+    /// Checks from outside the VM that its firewall is loaded and that the
+    /// web server runs as the unprivileged user with no capabilities. The
+    /// screen only allows questions once this passes, whatever the folder's
+    /// script did, and it also shows that port 9000 really is this sandbox.
+    public func verifyProtection() async {
+        guard state == .ready, protection != .checking else { return }
+        protection = .checking
+        let firewall = try? await runner.run(
+            executable: URL(fileURLWithPath: "/usr/bin/env"),
+            arguments: ["container", "exec", Self.containerName,
+                        "nft", "list", "table", "inet", "tuff_sandbox"],
+            environment: environment, timeout: 30)
+        guard state == .ready else { return }
+        guard firewall?.status == 0 else {
+            protection = .notVerified("The sandbox's firewall is not loaded, or this is not "
+                + "the TUFF sandbox. Stop it, then start it again.")
+            return
+        }
+        let privileges = try? await runner.run(
+            executable: URL(fileURLWithPath: "/usr/bin/env"),
+            arguments: ["container", "exec", Self.containerName,
+                        "python3", "-c", Self.privilegeCheck],
+            environment: environment, timeout: 30)
+        guard state == .ready else { return }
+        let found = privileges?.output.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard privileges?.status == 0, found == "10001 none" else {
+            protection = .notVerified("The sandbox's web server is not running as the "
+                + "unprivileged user without capabilities (found: \(found.isEmpty ? "nothing" : String(found.prefix(80)))).")
+            return
+        }
+        protection = .verified
+    }
+
+    /// The same check `research_sandbox.sh selftest` runs: the user id and
+    /// any capability sets of the process running /app/server.py.
+    static let privilegeCheck = """
+    import glob
+    for path in glob.glob("/proc/[0-9]*/cmdline"):
+        try:
+            if b"/app/server.py" not in open(path, "rb").read().split(b"\\0"):
+                continue
+            status = dict(l.split(":", 1) for l in open(path[:-7] + "status") if ":" in l)
+        except OSError:
+            continue
+        caps = [n for n in ("CapPrm", "CapEff", "CapBnd", "CapAmb") if int(status[n], 16)]
+        print(status["Uid"].split()[0], ",".join(caps) or "none")
+        break
+    """
 
     private func isHealthy() async -> Bool {
         do {
@@ -216,8 +317,13 @@ public final class ResearchSandboxController {
             return
         }
         startedByApp = true
-        state = await isHealthy() ? .ready
-            : .failed("The sandbox started but does not answer on \(baseURL.absoluteString).")
+        adoptedFromLastRun = false
+        guard await isHealthy() else {
+            state = .failed("The sandbox started but does not answer on \(baseURL.absoluteString).")
+            return
+        }
+        state = .ready
+        await verifyProtection()
     }
 
     public func stop() async {
@@ -230,6 +336,7 @@ public final class ResearchSandboxController {
         selfTest = nil
         guard let stopped = await runScript(script, "stop") else { return }
         startedByApp = false
+        adoptedFromLastRun = false
         state = stopped.status == 0 ? .off
             : .failed(Self.message(for: stopped, doing: "stop the sandbox"))
     }
@@ -243,7 +350,7 @@ public final class ResearchSandboxController {
             let result = try await runner.run(
                 executable: URL(fileURLWithPath: "/bin/bash"),
                 arguments: [script.path, "selftest"],
-                environment: environment)
+                environment: environment, timeout: 300)
             selfTest = ResearchSelfTestResult.parse(result.output, status: result.status)
         } catch {
             selfTest = ResearchSelfTestResult(
@@ -265,11 +372,13 @@ public final class ResearchSandboxController {
     }
 
     private func runScript(_ script: URL, _ command: String) async -> ResearchProcessResult? {
+        // A first image build downloads Python and its packages.
+        let timeout: TimeInterval = command == "build" ? 1_800 : 180
         do {
             return try await runner.run(
                 executable: URL(fileURLWithPath: "/bin/bash"),
                 arguments: [script.path, command],
-                environment: environment)
+                environment: environment, timeout: timeout)
         } catch {
             state = .failed("Could not run the sandbox script: \(error.localizedDescription)")
             return nil
@@ -281,7 +390,7 @@ public final class ResearchSandboxController {
         let inspected = try? await runner.run(
             executable: URL(fileURLWithPath: "/usr/bin/env"),
             arguments: ["container", "image", "inspect", Self.imageName],
-            environment: environment)
+            environment: environment, timeout: 60)
         return inspected?.status != 0
     }
 
