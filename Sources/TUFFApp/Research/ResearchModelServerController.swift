@@ -95,15 +95,19 @@ public final class ResearchModelServerController {
         }
     }
 
+    private struct ModelList: Decodable {
+        struct Model: Decodable { let id: String }
+        let data: [Model]
+    }
+
     /// The models the server lists, or nil when nothing answers.
     private func listModels() async -> [ResearchServedModel]? {
         guard let response = try? await transport.send(
             method: "GET", url: serverURL.appendingPathComponent("v1/models"), body: nil),
               response.status == 200,
-              let reply = try? ResearchJSON.decode(response.body) else { return nil }
-        return (reply["data"]?.arrayValue ?? []).compactMap { item in
-            item["id"]?.stringValue.map(ResearchServedModel.init(id:))
-        }
+              let reply = try? JSONDecoder().decode(ModelList.self, from: response.body)
+        else { return nil }
+        return reply.data.map { ResearchServedModel(id: $0.id) }
     }
 
     public func start() async {
