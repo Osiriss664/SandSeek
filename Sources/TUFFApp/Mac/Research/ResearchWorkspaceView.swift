@@ -122,11 +122,13 @@ struct ResearchWorkspaceView: View {
 
     private func ask() {
         guard canAsk else { return }
-        research.ask(question, settings: ResearchRunSettings(
+        let settings = ResearchRunSettings(
             model: selectedModel,
             showThinking: showThinking,
             maxSteps: min(max(maxSteps, 1), 32),
-            pageCharacters: min(max(pageCharacters, 500), 20_000)))
+            pageCharacters: min(max(pageCharacters, 500), 20_000))
+        let question = question
+        Task { await research.ask(question, settings: settings) }
     }
 
     /// Keeps the picked model when the server still lists it; otherwise

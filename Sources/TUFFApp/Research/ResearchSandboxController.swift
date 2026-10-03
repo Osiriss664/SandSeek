@@ -245,9 +245,14 @@ public final class ResearchSandboxController {
                         "nft", "list", "table", "inet", "tuff_sandbox"],
             environment: environment, timeout: 30)
         guard state == .ready else { return }
-        guard firewall?.status == 0 else {
+        guard let firewall, firewall.status == 0 else {
             protection = .notVerified("The sandbox's firewall is not loaded, or this is not "
                 + "the TUFF sandbox. Stop it, then start it again.")
+            return
+        }
+        if let problem = Self.firewallProblem(firewall.output) {
+            protection = .notVerified("The sandbox's firewall is loaded but \(problem). "
+                + "Check that your TUFF folder is up to date, then start the sandbox again.")
             return
         }
         let privileges = try? await runner.run(
@@ -263,6 +268,78 @@ public final class ResearchSandboxController {
             return
         }
         protection = .verified
+    }
+
+    /// Checks the protection again, for example right before a question, so
+    /// a VM replaced since the last check is not trusted on the old result.
+    public func recheckProtection() async {
+        guard state == .ready, protection != .checking else { return }
+        protection = .unknown
+        await verifyProtection()
+    }
+
+    /// The private ranges `firewall.nft` must refuse: the Mac (the VM's
+    /// gateway), the local network, carrier-grade NAT, loopback, link-local
+    /// and cloud metadata addresses, and multicast and reserved space.
+    static let requiredRefusedRanges = [
+        "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
+        "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/3",
+    ]
+
+    /// Reads `nft list table inet tuff_sandbox` and says what is wrong with
+    /// it, or nil when it has the shape `firewall.nft` gives it: outbound
+    /// traffic dropped unless allowed, the private ranges refused, and
+    /// nothing allowed ahead of that refusal except loopback, replies, and
+    /// single-address exceptions for a port (DNS, SearXNG).
+    static func firewallProblem(_ listing: String) -> String? {
+        let lines = listing.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        if lines.contains(where: { $0.contains("jump ") || $0.contains("goto ") }) {
+            return "sends traffic to other rules TUFF does not check"
+        }
+        guard let chainStart = lines.firstIndex(where: {
+            $0.contains("hook output") && $0.contains("policy drop")
+        }) else {
+            return "does not drop outbound traffic by default"
+        }
+        guard let setStart = lines.firstIndex(of: "set private4 {"),
+              let setEnd = lines[setStart...].firstIndex(of: "}") else {
+            return "has no set of refused private addresses"
+        }
+        let refused = Set(lines[setStart..<setEnd].joined(separator: " ")
+            .split { !"0123456789./".contains($0) }.map(String.init))
+        if let missing = requiredRefusedRanges.first(where: { !refused.contains($0) }) {
+            return "does not list \(missing) among the refused addresses"
+        }
+        for line in lines[(chainStart + 1)...] {
+            if line == "}" { break }
+            if line.contains("@private4") && line.contains("reject") { return nil }
+            guard line.contains("accept") else { continue }
+            if line == "oifname \"lo\" accept" || line == "ct state established,related accept" {
+                continue
+            }
+            if isSingleAddressException(line) { continue }
+            return "allows more than TUFF's own rules (\(String(line.prefix(80))))"
+        }
+        return "does not refuse the private addresses"
+    }
+
+    /// `ip daddr 192.168.64.1 udp dport 53 accept` and the like: one address,
+    /// one protocol, one port.
+    private static func isSingleAddressException(_ line: String) -> Bool {
+        let words = line.split(separator: " ").map(String.init)
+        guard words.count == 7, ["ip", "ip6"].contains(words[0]), words[1] == "daddr",
+              ["tcp", "udp"].contains(words[3]), words[4] == "dport",
+              words[6] == "accept", isPort(words[5])
+        else { return false }
+        let address = words[2]
+        return !address.isEmpty && address.allSatisfy { $0.isHexDigit || $0 == "." || $0 == ":" }
+    }
+
+    /// A port number, or a service name such as `domain` if nft prints one.
+    private static func isPort(_ word: String) -> Bool {
+        if let port = Int(word) { return (1...65_535).contains(port) }
+        return !word.isEmpty && word.allSatisfy { ($0.isLetter && $0.isLowercase) || $0 == "-" }
     }
 
     /// The same check `research_sandbox.sh selftest` runs: the user id and

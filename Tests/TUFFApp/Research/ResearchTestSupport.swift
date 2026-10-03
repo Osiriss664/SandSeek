@@ -108,8 +108,52 @@ final class FakeProcessRunner: ResearchProcessRunning, @unchecked Sendable {
     var commands: [[String]] { lock.withLock { recorded } }
 
     @Sendable static func healthy(_ command: [String]) -> ResearchProcessResult {
-        ResearchProcessResult(status: 0, output: command.contains("python3") ? "10001 none\n" : "")
+        if command.contains("python3") { return ResearchProcessResult(status: 0, output: "10001 none\n") }
+        if command.contains("nft") { return ResearchProcessResult(status: 0, output: firewallListing) }
+        return ResearchProcessResult(status: 0, output: "")
     }
+
+    /// What `nft list table inet tuff_sandbox` prints for firewall.nft with
+    /// the Mac as DNS server.
+    static let firewallListing = """
+    table inet tuff_sandbox {
+    \tset private4 {
+    \t\ttype ipv4_addr
+    \t\tflags interval
+    \t\telements = { 0.0.0.0/8, 10.0.0.0/8,
+    \t\t\t     100.64.0.0/10, 127.0.0.0/8,
+    \t\t\t     169.254.0.0/16, 172.16.0.0/12,
+    \t\t\t     192.0.0.0/24, 192.0.2.0/24,
+    \t\t\t     192.88.99.0/24, 192.168.0.0/16,
+    \t\t\t     198.18.0.0/15, 198.51.100.0/24,
+    \t\t\t     203.0.113.0/24, 224.0.0.0/3 }
+    \t}
+
+    \tset refused6 {
+    \t\ttype ipv6_addr
+    \t\tflags interval
+    \t\telements = { 2001::/32, 2001:db8::/32,
+    \t\t\t     2002::/16 }
+    \t}
+
+    \tchain output {
+    \t\ttype filter hook output priority filter; policy drop;
+    \t\tip daddr 192.168.64.1 tcp dport 53 accept
+    \t\tip daddr 192.168.64.1 udp dport 53 accept
+    \t\toifname "lo" accept
+    \t\tct state established,related accept
+    \t\tmeta nfproto ipv4 ip daddr @private4 meta l4proto tcp reject with tcp reset
+    \t\tmeta nfproto ipv4 ip daddr @private4 reject
+    \t\tmeta nfproto ipv4 accept
+    \t\tmeta nfproto ipv6 ip6 daddr @refused6 meta l4proto tcp reject with tcp reset
+    \t\tmeta nfproto ipv6 ip6 daddr @refused6 reject
+    \t\tip6 daddr 2000::/3 accept
+    \t\tmeta l4proto tcp reject with tcp reset
+    \t\treject
+    \t}
+    }
+
+    """
 
     /// The script commands only: build, start, stop, selftest.
     var scriptCommands: [String] {
@@ -123,6 +167,15 @@ final class FakeProcessRunner: ResearchProcessRunning, @unchecked Sendable {
         let command = [executable.lastPathComponent] + arguments
         lock.withLock { recorded.append(command) }
         return reply(command)
+    }
+}
+
+final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored = false
+    var value: Bool {
+        get { lock.withLock { stored } }
+        set { lock.withLock { stored = newValue } }
     }
 }
 

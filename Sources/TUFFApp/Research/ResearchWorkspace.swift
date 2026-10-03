@@ -63,8 +63,12 @@ public final class ResearchWorkspace {
         _ = await (sandboxStop, serverStop)
     }
 
-    public func ask(_ question: String, settings: ResearchRunSettings) {
-        guard servicesReady else { return }
+    /// Checks the sandbox's protection again first, so a VM that changed
+    /// since the last check is not used on the old result.
+    public func ask(_ question: String, settings: ResearchRunSettings) async {
+        guard servicesReady, !run.isRunning else { return }
+        await sandbox.recheckProtection()
+        guard servicesReady, !run.isRunning else { return }
         selectedReportID = nil
         run.start(
             question: question,

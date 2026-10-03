@@ -43,10 +43,12 @@ screen starts the `TUFFServer` built beside the app and stops it when TUFF
 quits; its log is `~/Library/Logs/TUFF/research-server.log`. A server already
 running on the same port, such as one started in Terminal, is used as it is.
 
-After every start the screen checks from outside the VM that the sandbox
-firewall is loaded and that the web server runs as the unprivileged user with
-no capabilities, the same checks `selftest` makes. Questions stay off until
-that passes. The app runs the `Scripts/research_sandbox.sh` of the folder it
+After every start, and again before each question, the screen checks from
+outside the VM that the sandbox firewall is loaded with TUFF's rules (outbound
+traffic dropped unless allowed, the private ranges refused, and nothing
+allowed ahead of them but loopback, replies and the DNS or SearXNG
+exceptions) and that the web server runs as the unprivileged user with no
+capabilities. Questions stay off until that passes. The app runs the `Scripts/research_sandbox.sh` of the folder it
 uses, so choose only your own checkout when it asks for one. If TUFF crashes
 or is force-quit, the next launch takes over the sandbox and model server it
 had started and stops them when it quits.

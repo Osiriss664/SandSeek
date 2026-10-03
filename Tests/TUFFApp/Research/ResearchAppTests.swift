@@ -296,6 +296,67 @@ import TUFFAppServer
         #expect(message.contains("firewall"))
     }
 
+    @Test func readsTheFirewallListing() {
+        let good = FakeProcessRunner.firewallListing
+        #expect(ResearchSandboxController.firewallProblem(good) == nil)
+        // nft may print service names, and SearXNG gets an IPv6 exception.
+        #expect(ResearchSandboxController.firewallProblem(good
+            .replacingOccurrences(of: "udp dport 53", with: "udp dport domain")
+            .replacingOccurrences(of: "\t\toifname", with: "\t\tip6 daddr fd00::5 tcp dport 8888 accept\n\t\toifname")) == nil)
+
+        let problems = [
+            good.replacingOccurrences(of: "policy drop", with: "policy accept"),
+            good.replacingOccurrences(of: "192.168.0.0/16", with: "192.168.1.0/24"),
+            good.replacingOccurrences(of: "\t\toifname", with: "\t\tip daddr 192.168.0.0/16 accept\n\t\toifname"),
+            good.replacingOccurrences(of: "\t\toifname", with: "\t\taccept\n\t\toifname"),
+            good.replacingOccurrences(of: "\t\toifname", with: "\t\tjump other\n\t\toifname"),
+            "",
+        ]
+        for listing in problems {
+            #expect(ResearchSandboxController.firewallProblem(listing) != nil)
+        }
+    }
+
+    @Test func aPermissiveFirewallIsNotVerified() async throws {
+        let runner = FakeProcessRunner { command in
+            command.contains("nft")
+                ? ResearchProcessResult(status: 0, output: FakeProcessRunner.firewallListing
+                    .replacingOccurrences(of: "policy drop", with: "policy accept"))
+                : FakeProcessRunner.healthy(command)
+        }
+        let sandbox = try controller(runner: runner)
+        await sandbox.start()
+        guard case .notVerified(let message) = sandbox.protection else {
+            Issue.record("expected not verified, got \(sandbox.protection)")
+            return
+        }
+        #expect(message.contains("does not drop outbound traffic"))
+    }
+
+    @Test func protectionIsCheckedAgainBeforeEachQuestion() async throws {
+        let firewallGone = LockedFlag()
+        let runner = FakeProcessRunner { command in
+            command.contains("nft") && firewallGone.value
+                ? ResearchProcessResult(status: 1, output: "Error: No such file or directory")
+                : FakeProcessRunner.healthy(command)
+        }
+        let sandbox = try controller(runner: runner)
+        await sandbox.start()
+        #expect(sandbox.protection == .verified)
+        let checks = runner.commands.filter { $0.contains("nft") }.count
+
+        await sandbox.recheckProtection()
+        #expect(sandbox.protection == .verified)
+        #expect(runner.commands.filter { $0.contains("nft") }.count == checks + 1)
+
+        firewallGone.value = true
+        await sandbox.recheckProtection()
+        guard case .notVerified = sandbox.protection else {
+            Issue.record("expected not verified, got \(sandbox.protection)")
+            return
+        }
+    }
+
     @Test func aPrivilegedServerIsNotVerified() async throws {
         let runner = FakeProcessRunner { command in
             command.contains("python3")
