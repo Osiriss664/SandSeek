@@ -246,6 +246,7 @@ class FetchTests(unittest.TestCase):
 
     def test_remaining_invisible_characters_are_removed(self):
         hidden = "".join(chr(0xE0100 + n) for n in range(5))
+        hidden += "".join(chr(0xFE00 + n) for n in range(15))
         text = (f"a{hidden}\u034f\u061c\u115f\u1160\u17b4\u17b5\u180b\u180f\u2800"
                 "\u3164\uffa0b")
         self.assertEqual(server.clean_text(text), "ab")

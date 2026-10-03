@@ -37,6 +37,12 @@ public enum ResearchText {
         result = replacing(inlineLink, in: result) { label, target in
             isWebURL(target) ? nil : "\(label) (link removed)"
         }
+        // A definition can also sit inside a quote or list item, or have a
+        // label that spans lines. Escaping the bracket before `]:` stops any
+        // remaining one from being read as a definition.
+        result = replacing(definitionEnd, in: result) { backslashes, target in
+            isWebURL(target) ? nil : "\(backslashes)\\]:"
+        }
         return result.replacingOccurrences(of: "<", with: "\\<")
     }
 
@@ -69,6 +75,12 @@ public enum ResearchText {
     private static let linkDefinition = try! NSRegularExpression(
         pattern: #"^[ \t]{0,3}\[([^\]\n]+)\]:[ \t]*<?([^\s>]*)>?.*$"#,
         options: [.anchorsMatchLines])
+
+    /// `]:` and the target after it (possibly on the next line), unless the
+    /// bracket is already escaped by an odd number of backslashes. The target
+    /// is read by a lookahead, so only the backslashes and `]:` are replaced.
+    private static let definitionEnd = try! NSRegularExpression(
+        pattern: #"(?<!\\)((?:\\\\)*)\]:(?=[ \t]*\n?[ \t]*<?([^\s>]*))"#)
 
     /// A URL inside Markdown link parentheses: brackets and parentheses are
     /// percent-encoded so the URL cannot end the link early and start another.
@@ -107,7 +119,7 @@ public enum ResearchText {
         // More invisible characters used to hide text: the supplementary
         // variation selectors, fillers and blanks. U+FE0F (emoji) stays.
         case 0x034F, 0x061C, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x180B...0x180F, 0x2800, 0x3164,
-             0xFFA0, 0xE0100...0xE01EF: return true
+             0xFE00...0xFE0E, 0xFFA0, 0xE0100...0xE01EF: return true
         default: return false
         }
     }
