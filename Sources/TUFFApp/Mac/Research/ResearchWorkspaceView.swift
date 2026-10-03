@@ -3,6 +3,7 @@ import SwiftUI
 import TUFFAppCore
 import TUFFAppResearch
 import TUFFMacPresentation
+import TUFFResearchCore
 import UniformTypeIdentifiers
 
 /// Web research: a local model searches and reads the web through the
@@ -15,7 +16,7 @@ struct ResearchWorkspaceView: View {
     @AppStorage("ResearchQuestion") private var question = ""
     @AppStorage("ResearchModel") private var selectedModel = ""
     @AppStorage("ResearchShowThinking") private var showThinking = true
-    @AppStorage("ResearchMaxSteps") private var maxSteps = 8
+    @AppStorage("ResearchMaxSteps") private var maxSteps = ResearchOptions().maxSteps
     @AppStorage("ResearchPageCharacters") private var pageCharacters = 3_000
     @State private var showsOptions = false
 
@@ -67,6 +68,12 @@ struct ResearchWorkspaceView: View {
                 }
                 .fixedSize()
                 .disabled(research.server.models.isEmpty || research.run.isRunning)
+                Stepper(value: $maxSteps, in: 1...32) {
+                    Text("Steps: \(maxSteps)").appFont(.body.monospacedDigit())
+                }
+                .fixedSize()
+                .disabled(research.run.isRunning)
+                .help("How many search and read rounds the model may take before it must answer. The default is \(ResearchOptions().maxSteps), the same as tuff research.")
                 Toggle("Show thinking", isOn: $showThinking)
                     .disabled(research.run.isRunning)
                     .help("Turns the model's reasoning on and shows it with the progress. It is never added to the report.")
@@ -91,10 +98,6 @@ struct ResearchWorkspaceView: View {
             }
             if showsOptions {
                 HStack(spacing: 24) {
-                    Stepper(value: $maxSteps, in: 1...16) {
-                        Text("Steps the model may take: \(maxSteps)")
-                            .appFont(.callout)
-                    }
                     Picker("Page text per read", selection: $pageCharacters) {
                         ForEach([2_000, 3_000, 5_000, 8_000], id: \.self) { size in
                             Text("\(size.formatted()) characters").tag(size)
@@ -121,7 +124,7 @@ struct ResearchWorkspaceView: View {
         research.ask(question, settings: ResearchRunSettings(
             model: selectedModel,
             showThinking: showThinking,
-            maxSteps: min(max(maxSteps, 1), 16),
+            maxSteps: min(max(maxSteps, 1), 32),
             pageCharacters: min(max(pageCharacters, 500), 20_000)))
     }
 

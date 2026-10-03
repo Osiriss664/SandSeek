@@ -15,13 +15,16 @@ tuff research "How does Apple container isolate each container?"
 The answer is printed as Markdown with numbered sources. `--output notes.md`
 also writes it to a new file. `--show-thinking` turns on the model's reasoning
 and prints it under each `[n] thinking…` line; it is not added to the report.
-Run `tuff research --help` for every option.
+`--max-steps <1...32>` sets how many search and read rounds the model may take
+before it has to answer (default 8). Run `tuff research --help` for every
+option.
 
 ## In the TUFF app
 
 The **Research** screen (Command-2) does the same without Terminal. **Start
 Both** starts the model server and a fresh sandbox VM, **Run Safety Check**
-runs the `selftest` below, and each question shows its searches, page reads
+runs the `selftest` below, **Steps** sets the same limit as `--max-steps`
+(default 8), and each question shows its searches, page reads
 and, with **Show thinking**, the model's reasoning as it works. Finished
 reports are listed in the sidebar and saved as Markdown and JSON in
 `~/Library/Application Support/TUFF/Research Reports`.
