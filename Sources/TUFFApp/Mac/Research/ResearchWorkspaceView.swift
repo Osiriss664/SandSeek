@@ -51,10 +51,17 @@ struct ResearchWorkspaceView: View {
 
     private var composerCard: some View {
         VStack(alignment: .leading, spacing: 12) {
+            // Five lines tall from the start, so a longer question fits;
+            // Return asks, Option-Return starts a new line.
             TextField("Your question", text: $question, axis: .vertical)
                 .appFont(.body)
-                .lineLimit(2...6)
-                .textFieldStyle(.roundedBorder)
+                .lineLimit(5, reservesSpace: true)
+                .textFieldStyle(.plain)
+                .padding(10)
+                .background(Color(nsColor: .textBackgroundColor),
+                            in: RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(Color.secondary.opacity(0.35)))
                 .disabled(research.run.isRunning)
                 .onSubmit(ask)
                 .accessibilityIdentifier("research.question")
