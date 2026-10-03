@@ -454,7 +454,12 @@ struct ResearchAgentTests {
         let stubborn = FakeServices(modelReplies: [
             FakeServices.answer("Memory."), FakeServices.answer("Still memory."),
         ])
-        #expect(try await agent(stubborn).run(question: "q").answer == "Still memory.")
+        let fromMemory = try await agent(stubborn).run(question: "q")
+        #expect(fromMemory.answer == "Still memory.")
+        #expect(fromMemory.noPagesRead)
+        #expect(fromMemory.markdown.contains("No web page was read for this answer"))
+        #expect(!report.noPagesRead)
+        #expect(!report.markdown.contains("No web page was read"))
 
         // With one step there is no room to ask.
         var options = ResearchOptions()

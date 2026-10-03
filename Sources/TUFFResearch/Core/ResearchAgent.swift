@@ -38,6 +38,9 @@ public struct ResearchReport: Equatable, Sendable {
     public let budgetExhausted: Bool
     /// True when the answer stopped at the model's token limit.
     public var answerCutOff: Bool = false
+    /// True when no web page was read, so the answer rests on the model's
+    /// memory or on search previews only.
+    public var noPagesRead: Bool { sources.isEmpty }
 
     /// The report as Markdown that is safe to print and to open in a viewer:
     /// no control or invisible characters, no images, no loading HTML tags.
@@ -64,6 +67,10 @@ public struct ResearchReport: Equatable, Sendable {
         }
         if budgetExhausted {
             text += "\n_The research step budget ran out; this answer may be incomplete._\n"
+        }
+        if noPagesRead {
+            text += "\n_No web page was read for this answer, so it comes from the model's "
+                + "memory or search previews and has no sources to check._\n"
         }
         if answerCutOff {
             text += "\n_The answer reached the model's token limit and may be cut off._\n"
