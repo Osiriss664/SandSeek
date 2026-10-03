@@ -715,6 +715,11 @@ private struct ResearchReportView: View {
                     .appFont(.caption)
                     .foregroundStyle(.orange)
             }
+            if report.sources.isEmpty && !report.answer.isEmpty {
+                Text("No web page was read for this answer, so it comes from the model's memory or search previews and has no sources to check.")
+                    .appFont(.caption)
+                    .foregroundStyle(.orange)
+            }
             if report.answerCutOff {
                 Text("The answer stopped at the model's length limit, so its end may be missing.")
                     .appFont(.caption)

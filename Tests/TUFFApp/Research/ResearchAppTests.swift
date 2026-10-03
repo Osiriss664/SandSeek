@@ -205,7 +205,9 @@ import TUFFAppServer
     }
 
     @Test func aTurnWithoutAnAnswerIsAskedOnceMore() async throws {
+        // A page is read first, so the search-first nudge does not apply.
         let services = FakeResearchServices(modelReplies: [
+            FakeResearchServices.call("open_page", #"{"url": "https://github.com/apple/container"}"#),
             FakeResearchServices.answer("", reasoning: "Thinking until the budget runs out."),
             FakeResearchServices.answer("A short answer."),
         ])
