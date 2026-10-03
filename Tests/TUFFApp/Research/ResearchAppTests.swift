@@ -117,6 +117,22 @@ import TUFFAppServer
         #expect(reloaded.reports.first?.steps.first?.kind == .searching)
     }
 
+    @Test func reportsSavedBeforeTheCutOffFlagStillLoad() throws {
+        let directory = temporaryDirectory()
+        let store = ResearchReportStore(directory: directory)
+        let saved = report()
+        try store.save(saved)
+        let url = store.jsonURL(for: saved)
+        var object = try #require(
+            try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        #expect(object.removeValue(forKey: "answerWasCutOff") != nil)
+        try JSONSerialization.data(withJSONObject: object).write(to: url)
+
+        let reloaded = ResearchReportStore(directory: directory)
+        #expect(reloaded.reports.map(\.id) == [saved.id])
+        #expect(reloaded.reports.first?.answerCutOff == false)
+    }
+
     @Test func neverWritesOverAnExistingReport() throws {
         let store = ResearchReportStore(directory: temporaryDirectory())
         let saved = report()

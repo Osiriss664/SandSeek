@@ -697,6 +697,11 @@ private struct ResearchReportView: View {
                     .appFont(.caption)
                     .foregroundStyle(.orange)
             }
+            if report.answerCutOff {
+                Text("The answer stopped at the model's length limit, so its end may be missing.")
+                    .appFont(.caption)
+                    .foregroundStyle(.orange)
+            }
             if !report.sources.isEmpty {
                 Text("Sources").appFont(.headline)
                 VStack(alignment: .leading, spacing: 6) {

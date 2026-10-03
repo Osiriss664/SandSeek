@@ -63,6 +63,10 @@ public struct SavedResearchReport: Codable, Equatable, Identifiable, Sendable {
     public let createdAt: Date
     public let durationSeconds: Double
     public let budgetExhausted: Bool
+    /// Optional so reports saved before it existed still load.
+    private let answerWasCutOff: Bool?
+    /// True when the answer stopped at the model's token limit.
+    public var answerCutOff: Bool { answerWasCutOff ?? false }
     public let unknownCitations: [Int]
     public let steps: [ResearchStep]
     /// The report as `tuff research` prints it, made inert for viewers.
@@ -86,6 +90,7 @@ public struct SavedResearchReport: Codable, Equatable, Identifiable, Sendable {
         self.createdAt = createdAt
         self.durationSeconds = durationSeconds
         budgetExhausted = report.budgetExhausted
+        answerWasCutOff = report.answerCutOff
         unknownCitations = report.unknownCitations
         self.steps = steps
         markdown = report.markdown
