@@ -504,7 +504,9 @@ public final class ResearchSandboxController {
     }
 
     /// Whether `container list --all` output has a row whose first column,
-    /// the container's ID, is the sandbox's name.
+    /// the container's ID, is the sandbox's name. Apple's `container list`
+    /// prints the ID first; if that ever changes, this finds nothing and the
+    /// tests in ResearchAppTests should be updated with the new layout.
     static func listsContainer(_ output: String) -> Bool {
         output.split(whereSeparator: \.isNewline).contains { line in
             line.split(whereSeparator: { $0.isWhitespace }).first.map(String.init) == containerName
@@ -529,20 +531,25 @@ public final class ResearchSandboxController {
         }
     }
 
-    /// Stops a sandbox this app started, without waiting, for app quit.
     /// Stops the sandbox while the app quits, waiting a few seconds for it.
     /// The marker is only removed once the container is confirmed gone, so
     /// the next launch can still take over anything left running.
     public func stopWhenQuitting() {
         guard startedByApp, let script else { return }
         guard Self.runAndWait("/bin/bash", [script.path, "stop"],
-                              environment: environment, timeout: 10)?.status == 0,
-              let listed = Self.runAndWait("/usr/bin/env", ["container", "list", "--all"],
-                                           environment: environment, timeout: 3),
-              listed.status == 0, !Self.listsContainer(listed.output)
+                              environment: environment, timeout: 10)?.status == 0
         else { return }
-        startedByApp = false
-        adoptedFromLastRun = false
+        // Three looks, since `--rm` may still be removing the container.
+        for attempt in 1...3 {
+            if let listed = Self.runAndWait("/usr/bin/env", ["container", "list", "--all"],
+                                            environment: environment, timeout: 2),
+               listed.status == 0, !Self.listsContainer(listed.output) {
+                startedByApp = false
+                adoptedFromLastRun = false
+                return
+            }
+            if attempt < 3 { Thread.sleep(forTimeInterval: 0.5) }
+        }
     }
 
     /// Runs a command synchronously, for the quit path only, and gives up
