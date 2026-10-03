@@ -36,6 +36,8 @@ public struct ResearchReport: Equatable, Sendable {
     public let modelTurns: Int
     /// True when the step budget ran out and the answer was forced.
     public let budgetExhausted: Bool
+    /// True when the answer stopped at the model's token limit.
+    public var answerCutOff: Bool = false
 
     /// The report as Markdown that is safe to print and to open in a viewer:
     /// no control or invisible characters, no images, no loading HTML tags.
@@ -62,6 +64,9 @@ public struct ResearchReport: Equatable, Sendable {
         }
         if budgetExhausted {
             text += "\n_The research step budget ran out; this answer may be incomplete._\n"
+        }
+        if answerCutOff {
+            text += "\n_The answer reached the model's token limit and may be cut off._\n"
         }
         return ResearchText.terminalSafe(text)
     }
@@ -215,8 +220,8 @@ public struct ResearchAgent: Sendable {
                     ]))
                     continue
                 }
-                let text = try await answer(from: turn, state: &state)
-                return state.report(answer: text, turns: step, exhausted: false)
+                let (text, cutOff) = try await answer(from: turn, state: &state)
+                return state.report(answer: text, turns: step, exhausted: false, cutOff: cutOff)
             }
             state.messages.append(assistantMessage(turn))
             for (index, call) in turn.toolCalls.enumerated() {
@@ -241,16 +246,20 @@ public struct ResearchAgent: Sendable {
                     + "citing source numbers, and say what remains unverified."),
         ]))
         let final = try await complete(&state, allowTools: false)
-        let text = try await answer(from: final, state: &state)
-        return state.report(answer: text, turns: options.maxSteps + 1, exhausted: true)
+        let (text, cutOff) = try await answer(from: final, state: &state)
+        return state.report(
+            answer: text, turns: options.maxSteps + 1, exhausted: true, cutOff: cutOff)
     }
 
-    /// The answer in a turn without tool calls. A turn that ends empty,
-    /// usually because reasoning used the whole token limit, is asked once
-    /// more for a short answer with reasoning off.
+    /// The answer in a turn without tool calls, and whether it stopped at the
+    /// token limit. A turn that ends empty, usually because reasoning used
+    /// the whole token limit, is asked once more for a short answer with
+    /// reasoning off.
     private func answer(from turn: ResearchAssistantTurn,
-                        state: inout State) async throws -> String {
-        if let content = turn.content, !Self.isBlank(content) { return content }
+                        state: inout State) async throws -> (String, Bool) {
+        if let content = turn.content, !Self.isBlank(content) {
+            return (content, turn.finishReason == "length")
+        }
         state.messages.append(.object([
             "role": .string("assistant"),
             "content": .string(turn.content ?? ""),
@@ -260,8 +269,17 @@ public struct ResearchAgent: Sendable {
             "content": .string(Self.answerNowRequest),
         ]))
         onEvent(.retryingEmptyAnswer)
-        let retry = try await complete(&state, allowTools: false, thinking: false)
-        if let content = retry.content, !Self.isBlank(content) { return content }
+        let retry: ResearchAssistantTurn
+        do {
+            retry = try await complete(&state, allowTools: false, thinking: false)
+        } catch ResearchError.modelRequestFailed(_, _, "unsupported_parameter"?) {
+            // GPT-OSS takes reasoning_effort instead and refuses
+            // enable_thinking; ask with the client's own setting.
+            retry = try await complete(&state, allowTools: false)
+        }
+        if let content = retry.content, !Self.isBlank(content) {
+            return (content, retry.finishReason == "length")
+        }
         throw ResearchError.noAnswer(
             tokenLimit: turn.finishReason == "length" || retry.finishReason == "length")
     }
@@ -443,9 +461,10 @@ public struct ResearchAgent: Sendable {
             return source
         }
 
-        func report(answer: String, turns: Int, exhausted: Bool) -> ResearchReport {
+        func report(answer: String, turns: Int, exhausted: Bool,
+                    cutOff: Bool = false) -> ResearchReport {
             ResearchReport(question: question, answer: answer, sources: sources,
-                           modelTurns: turns, budgetExhausted: exhausted)
+                           modelTurns: turns, budgetExhausted: exhausted, answerCutOff: cutOff)
         }
 
         static let compactedPreviewCharacters = 400
