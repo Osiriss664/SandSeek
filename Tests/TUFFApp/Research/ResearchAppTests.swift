@@ -314,6 +314,31 @@ import TUFFAppServer
         #expect(runner.scriptCommands.suffix(2) == ["build", "start"])
     }
 
+    @Test func stoppingChecksThatTheContainerIsGone() async throws {
+        let stillThere = LockedFlag()
+        stillThere.value = true
+        let runner = FakeProcessRunner { command in
+            command.contains("list") && stillThere.value
+                ? ResearchProcessResult(status: 0, output: "ID                 IMAGE\ntuff-web-research  tuff-web-research:latest\n")
+                : FakeProcessRunner.healthy(command)
+        }
+        let sandbox = try controller(runner: runner)
+        await sandbox.start()
+        await sandbox.stop()
+        guard case .failed(let message) = sandbox.state else {
+            Issue.record("expected a failure, got \(sandbox.state)")
+            return
+        }
+        #expect(message.contains("still there"))
+        #expect(sandbox.startedByApp)
+
+        stillThere.value = false
+        await sandbox.stop()
+        #expect(sandbox.state == .off)
+        #expect(!sandbox.startedByApp)
+        #expect(runner.commands.contains(["env", "container", "list", "--all"]))
+    }
+
     @Test func aSandboxWithoutItsFirewallIsNotVerified() async throws {
         let runner = FakeProcessRunner { command in
             command.contains("nft")

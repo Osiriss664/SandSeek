@@ -467,10 +467,36 @@ public final class ResearchSandboxController {
         state = .stopping
         selfTest = nil
         guard let stopped = await runScript(script, "stop") else { return }
+        guard stopped.status == 0 else {
+            state = .failed(Self.message(for: stopped, doing: "stop the sandbox"))
+            return
+        }
+        // The script ignores errors from `container stop` and `delete`, so
+        // check that the container is really gone before saying "Off".
+        if let problem = await containerLeftOver() {
+            state = .failed(problem)
+            return
+        }
         startedByApp = false
         adoptedFromLastRun = false
-        state = stopped.status == 0 ? .off
-            : .failed(Self.message(for: stopped, doing: "stop the sandbox"))
+        state = .off
+    }
+
+    /// Nil when no container named `tuff-web-research` exists, running or
+    /// stopped; otherwise what to tell the user.
+    private func containerLeftOver() async -> String? {
+        let listed = try? await runner.run(
+            executable: URL(fileURLWithPath: "/usr/bin/env"),
+            arguments: ["container", "list", "--all"],
+            environment: environment, timeout: 30)
+        guard let listed, listed.status == 0 else {
+            return "The sandbox was stopped, but TUFF could not check that its container is "
+                + "gone. Run `container list --all` in Terminal to look."
+        }
+        let names = listed.output.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        guard names.contains(Self.containerName) else { return nil }
+        return "The sandbox's container is still there after stopping. Click Stop again, or run "
+            + "`container stop \(Self.containerName)` and `container delete \(Self.containerName)` in Terminal."
     }
 
     public func runSelfTest() async {
