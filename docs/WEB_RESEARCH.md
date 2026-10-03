@@ -97,6 +97,28 @@ The loop gives the model two tools and no others:
 The loop calls the sandbox. The sandbox's code never calls the Mac, and a
 firewall inside the VM stops anything else running there from doing so.
 
+## What Apple container does here
+
+[Apple `container`](https://github.com/apple/container) is Apple's open-source
+tool for running Linux containers on a Mac. Unlike Docker Desktop, which runs
+all containers together in one shared Linux VM, it gives every container its
+own small virtual machine, using macOS's Virtualization framework and Apple's
+[Containerization](https://github.com/apple/containerization) package. A
+container therefore has its own Linux kernel, memory and network address, and
+can see none of the Mac's files unless a folder is mounted into it. The web
+sandbox mounts none.
+
+`Scripts/research_sandbox.sh` uses it in three steps:
+
+| Command | What `container` does |
+| --- | --- |
+| `build` | Builds the image `tuff-web-research` from `Sandbox/web-research/Containerfile`: a pinned Python base image, the firewall rules, and the sandbox server with hash-pinned packages. |
+| `start` | Starts a fresh VM from that image, named `tuff-web-research`, and deletes any older one. Its options: a read-only root filesystem with a scratch `/tmp`; 2 CPUs and 1 GB of memory; at most 512 processes; all Linux capabilities dropped except the four the start-up needs to load the firewall and switch to an unprivileged user; and the sandbox port published on the Mac's 127.0.0.1:9000 only (`TUFF_RESEARCH_SANDBOX_PORT` changes it), so only programs on your Mac can call it. `--rm` deletes the VM when it stops. |
+| `selftest` | Runs checks inside the running VM with `container exec`: that the firewall is loaded, that the server has no privileges, and that the VM cannot reach the Mac or your local network. See [Testing the boundaries](#testing-the-boundaries). |
+
+`stop` stops and deletes the VM. Nothing the VM downloaded survives that,
+because it only ever wrote to its own `/tmp`.
+
 ## Security model
 
 Web pages are untrusted. A page can contain text written to manipulate the
@@ -117,13 +139,14 @@ what it downloads. The design limits what either can reach:
   characters, such as the escape sequences that can clear the screen or change
   the window title, are removed from page titles, page text and search results
   in the sandbox, and again from everything `tuff research` prints or saves.
-  So are invisible characters (zero-width characters and the Unicode tag
-  block), which can spell out instructions the model reads but you would not
-  see when checking a page or a log.
+  So are invisible characters (zero-width characters, variation selectors
+  other than the emoji one, and the Unicode tag block), which can spell out
+  instructions the model reads but you would not see when checking a page or
+  a log.
 - **Saved reports load nothing when opened.** Markdown images in the answer
   become plain links, every `<` is escaped so no HTML is rendered, and links
   to anything but `http` and `https` (such as `javascript:` or `file:`) are
-  reduced to their text. A page cannot steer the model into a report that
+  reduced to their text, including link definitions inside quotes and lists. A page cannot steer the model into a report that
   contacts a tracker or runs something when you open it in a Markdown viewer.
 - **Pages are fetched in a VM.** The sandbox runs in its own Linux VM with a
   read-only root filesystem, 1 GB of memory, a process limit and no Mac

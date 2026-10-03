@@ -281,8 +281,24 @@ struct ResearchAgentTests {
             "1. [A !(t)(https://t.example/x) (title)](https://example.com/a%29!%5Bi%5D%28https://tracker.example/b)"))
     }
 
+    @Test func linkDefinitionsInQuotesAndListsAreNeutralised() {
+        let text = "[a][r] [b][s] [c][t] [d][u] [e][w]\n\n> [r]: file:///etc/passwd\n"
+            + "- [s]: <javascript:alert(1)>\n1. [t]:\n   file:///x\n[long\nlabel]: file:///y\n"
+            + "> [v\\\\]: file:///z\n[w]: https://example.com/ok"
+        let inert = ResearchText.inertMarkdown(text)
+        #expect(inert.contains("> [r\\]: file:///etc/passwd"))
+        #expect(inert.contains("- [s\\]: \\<javascript:alert(1)>"))
+        #expect(inert.contains("1. [t\\]:\n   file:///x"))
+        #expect(inert.contains("label\\]: file:///y"))
+        #expect(inert.contains("> [v\\\\\\]: file:///z"))
+        #expect(inert.contains("[w]: https://example.com/ok"))
+        // An already escaped bracket is left as it is.
+        #expect(ResearchText.inertMarkdown("\\[x\\]: y") == "\\[x\\]: y")
+    }
+
     @Test func remainingInvisibleCharactersAreRemoved() {
         let hidden = String(String.UnicodeScalarView((0..<5).map { Unicode.Scalar(0xE0100 + $0)! }))
+            + String(String.UnicodeScalarView((0..<15).map { Unicode.Scalar(0xFE00 + $0)! }))
         let text = "a\(hidden)\u{34F}\u{61C}\u{115F}\u{1160}\u{17B4}\u{17B5}\u{180B}\u{180F}"
             + "\u{2800}\u{3164}\u{FFA0}b"
         #expect(ResearchText.terminalSafe(text) == "ab")
