@@ -150,6 +150,10 @@ public final class ResearchRunController {
             append(.failed, message, started: started)
         case .retryingEmptyAnswer:
             append(.turn, "No answer yet; asking for a short one", started: started)
+        case .askingToSearchFirst:
+            append(.turn, "Answered without searching; asking it to search", started: started)
+        case .askingToReadPages:
+            append(.turn, "Answered from search previews; asking it to read pages", started: started)
         }
     }
 

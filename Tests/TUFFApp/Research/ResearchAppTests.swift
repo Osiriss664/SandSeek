@@ -222,6 +222,23 @@ import TUFFAppServer
         #expect(try #require(run.report).answer.contains("A short answer."))
     }
 
+    @Test func anAnswerWithoutSearchingIsSentBackToSearch() async throws {
+        let services = FakeResearchServices(modelReplies: [
+            FakeResearchServices.answer("From memory."),
+            FakeResearchServices.call("open_page", #"{"url": "https://github.com/apple/container"}"#),
+            FakeResearchServices.answer("From the page [1]."),
+        ])
+        let store = ResearchReportStore(directory: temporaryDirectory())
+        let run = ResearchRunController(store: store, transport: services)
+        run.start(question: "Anything", settings: ResearchRunSettings(model: "m"),
+                  serverURL: server, sandboxURL: sandbox)
+        await waitUntil { !run.isRunning }
+
+        #expect(run.phase == .finished)
+        #expect(run.steps.contains { $0.text == "Answered without searching; asking it to search" })
+        #expect(try #require(run.report).answer.contains("From the page"))
+    }
+
     @Test func stoppingDiscardsTheRun() async {
         let services = FakeResearchServices(modelReplies: [
             FakeResearchServices.answer("Too late."),
