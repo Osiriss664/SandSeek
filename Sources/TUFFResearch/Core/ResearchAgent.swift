@@ -328,7 +328,7 @@ public struct ResearchAgent: Sendable {
             header += "This is the same page as source [\(source.number)]; cite it only as "
                 + "[\(source.number)].\n"
         }
-            + "URL: \(page.url)\n"
+        header += "URL: \(page.url)\n"
             + "Characters \(page.offset)-\(end) of \(page.totalCharacters)."
         if let next = page.nextOffset {
             header += " More text: call open_page with offset \(next)."
