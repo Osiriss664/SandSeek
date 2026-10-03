@@ -201,28 +201,41 @@ public struct ResearchAgent: Sendable {
             .object(["role": .string("user"), "content": .string(question)]),
         ]
 
+        var calledTools = false
+        var askedToSearch = false
         var askedToRead = false
         for step in 1...max(1, options.maxSteps) {
             onEvent(.modelTurn(step))
             let turn = try await complete(&state, allowTools: true)
             guard !turn.toolCalls.isEmpty else {
-                // Snippets are short and often stale, and an answer built on
-                // them has no sources to check. Ask once for real pages.
-                if !askedToRead, state.searched, state.sources.isEmpty, step < options.maxSteps {
-                    askedToRead = true
+                // An answer from memory, or from snippets that are short and
+                // often stale, has no sources to check. Ask once to search,
+                // and once to read real pages.
+                var request: String?
+                if state.sources.isEmpty, step < options.maxSteps {
+                    if !calledTools, !askedToSearch {
+                        askedToSearch = true
+                        request = Self.searchFirstRequest
+                    } else if state.searched, !askedToRead {
+                        askedToRead = true
+                        request = Self.readPagesRequest
+                    }
+                }
+                if let request {
                     state.messages.append(.object([
                         "role": .string("assistant"),
                         "content": .string(turn.content ?? ""),
                     ]))
                     state.messages.append(.object([
                         "role": .string("user"),
-                        "content": .string(Self.readPagesRequest),
+                        "content": .string(request),
                     ]))
                     continue
                 }
                 let (text, cutOff) = try await answer(from: turn, state: &state)
                 return state.report(answer: text, turns: step, exhausted: false, cutOff: cutOff)
             }
+            calledTools = true
             state.messages.append(assistantMessage(turn))
             for (index, call) in turn.toolCalls.enumerated() {
                 let result: String
@@ -291,6 +304,11 @@ public struct ResearchAgent: Sendable {
     static let answerNowRequest = "Your last reply ended before you wrote an answer. Answer the "
         + "question now in Markdown from what you have read, citing source numbers, and keep "
         + "it short."
+
+    static let searchFirstRequest = "You answered without searching, so nothing in your answer "
+        + "can be checked and it may be out of date. Search the web with web_search, open the "
+        + "most relevant pages with open_page, then answer from what they say, citing the source "
+        + "numbers open_page gives."
 
     static let readPagesRequest = "You have only seen search snippets, which are short and can be "
         + "out of date, and no page has a source number yet. Open the most relevant pages with "

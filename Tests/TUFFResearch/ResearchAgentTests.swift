@@ -380,7 +380,9 @@ struct ResearchAgentTests {
     }
 
     @Test func requestsUseOnlyFieldsTheTUFFServerAccepts() async throws {
-        let services = FakeServices(modelReplies: [FakeServices.answer("done")])
+        let services = FakeServices(modelReplies: [
+            FakeServices.answer("done"), FakeServices.answer("done"),
+        ])
         _ = try await agent(services).run(question: "q")
         let request = try #require(services.modelRequests.first)
         let keys = Set(request.objectValue?.keys.map { $0 } ?? [])
@@ -429,6 +431,36 @@ struct ResearchAgentTests {
         let accepted = try await agent(stubborn).run(question: "q")
         #expect(accepted.answer == "Still snippets [1][2].")
         #expect(accepted.markdown.contains("cites [1], [2], which are not pages the research read."))
+    }
+
+    @Test func answersFromMemoryAreSentToSearchOnce() async throws {
+        let services = FakeServices(modelReplies: [
+            FakeServices.answer("From memory: the CDU won."),
+            FakeServices.calls([("a", "web_search", #"{"query":"wahl berlin 2026"}"#)]),
+            FakeServices.answer("From the snippets [1]."),
+            FakeServices.calls([("b", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
+            FakeServices.answer("Read it [1]."),
+        ])
+        let report = try await agent(services).run(question: "q")
+        #expect(report.answer == "Read it [1].")
+        #expect(report.sources.count == 1)
+        let nudge = messages(services.modelRequests[1]).suffix(2)
+        #expect(nudge.first?["content"] == .string("From memory: the CDU won."))
+        #expect(nudge.last?["content"] == .string(ResearchAgent.searchFirstRequest))
+        #expect(messages(services.modelRequests[3]).last?["content"]
+            == .string(ResearchAgent.readPagesRequest))
+
+        // Asked once only: a second answer from memory is accepted.
+        let stubborn = FakeServices(modelReplies: [
+            FakeServices.answer("Memory."), FakeServices.answer("Still memory."),
+        ])
+        #expect(try await agent(stubborn).run(question: "q").answer == "Still memory.")
+
+        // With one step there is no room to ask.
+        var options = ResearchOptions()
+        options.maxSteps = 1
+        let single = FakeServices(modelReplies: [FakeServices.answer("Memory.")])
+        #expect(try await agent(single, options: options).run(question: "q").answer == "Memory.")
     }
 
     @Test func toolFailuresGoBackToTheModel() async throws {
@@ -530,7 +562,9 @@ struct ResearchAgentTests {
         let report = try await agent(services).run(question: "q")
         #expect(report.answerCutOff)
         #expect(report.markdown.contains("reached the model's token limit and may be cut off"))
-        let whole = FakeServices(modelReplies: [FakeServices.answer("Done.")])
+        let whole = FakeServices(modelReplies: [
+            FakeServices.answer("Done."), FakeServices.answer("Done."),
+        ])
         let done = try await agent(whole).run(question: "q")
         #expect(!done.answerCutOff)
         #expect(!done.markdown.contains("cut off"))
