@@ -666,7 +666,7 @@ private struct ResearchReportView: View {
                 .textSelection(.enabled)
             if report.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Label {
-                    Text("The model stopped without writing an answer. This usually means it used up its token budget while thinking. Try again with fewer Steps, with Show thinking off, or with a faster model.")
+                    Text("The model stopped without writing an answer. This usually means it used up its token budget while thinking. Try again, or use a faster model such as Qwen3.6 35B-A3B.")
                         .appFont(.callout)
                         .fixedSize(horizontal: false, vertical: true)
                 } icon: {
