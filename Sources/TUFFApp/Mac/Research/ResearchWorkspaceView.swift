@@ -19,6 +19,7 @@ struct ResearchWorkspaceView: View {
     @AppStorage("ResearchMaxSteps") private var maxSteps = ResearchOptions().maxSteps
     @AppStorage("ResearchPageCharacters") private var pageCharacters = 3_000
     @State private var showsOptions = false
+    @State private var showsProgress = true
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -128,6 +129,7 @@ struct ResearchWorkspaceView: View {
             maxSteps: min(max(maxSteps, 1), 32),
             pageCharacters: min(max(pageCharacters, 500), 20_000))
         let question = question
+        showsProgress = true
         Task { await research.ask(question, settings: settings) }
     }
 
@@ -174,18 +176,34 @@ struct ResearchWorkspaceView: View {
     private var progressCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("Progress").appFont(.headline)
+                Button {
+                    withAnimation(.easeOut(duration: 0.15)) { showsProgress.toggle() }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "chevron.right")
+                            .rotationEffect(.degrees(showsProgress ? 90 : 0))
+                            .appFont(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Text("Progress").appFont(.headline)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help(showsProgress ? "Hide the steps" : "Show the steps")
+                .accessibilityLabel(showsProgress ? "Hide progress" : "Show progress")
                 Spacer()
                 progressClock
             }
-            if shownSteps.isEmpty {
-                Text("Waiting for the model…")
-                    .appFont(.callout)
-                    .foregroundStyle(.secondary)
-            }
-            ForEach(shownSteps) { step in
-                if step.kind != .thinking || showThinking {
-                    ResearchStepRow(step: step)
+            if showsProgress {
+                if shownSteps.isEmpty {
+                    Text("Waiting for the model…")
+                        .appFont(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                ForEach(shownSteps) { step in
+                    if step.kind != .thinking || showThinking {
+                        ResearchStepRow(step: step)
+                    }
                 }
             }
             if research.run.isRunning {
@@ -496,25 +514,42 @@ private struct ResearchServiceRow: View {
 
 private struct ResearchSelfTestView: View {
     let result: ResearchSelfTestResult
+    @State private var showsChecks = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Label(result.passed ? "All safety checks passed" : "Some safety checks failed",
-                  systemImage: result.passed ? "checkmark.shield" : "exclamationmark.shield")
-                .appFont(.callout.weight(.semibold))
-                .foregroundStyle(result.passed ? Color.green : Color.red)
-            ForEach(result.checks) { check in
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Image(systemName: symbol(for: check.outcome))
-                        .foregroundStyle(color(for: check.outcome))
-                    Text(check.text)
-                        .appFont(.caption)
-                        .textSelection(.enabled)
-                        .fixedSize(horizontal: false, vertical: true)
+            Button {
+                withAnimation(.easeOut(duration: 0.15)) { showsChecks.toggle() }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "chevron.right")
+                        .rotationEffect(.degrees(showsChecks ? 90 : 0))
+                        .appFont(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Label(result.passed ? "All safety checks passed" : "Some safety checks failed",
+                          systemImage: result.passed ? "checkmark.shield" : "exclamationmark.shield")
+                        .appFont(.callout.weight(.semibold))
+                        .foregroundStyle(result.passed ? Color.green : Color.red)
+                    Spacer()
                 }
+                .contentShape(Rectangle())
             }
-            if !result.summary.isEmpty {
-                Text(result.summary).appFont(.caption).foregroundStyle(.secondary)
+            .buttonStyle(.plain)
+            .help(showsChecks ? "Hide the checks" : "Show the checks")
+            if showsChecks {
+                ForEach(result.checks) { check in
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Image(systemName: symbol(for: check.outcome))
+                            .foregroundStyle(color(for: check.outcome))
+                        Text(check.text)
+                            .appFont(.caption)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                if !result.summary.isEmpty {
+                    Text(result.summary).appFont(.caption).foregroundStyle(.secondary)
+                }
             }
         }
         .padding(12)
@@ -629,6 +664,15 @@ private struct ResearchReportView: View {
             Text(report.question)
                 .appFont(.title3.weight(.semibold))
                 .textSelection(.enabled)
+            if report.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                Label {
+                    Text("The model stopped without writing an answer. This usually means it used up its token budget while thinking. Try again with fewer Steps, with Show thinking off, or with a faster model.")
+                        .appFont(.callout)
+                        .fixedSize(horizontal: false, vertical: true)
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)
+                }
+            }
             Text(ResearchAnswerFormatter.attributed(
                 report.answer, sourceNumbers: Set(report.sources.map(\.number))))
                 .appFont(.body)
