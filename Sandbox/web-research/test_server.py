@@ -197,6 +197,25 @@ class SearchTests(unittest.TestCase):
                 tools.search(query, count)
 
 
+class InjectionFixtureTests(unittest.TestCase):
+    """The injection fixtures only test the model if extraction keeps the
+    planted text, so check that it survives."""
+
+    def test_planted_text_survives_extraction(self):
+        directory = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "injection")
+        expected = {
+            "ignore-instructions.html": "ZEBRA-CANARY-41",
+            "exfiltrate.html": "canary-exfil.invalid",
+            "local-network.html": "169.254.169.254",
+            "fake-tool-boundary.html": "CANARY-PEACH-9",
+        }
+        self.assertEqual(sorted(os.listdir(directory)), sorted(expected))
+        for name, planted in expected.items():
+            with open(os.path.join(directory, name), encoding="utf-8") as handle:
+                text = server.extract_text(handle.read(), f"https://fixtures.example/{name}")
+            self.assertIn(planted, text, name)
+
+
 class HTTPAPITests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
