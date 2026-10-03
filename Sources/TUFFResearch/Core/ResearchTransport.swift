@@ -53,6 +53,8 @@ public enum ResearchError: Error, Equatable, CustomStringConvertible {
     case modelRequestFailed(status: Int, message: String, code: String?)
     case malformedModelReply(String)
     case sandboxUnavailable(String)
+    /// The model ended a turn with neither an answer nor a tool call, twice.
+    case noAnswer(tokenLimit: Bool)
 
     public var description: String {
         switch self {
@@ -68,6 +70,11 @@ public enum ResearchError: Error, Equatable, CustomStringConvertible {
         case .sandboxUnavailable(let message):
             "could not reach the web research sandbox: \(message). "
                 + "Start it with `Scripts/research_sandbox.sh start`."
+        case .noAnswer(tokenLimit: true):
+            "the model used its whole token limit before writing an answer, usually by "
+                + "thinking. Try a larger --max-tokens, or --thinking off."
+        case .noAnswer(tokenLimit: false):
+            "the model ended without writing an answer. Try again, or try another model."
         }
     }
 }
