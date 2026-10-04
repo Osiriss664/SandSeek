@@ -215,7 +215,8 @@ struct ResearchAgentTests {
         let searches = history[4]["content"]?.stringValue ?? ""
         #expect(searches.hasSuffix("\n\nResearch so far: 2 searches "
             + "(\"apple container\", \"apple container vm isolation\"), 0 pages read, step 1 of 8."))
-        #expect(!(history[3]["content"]?.stringValue ?? "").contains("Research so far"))
+        let firstSearch = history[3]["content"]?.stringValue ?? ""
+        #expect(!firstSearch.contains("Research so far"))
     }
 
     @Test func reasoningIsShownButNeverSentBack() async throws {
