@@ -109,7 +109,8 @@ struct ResearchWorkspaceView: View {
                         .foregroundStyle(.secondary)
                 }
                 if research.run.isRunning {
-                    Button("Stop", role: .cancel) { research.run.stop() }
+                    Button("Stop Research", role: .cancel) { research.run.stop() }
+                        .help("Stops this question. The model server and web sandbox keep running; use Stop Both to end them.")
                 } else {
                     Button("Research", action: ask)
                         .buttonStyle(.borderedProminent)
