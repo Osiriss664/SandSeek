@@ -871,6 +871,202 @@ struct ResearchAgentTests {
         #expect(state.messages[1]["tool_call_id"] == .string("a"))
     }
 
+    /// A long page whose one useful sentence sits between menus and filler.
+    private static let longPageText = (["Startseite", "Menü", "Anmelden"]
+        + Array(repeating: "Lorem ipsum dolor sit amet, consectetur adipiscing elit.", count: 30)
+        + ["Die Gruppe verteilt in Berlin jeden Samstag eine Zeitung und lädt zu Diskussionen ein."]
+        + Array(repeating: "Sed do eiusmod tempor incididunt ut labore et dolore.", count: 30))
+        .joined(separator: "\n")
+
+    private static func pageResult(_ number: Int, url: String, offset: Int = 0) -> String {
+        ResearchAgent.formatPage(
+            ResearchPageSlice(url: url, title: "Page \(number)", text: longPageText,
+                              offset: offset, nextOffset: nil,
+                              totalCharacters: longPageText.unicodeScalars.count),
+            source: ResearchSource(number: number, title: "Page \(number)", url: url))
+    }
+
+    private static func toolMessage(_ id: String, _ content: String) -> ResearchJSON {
+        .object(["role": .string("tool"), "tool_call_id": .string(id), "content": .string(content)])
+    }
+
+    @Test func compactionKeepsThePassagesThatMatchTheQuestion() {
+        var state = ResearchAgent.State(question: "Welche Gruppen in Berlin verteilen Zeitungen?")
+        let old = Self.pageResult(1, url: "https://a.example/")
+        let newest = Self.pageResult(2, url: "https://b.example/")
+        state.messages = [
+            .object(["role": .string("system"), "content": .string("s")]),
+            .object(["role": .string("user"), "content": .string(state.question)]),
+            Self.toolMessage("a", old),
+            Self.toolMessage("b", newest),
+        ]
+        #expect(state.compact(toFit: newest.count + 3_000))
+        let shortened = state.messages[2]["content"]?.stringValue ?? ""
+        #expect(shortened.count < 1_500)
+        #expect(shortened.hasPrefix("Source [1]: Page 1\nURL: https://a.example/"))
+        #expect(shortened.contains("verteilt in Berlin jeden Samstag eine Zeitung"))
+        #expect(shortened.contains(ResearchAgent.untrustedOpen))
+        #expect(shortened.contains(ResearchAgent.untrustedClose))
+        #expect(shortened.hasSuffix("only the passages that match the question are kept.)"))
+        // The question and the newest page stay whole.
+        #expect(state.messages[1]["content"] == .string(state.question))
+        #expect(state.messages[3]["content"] == .string(newest))
+        // Under budget, nothing changes.
+        let before = state.messages
+        #expect(!state.compact(toFit: 1_000_000))
+        #expect(state.messages == before)
+    }
+
+    @Test func compactionDropsSnippetsAndRepeatedReadsFirst() {
+        var state = ResearchAgent.State(question: "Berlin Zeitung")
+        let search = ResearchAgent.formatSearch(query: "berlin zeitung", results: (1...5).map {
+            ResearchSearchResult(title: "Result \($0)", url: "https://r\($0).example/",
+                                 snippet: String(repeating: "snippet text ", count: 30))
+        })
+        let first = Self.pageResult(1, url: "https://a.example/")
+        let again = Self.pageResult(1, url: "https://a.example/")
+        state.messages = [
+            .object(["role": .string("system"), "content": .string("s")]),
+            .object(["role": .string("user"), "content": .string(state.question)]),
+            Self.toolMessage("s", search + "\n\nResearch so far: 1 search, 0 pages read, step 1 of 8."),
+            Self.toolMessage("a", first),
+            Self.toolMessage("b", again),
+        ]
+        state.compact(toFit: again.count + 2_500)
+        let shortenedSearch = state.messages[2]["content"]?.stringValue ?? ""
+        let shortenedFirst = state.messages[3]["content"]?.stringValue ?? ""
+        #expect(shortenedFirst == "Source [1]: Page 1\n(Shortened: the same text appears again below.)")
+        #expect(shortenedSearch.contains("- Result 1\n  https://r1.example/"))
+        #expect(!shortenedSearch.contains("snippet text"))
+        #expect(!shortenedSearch.contains("Research so far"))
+        #expect(state.messages[4]["content"] == .string(again))
+    }
+
+    @Test func compactionFallsBackToOneLinePerResult() {
+        var state = ResearchAgent.State(question: "Berlin Zeitung")
+        state.messages = [
+            .object(["role": .string("system"), "content": .string("s")]),
+            .object(["role": .string("user"), "content": .string(state.question)]),
+            Self.toolMessage("a", Self.pageResult(1, url: "https://a.example/")),
+            Self.toolMessage("b", Self.pageResult(2, url: "https://b.example/")),
+            Self.toolMessage("c", Self.pageResult(3, url: "https://c.example/")),
+        ]
+        state.compact(toFit: 200)
+        #expect(state.messages[2]["content"]
+            == .string("Source [1]: Page 1\n(Earlier result shortened to save context.)"))
+        #expect(state.messages[3]["content"]
+            == .string("Source [2]: Page 2\n(Earlier result shortened to save context.)"))
+    }
+
+    @Test func extractKeepsTheLeadAndMatchingPassagesInPageOrder() {
+        let body = "Title line\nnothing here\nZeitungen in Berlin\nmore filler\nBerlin only"
+        let kept = ResearchAgent.State.extract(body, limit: 200, stems: ["berlin", "zeitun"])
+        #expect(kept == "Title line … Zeitungen in Berlin … Berlin only")
+        let none = ResearchAgent.State.extract("a\nb\nc", limit: 200, stems: ["berlin"])
+        #expect(none == "a … b … c")
+        let long = String(repeating: "Wort ", count: 200)
+        #expect(ResearchAgent.State.passages(long).allSatisfy { $0.count <= 300 })
+    }
+
+    @Test func keywordStemsComeFromTheQuestionAndSearches() {
+        var state = ResearchAgent.State(question: "Mache mir eine Zusammenfassung der Gruppen in Berlin")
+        state.queries = ["Zeitungen verteilen"]
+        #expect(state.keywordStems() == ["gruppe", "berlin", "zeitun", "vertei"])
+    }
+
+    @Test func budgetFollowsTheContextWindowAndMeasuredTokens() {
+        let chat = ResearchChatClient(
+            serverURL: URL(string: "http://127.0.0.1:8080")!, model: "default",
+            maxTokens: 8_192, enableThinking: true, transport: FakeServices(modelReplies: []))
+        let agent = ResearchAgent(
+            chat: chat,
+            sandbox: ResearchSandboxClient(
+                baseURL: URL(string: "http://127.0.0.1:9000")!,
+                transport: FakeServices(modelReplies: [])))
+        var state = ResearchAgent.State(question: "q")
+        #expect(agent.promptBudget(state) == ResearchOptions.fallbackBudgetCharacters)
+        state.contextTokens = 16_384
+        // 16,384 - 8,192 for the reply - 256 for the template, at 2.5 characters.
+        #expect(agent.promptBudget(state) == 19_840)
+        // An 8K window keeps two fifths for the prompt.
+        state.contextTokens = 8_192
+        #expect(agent.promptBudget(state) == 8_190)
+        state.calibrate(sentCharacters: 30_000, promptTokens: 9_000)
+        #expect(abs(state.charactersPerToken - 3.0) < 0.001)
+        state.calibrate(sentCharacters: 100, promptTokens: 1_000)
+        #expect(state.charactersPerToken == 1.5)
+        state.contextTokens = 1_000_000
+        state.charactersPerToken = 4
+        #expect(agent.promptBudget(state) == ResearchAgent.largestBudgetCharacters)
+        var fixed = ResearchOptions()
+        fixed.contextBudgetCharacters = 5_000
+        #expect(ResearchAgent(chat: chat, sandbox: agent.sandbox, options: fixed)
+            .promptBudget(state) == 5_000)
+    }
+
+    @Test func aLongRunShortensOldPagesToFitTheListedContext() async throws {
+        let page = Self.longPageText
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "open_page", #"{"url":"https://a.example/"}"#)]),
+            FakeServices.calls([("b", "open_page", #"{"url":"https://b.example/"}"#)]),
+            FakeServices.answer("Eine Gruppe verteilt Zeitungen [1][2]."),
+            // After one request to look wider.
+            FakeServices.answer("Eine Gruppe verteilt Zeitungen [1][2]."),
+        ]) { path, body in
+            switch path {
+            case "/v1/models":
+                return FakeServices.json(200, .object(["object": .string("list"), "data": .array([
+                    .object(["id": .string("qwen3.6-35b-a3b"), "context_length": .integer(4_700)]),
+                ])]))
+            case "/v1/fetch":
+                return FakeServices.json(200, .object([
+                    "url": body?["url"] ?? .string(""), "title": .string("Gruppe"),
+                    "text": .string(page), "offset": .integer(0),
+                    "total_chars": .integer(page.unicodeScalars.count),
+                ]))
+            default:
+                return FakeServices.webPages(path, body)
+            }
+        }
+        let log = EventLog()
+        let report = try await agent(services, events: log)
+            .run(question: "Welche Gruppen verteilen in Berlin Zeitungen?")
+        #expect(report.sources.count == 2)
+        #expect(log.events.contains(.shortenedOlderResults))
+        let tools = messages(try #require(services.modelRequests.last))
+            .filter { $0["role"] == .string("tool") }
+            .compactMap { $0["content"]?.stringValue }
+        #expect(tools.count == 2)
+        #expect(tools[0].count < 1_500)
+        #expect(tools[0].contains("verteilt in Berlin jeden Samstag eine Zeitung"))
+        #expect(tools[1].contains(page))
+    }
+
+    @Test func theContextWindowIsReadFromTheModelList() async {
+        let models = FakeServices(modelReplies: []) { path, _ in
+            guard path == "/v1/models" else { return FakeServices.json(404, .object([:])) }
+            return FakeServices.json(200, .object(["data": .array([
+                .object(["id": .string("gemma-4-26b-a4b-it"), "context_length": .integer(8_192)]),
+                .object(["id": .string("qwen3.6-35b-a3b"), "context_length": .integer(16_384)]),
+                .object(["id": .string("no-window")]),
+            ])]))
+        }
+        func window(_ model: String) async -> Int? {
+            await ResearchChatClient(
+                serverURL: URL(string: "http://127.0.0.1:8080/v1")!, model: model,
+                maxTokens: 512, enableThinking: nil, transport: models).contextTokens()
+        }
+        #expect(await window("qwen3.6-35b-a3b") == 16_384)
+        #expect(await window("qwen36") == 16_384)
+        #expect(await window("default") == 8_192)
+        #expect(models.requests.allSatisfy { $0.url.absoluteString == "http://127.0.0.1:8080/v1/models" })
+        #expect(await window("x") == 8_192)
+        let silent = FakeServices(modelReplies: [])
+        #expect(await ResearchChatClient(
+            serverURL: URL(string: "http://127.0.0.1:8080")!, model: "x", maxTokens: 512,
+            enableThinking: nil, transport: silent).contextTokens() == nil)
+    }
+
     @Test func unreachableSandboxStopsBeforeTheModelRuns() async {
         let services = FakeServices(modelReplies: [FakeServices.answer("never")]) { _, _ in
             FakeServices.json(503, .object([:]))

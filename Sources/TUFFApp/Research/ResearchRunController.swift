@@ -158,6 +158,8 @@ public final class ResearchRunController {
             append(.turn, "Answered from one search or page; asking it to look wider", started: started)
         case .openingTopResults:
             append(.turn, "Answered from search previews again; opening the top results", started: started)
+        case .shortenedOlderResults:
+            append(.turn, "Shortened older results to fit the model's context", started: started)
         }
     }
 

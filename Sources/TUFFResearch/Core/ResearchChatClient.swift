@@ -1,4 +1,5 @@
 import Foundation
+import TUFFModelCatalog
 
 public struct ResearchToolCall: Equatable, Sendable {
     public let id: String
@@ -15,6 +16,8 @@ public struct ResearchAssistantTurn: Equatable, Sendable {
     /// Why the turn ended: `stop`, `tool_calls`, or `length` when it reached
     /// the token limit.
     public var finishReason: String? = nil
+    /// Tokens the server counted in the prompt, when it reports usage.
+    public var promptTokens: Int? = nil
 }
 
 /// Talks to TUFF's OpenAI-compatible Chat Completions endpoint. It sends only
@@ -96,6 +99,28 @@ public struct ResearchChatClient: Sendable {
         }
         return ResearchAssistantTurn(content: message["content"]?.stringValue, toolCalls: calls,
                                      reasoning: message["reasoning_content"]?.stringValue,
-                                     finishReason: choice?["finish_reason"]?.stringValue)
+                                     finishReason: choice?["finish_reason"]?.stringValue,
+                                     promptTokens: reply?["usage"]?["prompt_tokens"]?.intValue)
+    }
+
+    /// The model's context window in tokens, as TUFF lists it in
+    /// `/v1/models`, or nil when the server does not say. A name the list
+    /// does not hold, such as `default`, gets the smallest listed window.
+    public func contextTokens() async -> Int? {
+        guard let response = try? await transport.send(
+                method: "GET", url: endpoint.deletingLastPathComponent()
+                    .deletingLastPathComponent().appendingPathComponent("models"),
+                body: nil),
+              response.status == 200,
+              let models = (try? ResearchJSON.decode(response.body))?["data"]?.arrayValue
+        else { return nil }
+        let windows = models.compactMap { entry -> (id: String, tokens: Int)? in
+            guard let id = entry["id"]?.stringValue,
+                  let tokens = entry["context_length"]?.intValue, tokens > 0 else { return nil }
+            return (id, tokens)
+        }
+        // `tuff research --model qwen36` names the model by its selector.
+        let names = [model] + TUFFModelCatalog.all.filter { $0.selector == model }.map(\.apiModelID)
+        return windows.first { names.contains($0.id) }?.tokens ?? windows.map(\.tokens).min()
     }
 }

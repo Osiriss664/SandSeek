@@ -325,8 +325,15 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
   before `Scripts/research_sandbox.sh start` to use your own SearXNG instead.
   The firewall makes one exception for it, its address and port only. Give it
   as an IP address if the name only resolves on your local network.
-- Long pages are read in slices, and older tool results are shortened once the
-  conversation approaches `--context-chars`. Models with small catalog
+- Long pages are read in slices. The loop asks TUFF for the model's context
+  window (`/v1/models`), keeps room in it for the reply (`--max-tokens`, 8192
+  with reasoning on), and shortens older results once the conversation would
+  outgrow the rest; `--context-chars` sets a fixed budget instead. Shortening
+  is done by the loop, not by the model, so page text never gets a chance to
+  steer it: a page read twice keeps only its newest copy, older pages keep
+  only the passages that contain words from the question and the searches,
+  and older searches lose their snippets. Only when that is not enough does
+  an older result shrink to its first line. Models with small catalog
   contexts get fewer pages per answer.
 - The sandbox scripts are run from a clone of this repository. The packaged
   app includes `tuff research` but not the sandbox image.

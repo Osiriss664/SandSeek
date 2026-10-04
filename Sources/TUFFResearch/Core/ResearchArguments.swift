@@ -33,7 +33,8 @@ public struct ResearchArguments: Equatable, Sendable {
                                or 8192 with reasoning on).
       --page-chars <n>         Page text per read, 500...20000 (default 3000).
       --context-chars <n>      Prompt budget before old results are shortened
-                               (default 16000).
+                               (default: from the model's context window, or
+                               16000 when the server does not list it).
       --thinking on|off        Gemma and Qwen reasoning (default: model's own).
       --show-thinking          Turn reasoning on and print it with the
                                progress. It is not added to the report.

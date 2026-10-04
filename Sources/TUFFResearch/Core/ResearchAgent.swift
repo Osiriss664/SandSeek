@@ -8,9 +8,13 @@ public struct ResearchOptions: Equatable, Sendable {
     public var searchResults: Int = 5
     /// Characters of page text one `open_page` call returns.
     public var pageSliceCharacters: Int = 3_000
-    /// Rough prompt budget. TUFF's catalog contexts are 2K to 8K tokens, so
-    /// older tool results are shortened before the conversation outgrows them.
-    public var contextBudgetCharacters: Int = 16_000
+    /// Prompt budget in characters before older results are shortened. Nil
+    /// works it out from the model's context window, which TUFF lists, less
+    /// the room the reply needs, and from how many characters the server's
+    /// tokens turn out to hold.
+    public var contextBudgetCharacters: Int? = nil
+    /// The budget when the server does not say how large the context is.
+    public static let fallbackBudgetCharacters = 16_000
     public var currentDate: String = ResearchOptions.today()
 
     public init() {}
@@ -136,6 +140,9 @@ public enum ResearchEvent: Equatable, Sendable {
     /// The model answered from search previews again after it was asked to
     /// read, so the loop opens the top search results itself.
     case openingTopResults
+    /// Older results were shortened so the conversation fits the model's
+    /// context window.
+    case shortenedOlderResults
 }
 
 /// The research loop. The model can only search the web and read pages, and
@@ -243,6 +250,9 @@ public struct ResearchAgent: Sendable {
     public func run(question: String) async throws -> ResearchReport {
         try await sandbox.checkHealth()
         var state = State(question: question)
+        if options.contextBudgetCharacters == nil {
+            state.contextTokens = await chat.contextTokens()
+        }
         state.messages = [
             .object(["role": .string("system"), "content": .string(systemPrompt())]),
             .object(["role": .string("user"), "content": .string(question)]),
@@ -462,23 +472,55 @@ public struct ResearchAgent: Sendable {
         return .object(message)
     }
 
-    /// Sends the conversation, shortening old tool results to fit the budget.
+    /// The tool definitions, which every request carries, in characters.
+    static let toolCharacters = (try? ResearchJSON.array(tools).encoded().count) ?? 2_000
+    /// Tokens kept free for the chat template around the messages.
+    static let templateReserveTokens = 256
+    /// The most the prompt may grow to, even in a large context window: a
+    /// local model reads the whole prompt again whenever an early part of
+    /// it changes, and long prompts make every turn slow.
+    static let largestBudgetCharacters = 64_000
+
+    /// Characters the next prompt may use. The reply (reasoning, tool calls
+    /// and answer) needs up to `maxTokens` of the same context window, but
+    /// at least two fifths of the window stay for the prompt.
+    func promptBudget(_ state: State) -> Int {
+        if let fixed = options.contextBudgetCharacters { return fixed }
+        guard let window = state.contextTokens else {
+            return ResearchOptions.fallbackBudgetCharacters
+        }
+        let tokens = max(window - chat.maxTokens - Self.templateReserveTokens, window * 2 / 5)
+        let characters = Double(tokens) * state.charactersPerToken
+        return Int(min(characters, Double(Self.largestBudgetCharacters)))
+    }
+
+    /// Sends the conversation, shortening older results to fit the budget.
     /// A context overflow the estimate missed gets one retry at half budget.
     private func complete(_ state: inout State,
                           allowTools: Bool,
                           thinking: Bool? = nil) async throws -> ResearchAssistantTurn {
-        state.compact(toFit: options.contextBudgetCharacters)
+        if state.compact(toFit: promptBudget(state), overhead: Self.toolCharacters) {
+            onEvent(.shortenedOlderResults)
+        }
+        var sent = state.size(overhead: Self.toolCharacters)
         let turn: ResearchAssistantTurn
         do {
             turn = try await chat.complete(
                 messages: state.messages, tools: Self.tools, allowTools: allowTools,
                 thinking: thinking)
         } catch ResearchError.modelRequestFailed(_, _, "context_length_exceeded"?) {
-            state.compact(toFit: options.contextBudgetCharacters / 2)
+            // The server's tokens hold fewer characters than estimated.
+            state.charactersPerToken = max(
+                State.charactersPerTokenRange.lowerBound, state.charactersPerToken * 0.75)
+            if state.compact(toFit: promptBudget(state) / 2, overhead: Self.toolCharacters) {
+                onEvent(.shortenedOlderResults)
+            }
+            sent = state.size(overhead: Self.toolCharacters)
             turn = try await chat.complete(
                 messages: state.messages, tools: Self.tools, allowTools: allowTools,
                 thinking: thinking)
         }
+        state.calibrate(sentCharacters: sent, promptTokens: turn.promptTokens)
         if let reasoning = turn.reasoning?.trimmingCharacters(in: .whitespacesAndNewlines),
            !reasoning.isEmpty {
             onEvent(.reasoning(reasoning))
@@ -696,26 +738,295 @@ public struct ResearchAgent: Sendable {
             return line
         }
 
-        static let compactedPreviewCharacters = 400
+        /// The model's context window in tokens, when the server lists it.
+        var contextTokens: Int?
+        /// How many characters one prompt token holds. It starts low, as web
+        /// text in German with links and numbers needs many tokens, and is
+        /// measured from the prompt tokens the server reports.
+        var charactersPerToken = 2.5
+        static let charactersPerTokenRange = 1.5...4.0
 
-        /// Shortens the oldest tool results first. The newest result is kept
-        /// whole, because the model is about to act on it.
-        mutating func compact(toFit budget: Int) {
-            func size() -> Int {
-                messages.reduce(0) { $0 + ($1["content"]?.stringValue?.count ?? 0) + 64 }
+        /// Learns how many characters a token holds from a prompt the server
+        /// counted, keeping a tenth in hand.
+        mutating func calibrate(sentCharacters: Int, promptTokens: Int?) {
+            guard let promptTokens, promptTokens > 0, sentCharacters > 0 else { return }
+            let measured = Double(sentCharacters) / Double(promptTokens) * 0.9
+            charactersPerToken = min(max(measured, Self.charactersPerTokenRange.lowerBound),
+                                     Self.charactersPerTokenRange.upperBound)
+        }
+
+        /// The prompt's size in characters: every message's text and tool
+        /// calls, plus `overhead` for what each request carries besides.
+        func size(overhead: Int = 0) -> Int {
+            messages.reduce(overhead) { total, message in
+                let calls = (message["tool_calls"]?.arrayValue ?? []).reduce(0) { sum, call in
+                    sum + (call["function"]?["name"]?.stringValue?.count ?? 0)
+                        + (call["function"]?["arguments"]?.stringValue?.count ?? 0) + 32
+                }
+                return total + (message["content"]?.stringValue?.count ?? 0) + calls + 64
             }
-            guard size() > budget else { return }
-            let toolIndices = messages.indices.filter { messages[$0]["role"]?.stringValue == "tool" }
-            for index in toolIndices.dropLast() where size() > budget {
-                guard case .object(var message) = messages[index],
-                      let content = message["content"]?.stringValue,
-                      content.count > Self.compactedPreviewCharacters else { continue }
-                let firstLine = content.prefix { $0 != "\n" }
-                message["content"] = .string(
-                    "\(firstLine)\n(Earlier result shortened to save context. "
-                        + "Open the page again if you need its text.)")
-                messages[index] = .object(message)
+        }
+
+        static let compactedPreviewCharacters = 400
+        /// Characters kept from each page at the first and second level of
+        /// shortening.
+        static let keptPassageCharacters = [900, 300]
+        /// A draft answer longer than this is shortened.
+        static let draftAnswerCharacters = 600
+
+        /// Shortens older results until the prompt fits `budget`, going a
+        /// little further so the next turns do not shorten again at once:
+        /// each change makes the server read the prompt again from there.
+        /// It works in rounds, oldest message first in each round: repeated
+        /// reads of the same text, then pages cut to the passages that
+        /// match the question and searches cut to titles and links, then
+        /// shorter passages, then one line per result. The system prompt,
+        /// the question, the newest result and the last message stay whole.
+        /// Returns whether anything changed.
+        @discardableResult
+        mutating func compact(toFit budget: Int, overhead: Int = 0) -> Bool {
+            guard size(overhead: overhead) > budget else { return false }
+            let target = budget * 3 / 4
+            let firstUser = messages.firstIndex { $0["role"]?.stringValue == "user" }
+            let newestTool = messages.lastIndex { $0["role"]?.stringValue == "tool" }
+            let candidates = messages.indices.filter { index in
+                let role = messages[index]["role"]?.stringValue
+                return role != "system" && index != firstUser && index != newestTool
+                    && index != messages.count - 1
             }
+            let stems = keywordStems()
+            var changed = false
+            for level in 0...3 {
+                for index in candidates where size(overhead: overhead) > target {
+                    guard case .object(var message) = messages[index],
+                          let content = message["content"]?.stringValue else { continue }
+                    let shorter: String?
+                    switch level {
+                    case 0: shorter = repeatedRead(at: index) ? Self.firstLineOnly(
+                        content, note: "(Shortened: the same text appears again below.)") : nil
+                    case 1, 2: shorter = Self.shortened(
+                        message, content: content,
+                        passageLimit: Self.keptPassageCharacters[level - 1], stems: stems)
+                    default: shorter = Self.lastResort(message, content: content)
+                    }
+                    guard let shorter, shorter.count < content.count else { continue }
+                    message["content"] = .string(shorter)
+                    messages[index] = .object(message)
+                    changed = true
+                }
+            }
+            return changed
+        }
+
+        /// Whether a later message holds the same page text, read again.
+        func repeatedRead(at index: Int) -> Bool {
+            guard messages[index]["role"]?.stringValue == "tool",
+                  let content = messages[index]["content"]?.stringValue,
+                  let key = Self.pageKeys(content).first,
+                  Self.pageKeys(content).count == 1 else { return false }
+            return messages[(index + 1)...].contains { later in
+                Self.pageKeys(later["content"]?.stringValue ?? "").contains(key)
+            }
+        }
+
+        /// The URL and character range of each page in a result, as
+        /// `formatPage` writes them, which name the text that was read.
+        static func pageKeys(_ content: String) -> [String] {
+            let lines = outsideBlocks(content).split(separator: "\n")
+            return zip(lines, lines.dropFirst()).compactMap { url, range in
+                url.hasPrefix("URL: ") && range.hasPrefix("Characters ")
+                    ? "\(url)\n\(range.split(separator: ".").first ?? range)" : nil
+            }
+        }
+
+        /// The loop's own text around the untrusted blocks.
+        static func outsideBlocks(_ content: String) -> String {
+            var outside = ""
+            var rest = Substring(content)
+            while let open = rest.range(of: ResearchAgent.untrustedOpen),
+                  let close = rest[open.upperBound...].range(of: ResearchAgent.untrustedClose) {
+                outside += rest[..<open.lowerBound]
+                rest = rest[close.upperBound...]
+            }
+            return outside + rest
+        }
+
+        /// A tool result or auto-opened pages with each untrusted block cut
+        /// down: pages to the passages that best match the question, search
+        /// results to their titles and links. The loop's text around the
+        /// blocks stays, except the progress line, which is out of date. A
+        /// long draft answer is cut to its start. Nil when there is nothing
+        /// to cut this way.
+        static func shortened(_ message: [String: ResearchJSON],
+                              content: String,
+                              passageLimit: Int,
+                              stems: [String]) -> String? {
+            let role = message["role"]?.stringValue
+            if role == "assistant" {
+                guard content.count > draftAnswerCharacters else { return nil }
+                return String(content.prefix(draftAnswerCharacters))
+                    + " …\n(Earlier draft shortened to save context.)"
+            }
+            guard role == "tool" || role == "user" else { return nil }
+            let isSearch = content.hasPrefix("Search results for ")
+            var output = ""
+            var rest = Substring(content)
+            var found = false
+            while let open = rest.range(of: ResearchAgent.untrustedOpen),
+                  let close = rest[open.upperBound...].range(of: ResearchAgent.untrustedClose) {
+                found = true
+                output += rest[..<open.upperBound]
+                let body = String(rest[open.upperBound..<close.lowerBound])
+                    .trimmingCharacters(in: .newlines)
+                let kept = isSearch ? searchTitles(body)
+                    : extract(body, limit: passageLimit, stems: stems)
+                // Page text was cleaned of markers already; cleaning the
+                // cut-down text again keeps that true whatever the cut.
+                output += "\n" + ResearchAgent.sanitized(kept) + "\n" + ResearchAgent.untrustedClose
+                rest = rest[close.upperBound...]
+            }
+            guard found else { return nil }
+            let tail = rest.split(separator: "\n", omittingEmptySubsequences: false)
+                .filter {
+                    !$0.hasPrefix("Research so far:") && !$0.hasPrefix("(Earlier result shortened")
+                }
+                .joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !tail.isEmpty { output += "\n" + tail }
+            output += isSearch
+                ? "\n(Earlier result shortened to save context: snippets removed.)"
+                : "\n(Earlier result shortened to save context: only the passages that "
+                    + "match the question are kept.)"
+            return output
+        }
+
+        /// One line per result, as before passages were kept.
+        static func lastResort(_ message: [String: ResearchJSON], content: String) -> String? {
+            switch message["role"]?.stringValue {
+            case "tool":
+                guard content.count > compactedPreviewCharacters
+                        || content.contains(ResearchAgent.untrustedOpen) else { return nil }
+                return firstLineOnly(content, note: "(Earlier result shortened to save context.)")
+            case "user":
+                // Auto-opened pages: the request and each page's source line.
+                guard content.contains(ResearchAgent.untrustedOpen) else { return nil }
+                var lines = [String(content.prefix { $0 != "\n" })]
+                for line in outsideBlocks(content).split(separator: "\n")
+                where line.hasPrefix("Source [") && !lines.contains(String(line)) {
+                    lines.append(String(line))
+                }
+                lines.append("(Page text shortened to save context.)")
+                return lines.joined(separator: "\n")
+            default:
+                return nil
+            }
+        }
+
+        static func firstLineOnly(_ content: String, note: String) -> String {
+            "\(content.prefix { $0 != "\n" })\n\(note)"
+        }
+
+        /// Search results without their snippets: each title and its link.
+        static func searchTitles(_ body: String) -> String {
+            var kept: [Substring] = []
+            var keepNext = false
+            for line in body.split(separator: "\n") {
+                if line.hasPrefix("- ") {
+                    kept.append(line)
+                    keepNext = true
+                } else if keepNext {
+                    kept.append(line)
+                    keepNext = false
+                }
+            }
+            return kept.joined(separator: "\n")
+        }
+
+        static let passageCharacters = 300
+        static let leadCharacters = 150
+
+        /// Up to `limit` characters of a page: its first passage, which
+        /// often carries the title and date, then the passages that contain
+        /// the most keyword stems, in page order and joined by " … ". With
+        /// no match, the start of the page.
+        static func extract(_ body: String, limit: Int, stems: [String]) -> String {
+            let parts = passages(body)
+            guard !parts.isEmpty else { return String(body.prefix(limit)) }
+            let lead = String(parts[0].prefix(leadCharacters))
+            var chosen: [Int: String] = [0: lead]
+            var used = lead.count
+            let scores = parts.map { part in
+                let lower = part.lowercased()
+                return stems.filter { lower.contains($0) }.count
+            }
+            let ranked = parts.indices.dropFirst().filter { scores[$0] > 0 }
+                .sorted { scores[$0] != scores[$1] ? scores[$0] > scores[$1] : $0 < $1 }
+            for index in ranked where used + parts[index].count + 3 <= limit {
+                chosen[index] = parts[index]
+                used += parts[index].count + 3
+            }
+            if chosen.count == 1 {
+                for index in parts.indices.dropFirst() {
+                    guard used + parts[index].count + 3 <= limit else { break }
+                    chosen[index] = parts[index]
+                    used += parts[index].count + 3
+                }
+            }
+            let text = chosen.keys.sorted().compactMap { chosen[$0] }.joined(separator: " … ")
+            return String(text.prefix(limit))
+        }
+
+        /// A page's text split into lines, and long lines into pieces of at
+        /// most `passageCharacters`, cut after a sentence where one ends.
+        static func passages(_ text: String) -> [String] {
+            var result: [String] = []
+            for line in text.split(whereSeparator: \.isNewline) {
+                var rest = line.trimmingCharacters(in: .whitespaces)
+                while !rest.isEmpty {
+                    guard rest.count > passageCharacters else {
+                        result.append(rest)
+                        break
+                    }
+                    let window = rest.prefix(passageCharacters)
+                    var cut = window.endIndex
+                    if let end = window.lastIndex(where: { ".!?".contains($0) }),
+                       window.distance(from: window.startIndex, to: end) >= 80 {
+                        cut = window.index(after: end)
+                    }
+                    result.append(rest[..<cut].trimmingCharacters(in: .whitespaces))
+                    rest = rest[cut...].trimmingCharacters(in: .whitespaces)
+                }
+            }
+            return result.filter { !$0.isEmpty }
+        }
+
+        /// Common words that say nothing about a page's topic.
+        static let stopWords: Set<String> = [
+            "about", "after", "also", "aber", "alle", "auch", "been", "being", "dass", "denn",
+            "dein", "deine", "diese", "dieser", "dieses", "does", "durch", "eine", "einem",
+            "einen", "einer", "eines", "from", "für", "gibt", "habe", "haben", "have", "hier",
+            "into", "jetzt", "kann", "können", "mache", "machen", "mehr", "mich", "mit", "nach",
+            "nicht", "noch", "oder", "ohne", "only", "over", "sehr", "sein", "seine", "sich",
+            "sind", "some", "such", "than", "that", "their", "them", "then", "there", "these",
+            "they", "this", "über", "unter", "very", "viel", "vom", "were", "what", "when",
+            "welche", "welcher", "welches", "where", "which", "while", "will", "with", "wird",
+            "would", "wurde", "your",
+            "zusammenfassung", "summary", "zwischen",
+        ]
+
+        /// The words of the question and of the searches that pick the
+        /// passages kept from a shortened page. Each is cut to its first six
+        /// letters, so "Zeitungen" also finds "Zeitung" and "politics" finds
+        /// "political".
+        func keywordStems() -> [String] {
+            let text = ([question] + queries).joined(separator: " ").lowercased()
+            var stems: [String] = []
+            for word in text.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+            where word.count >= 4 && !Self.stopWords.contains(String(word)) {
+                let stem = String(word.prefix(6))
+                if !stems.contains(stem) { stems.append(stem) }
+            }
+            return stems
         }
     }
 }
