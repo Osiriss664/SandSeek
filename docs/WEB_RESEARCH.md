@@ -17,6 +17,8 @@ tuff research "How does Apple container isolate each container?"
 The answer is printed as Markdown with numbered sources. `--output notes.md`
 also writes it to a new file. `--show-thinking` turns on the model's reasoning
 and prints it under each `[n] thinking…` line; it is not added to the report.
+The server returns that reasoning as `reasoning_content` on non-streaming
+replies; streams leave it out.
 `--max-steps <1...32>` sets how many search and read rounds the model may take
 before it has to answer (default 8). Run `tuff research --help` for every
 option.
