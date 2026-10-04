@@ -133,6 +133,9 @@ public enum ResearchEvent: Equatable, Sendable {
     /// The model answered after one search or one page, and is asked once to
     /// search with other words and read another source.
     case askingToSearchMore
+    /// The model answered from search previews again after it was asked to
+    /// read, so the loop opens the top search results itself.
+    case openingTopResults
 }
 
 /// The research loop. The model can only search the web and read pages, and
@@ -208,7 +211,10 @@ public struct ResearchAgent: Sendable {
 
     func systemPrompt() -> String {
         """
-        You are a careful web researcher. Today is \(options.currentDate).
+        You are a careful web researcher. Today is \(options.currentDate). \
+        Pages dated up to today are real, current pages, even when they are \
+        newer than what you learned in training. Never call them simulated, \
+        fictional or hypothetical.
         Work in this order:
         1. Plan: split the question into the facts you need, and plan two to \
         four different searches. One search is almost never enough.
@@ -245,6 +251,7 @@ public struct ResearchAgent: Sendable {
         var askedToSearch = false
         var askedToRead = false
         var askedToSearchMore = false
+        var openedTopResults = false
         // The answer given before the model was asked to look wider. It is
         // kept if the next answer comes back empty or cut off.
         var answerBeforeSearchingMore: String?
@@ -255,7 +262,8 @@ public struct ResearchAgent: Sendable {
                 // An answer from memory, or from snippets that are short and
                 // often stale, has no sources to check. Ask once to search,
                 // and once to read real pages. An answer from one search or
-                // one page is asked once to look wider.
+                // one page is asked once to look wider, unless the loop had
+                // to open the pages itself.
                 var request: String?
                 if step < options.maxSteps {
                     if state.sources.isEmpty {
@@ -267,8 +275,18 @@ public struct ResearchAgent: Sendable {
                             askedToRead = true
                             request = Self.readPagesRequest
                             onEvent(.askingToReadPages)
+                        } else if askedToRead, !openedTopResults {
+                            // Some models (Gemma 4 26B) answer from previews
+                            // again. Open the top results for them instead.
+                            openedTopResults = true
+                            onEvent(.openingTopResults)
+                            let pages = await openTopResults(state: &state)
+                            if !pages.isEmpty {
+                                request = Self.topResultsRequest + "\n\n"
+                                    + pages.joined(separator: "\n\n")
+                            }
                         }
-                    } else if !askedToSearchMore,
+                    } else if !askedToSearchMore, !openedTopResults,
                               state.queries.count < 2 || state.sources.count < 2,
                               // A turn that ran into the token limit is not sent
                               // back for more text; it needs an answer.
@@ -391,6 +409,30 @@ public struct ResearchAgent: Sendable {
         + "out of date, and no page has a source number yet. Open the most relevant pages with "
         + "open_page, then answer from what they say, citing the source numbers open_page gives."
 
+    static let topResultsRequest = "You answered from search snippets again, so the research "
+        + "opened the top search results for you. They follow below. Answer from what these "
+        + "pages say, citing their source numbers. You may still search or open more pages."
+
+    /// Pages the loop opens itself when the model will not.
+    static let autoOpenedPages = 2
+    /// Search results tried for them, so a few broken links cannot stop it.
+    static let autoOpenAttempts = 4
+
+    /// Opens the top results of the searches so far, the first hit of each
+    /// search before any second hit, and returns the pages read.
+    private func openTopResults(state: inout State) async -> [String] {
+        var pages: [String] = []
+        for url in state.topResults().prefix(Self.autoOpenAttempts)
+        where pages.count < Self.autoOpenedPages {
+            let read = state.sources.count
+            let result = await openPage(url: url, offset: 0, state: &state)
+            if state.sources.count > read {
+                pages.append(result)
+            }
+        }
+        return pages
+    }
+
     static let searchMoreRequest = "Before you answer, look wider if you can: one search or one "
         + "page can miss facts or be out of date. Run one or two more web_search calls with "
         + "different words, or in another language, open at least one more independent page "
@@ -472,6 +514,7 @@ public struct ResearchAgent: Sendable {
                 state.searched = state.searched || !results.isEmpty
                 state.queries.append(query)
                 state.shownQueries.append(ResearchText.oneLine(query, limit: 200))
+                state.resultURLs.append(results.map(\.url))
                 return Self.formatSearch(query: query, results: results)
             case "open_page":
                 guard let url = arguments["url"]?.stringValue?
@@ -481,15 +524,27 @@ public struct ResearchAgent: Sendable {
                     return "Tool error: open_page needs an http or https url."
                 }
                 let offset = max(0, arguments["offset"]?.intValue ?? 0)
-                onEvent(.reading(url))
-                let page = try await sandbox.fetch(
-                    url: url, offset: offset, maxCharacters: options.pageSliceCharacters)
-                let alreadyNumbered = state.sources.contains { $0.url == page.url }
-                let source = state.source(for: page)
-                return Self.formatPage(page, source: source, alreadyNumbered: alreadyNumbered)
+                return await openPage(url: url, offset: offset, state: &state)
             default:
                 return "Tool error: unknown tool \(call.name). Use web_search or open_page."
             }
+        } catch let failure as ResearchToolFailure {
+            onEvent(.toolFailed(failure.message))
+            return "Tool error: \(Self.sanitized(failure.message))"
+        } catch {
+            onEvent(.toolFailed(String(describing: error)))
+            return "Tool error: \(Self.sanitized(String(describing: error)))"
+        }
+    }
+
+    private func openPage(url: String, offset: Int, state: inout State) async -> String {
+        do {
+            onEvent(.reading(url))
+            let page = try await sandbox.fetch(
+                url: url, offset: offset, maxCharacters: options.pageSliceCharacters)
+            let alreadyNumbered = state.sources.contains { $0.url == page.url }
+            let source = state.source(for: page)
+            return Self.formatPage(page, source: source, alreadyNumbered: alreadyNumbered)
         } catch let failure as ResearchToolFailure {
             onEvent(.toolFailed(failure.message))
             return "Tool error: \(Self.sanitized(failure.message))"
@@ -571,9 +626,28 @@ public struct ResearchAgent: Sendable {
         var queries: [String] = []
         /// The same queries on one line each, for the report.
         var shownQueries: [String] = []
+        /// The result links of each search, in order.
+        var resultURLs: [[String]] = []
 
         init(question: String) {
             self.question = question
+        }
+
+        /// Web links from the searches: the first hit of every search, then
+        /// the second hits, and so on, each link once.
+        func topResults() -> [String] {
+            var links: [String] = []
+            let depth = resultURLs.map(\.count).max() ?? 0
+            for rank in 0..<depth {
+                for urls in resultURLs where rank < urls.count {
+                    let url = urls[rank]
+                    let lower = url.lowercased()
+                    guard lower.hasPrefix("http://") || lower.hasPrefix("https://"),
+                          !links.contains(url) else { continue }
+                    links.append(url)
+                }
+            }
+            return links
         }
 
         mutating func source(for page: ResearchPageSlice) -> ResearchSource {

@@ -238,6 +238,7 @@ struct ResearchAgentTests {
         ])])]))
         let services = FakeServices(modelReplies: [
             thought, FakeServices.answer("Done."), FakeServices.answer("Done."),
+            FakeServices.answer("Done."),
         ])
         let log = EventLog()
         _ = try await agent(services, events: log).run(question: "What is TUFF?")
@@ -245,6 +246,7 @@ struct ResearchAgentTests {
         #expect(log.events == [
             .modelTurn(1), .reasoning("I should search first."), .searching("tuff"),
             .modelTurn(2), .askingToReadPages, .modelTurn(3),
+            .openingTopResults, .reading("https://github.com/apple/container"), .modelTurn(4),
         ])
         let history = messages(services.modelRequests.last!)
         #expect(history.allSatisfy { $0["reasoning_content"] == nil })
@@ -452,15 +454,65 @@ struct ResearchAgentTests {
         #expect(search.contains("- Apple container\n  https://github.com/apple/container"))
         #expect(!search.contains("1. "))
 
-        // Asked once only: a second snippet answer is accepted, with a note.
+        // A second snippet answer makes the loop open the top result itself.
         let stubborn = FakeServices(modelReplies: [
             FakeServices.calls([("a", "web_search", #"{"query":"x"}"#)]),
             FakeServices.answer("Snippets [1]."),
             FakeServices.answer("Still snippets [1][2]."),
+            FakeServices.answer("From the page [1]."),
         ])
-        let accepted = try await agent(stubborn).run(question: "q")
+        let log = EventLog()
+        let opened = try await agent(stubborn, events: log).run(question: "q")
+        #expect(opened.answer == "From the page [1].")
+        #expect(opened.sources.map(\.url) == ["https://github.com/apple/container"])
+        #expect(!opened.noPagesRead)
+        #expect(log.events.filter { $0 == .openingTopResults }.count == 1)
+        // Not asked to look wider after that, though only one search ran.
+        #expect(!log.events.contains(.askingToSearchMore))
+        let handed = messages(stubborn.modelRequests[3]).suffix(2)
+        #expect(handed.first?["content"] == .string("Still snippets [1][2]."))
+        let pages = handed.last?["content"]?.stringValue ?? ""
+        #expect(handed.last?["role"] == .string("user"))
+        #expect(pages.hasPrefix(ResearchAgent.topResultsRequest + "\n\nSource [1]: apple/container"))
+        #expect(pages.contains(ResearchAgent.untrustedOpen))
+        #expect(pages.hasSuffix(ResearchAgent.untrustedClose))
+
+        // When no result can be opened, the snippet answer is kept, with a note.
+        let blocked = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"x"}"#)]),
+            FakeServices.answer("Snippets [1]."),
+            FakeServices.answer("Still snippets [1][2]."),
+        ]) { path, body in
+            if path == "/v1/fetch" {
+                return FakeServices.json(502, .object(["error": .object([
+                    "message": .string("fetch failed"),
+                ])]))
+            }
+            return FakeServices.webPages(path, body)
+        }
+        let accepted = try await agent(blocked).run(question: "q")
         #expect(accepted.answer == "Still snippets [1][2].")
+        #expect(accepted.noPagesRead)
         #expect(accepted.markdown.contains("cites [1], [2], which are not pages the research read."))
+        #expect(blocked.requests.filter { $0.url.path == "/v1/fetch" }.count == 1)
+    }
+
+    @Test func topResultsTakeTheFirstHitOfEverySearchFirst() {
+        var state = ResearchAgent.State(question: "q")
+        state.resultURLs = [
+            ["https://a.example/1", "https://a.example/2"],
+            ["https://b.example/1", "https://a.example/1", "ftp://b.example/x"],
+            [],
+        ]
+        #expect(state.topResults() == [
+            "https://a.example/1", "https://b.example/1", "https://a.example/2",
+        ])
+    }
+
+    @Test func theModelIsToldThatTodaysPagesAreReal() {
+        let prompt = agent(FakeServices(modelReplies: [])).systemPrompt()
+        #expect(prompt.contains("Pages dated up to today are real, current pages"))
+        #expect(prompt.contains("Never call them simulated"))
     }
 
     @Test func answersFromMemoryAreSentToSearchOnce() async throws {
@@ -541,6 +593,7 @@ struct ResearchAgentTests {
                 ("a", "web_search", #"{"query":"one"}"#),
                 ("b", "web_search", #"{"query":"two"}"#),
             ]),
+            FakeServices.answer("ok"),
             FakeServices.answer("ok"),
             FakeServices.answer("ok"),
         ])
@@ -738,6 +791,7 @@ struct ResearchAgentTests {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "web_search", #"{"query":"apple container"}"#)]),
             FakeServices.calls([("b", "web_search", #"{"query":"apple container"}"#)]),
+            FakeServices.answer("Snippets only."),
             FakeServices.answer("Snippets only."),
             FakeServices.answer("Snippets only."),
         ]) { path, body in
