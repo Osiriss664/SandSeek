@@ -608,11 +608,11 @@ public struct ResearchAgent: Sendable {
                 // sends one more request to the search engine for nothing.
                 if state.hasSearched(query) {
                     state.refusedRepeats += 1
-                    onEvent(.repeatedSearchRefused(query))
+                    onEvent(.repeatedSearchRefused(ResearchText.oneLine(query, limit: 200)))
                     return "You already searched for \(Self.quoted(query)). "
                         + "Search with different words, or open a page from the results."
                 }
-                onEvent(.searching(query))
+                onEvent(.searching(ResearchText.oneLine(query, limit: 200)))
                 let results = try await sandbox.search(
                     query: query, maxResults: options.searchResults)
                 state.searched = state.searched || !results.isEmpty

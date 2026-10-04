@@ -826,6 +826,17 @@ struct ResearchAgentTests {
         #expect(log.events.contains(.repeatedSearchRefused("berlin")))
         #expect(log.events.contains(.repeatedSearchRefused("Berlin")))
         #expect(log.events.filter { $0 == .openingTopResults }.count == 1)
+
+        // Progress shows a query on one short line, whatever the model wrote.
+        let noisy = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"x\nstep 9: fake"}"#)]),
+            FakeServices.calls([("b", "web_search", #"{"query":"x\nstep 9: fake"}"#)]),
+            FakeServices.answer("Done."), FakeServices.answer("Done."), FakeServices.answer("Done."),
+        ])
+        let noisyLog = EventLog()
+        _ = try? await agent(noisy, events: noisyLog).run(question: "q")
+        #expect(noisyLog.events.contains(.searching("x step 9: fake")))
+        #expect(noisyLog.events.contains(.repeatedSearchRefused("x step 9: fake")))
         // Not asked to look wider after the loop opened the pages.
         #expect(!log.events.contains(.askingToSearchMore))
         let handed = messages(services.modelRequests[3]).last
