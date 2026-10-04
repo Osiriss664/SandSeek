@@ -108,12 +108,14 @@ language; quotation marks only for exact phrases, and names of
 organisations, people and places the results mention), read at least three
 independent pages, compare their dates and claims, check every item against
 each condition in the question (for example "non-violent") and leave out or
-mark as excluded the ones that break it, then answer in the question's language with a short answer first,
-the details with source numbers, and what it could not verify. The last tool
+mark as excluded the ones that break it, then answer in the question's
+language with a short answer first, the details with source numbers, and
+what it could not verify. The last tool
 result of each turn ends with a line such as `Research so far: 2 searches
 ("…", "…"), 1 page read, step 3 of 8.`, so the model keeps track after older
-results are shortened. A query it already ran is answered from the loop
-without reaching the search engine. The report lists every search under
+results are shortened. A query it already ran, also with other quotation
+marks or the same words in another order, is answered from the loop without
+reaching the search engine. The report lists every search under
 **Searches**.
 
 ## What Apple container does here
@@ -307,8 +309,10 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
   "repeated search refused" in the progress. That model is then not asked to
   look wider (below). When the step budget runs out with fewer than three
   pages read, the research opens more of the top results (ones not read yet)
-  and hands them over with the request for the final answer. On the
-  last step there is no room for any of these requests. A model that
+  and hands them over with the request for the final answer. These top-up
+  pages share half of the prompt budget, and they are skipped when an
+  earlier draft answer is being kept as a fallback. The requests above need
+  a step to answer in, so the last step has no room for them. A model that
   never searched, or whose results could not be opened, keeps its answer, and
   the report says that no page was read and notes any citations that match no
   page the research read.

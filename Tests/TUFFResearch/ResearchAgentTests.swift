@@ -825,6 +825,17 @@ struct ResearchAgentTests {
             + "different words, or open a page from the results.")
         #expect(report.searchQueries == ["Apple Container"])
         #expect(log.events.contains(.repeatedSearchRefused("apple container")))
+        // Quotation marks and word order do not make a query new either.
+        var state = ResearchAgent.State(question: "q")
+        state.queries = [#""kommunistische Gruppen" Berlin"#]
+        #expect(state.hasSearched("berlin kommunistische gruppen"))
+        #expect(state.hasSearched("„Berlin“ Kommunistische Gruppen"))
+        #expect(!state.hasSearched("berlin kommunistische gruppen dkp"))
+        // Advice on quotation marks is given only when the query had some.
+        #expect(ResearchAgent.formatSearch(query: #""a b""#, results: [])
+            .hasSuffix("Try different search terms, without quotation marks."))
+        #expect(ResearchAgent.formatSearch(query: "a b", results: [])
+            .hasSuffix("Try different search terms."))
         // One search, so the model was asked once to look wider, and the
         // report says only one search ran.
         #expect(log.events.contains(.askingToSearchMore))

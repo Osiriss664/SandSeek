@@ -387,13 +387,21 @@ public struct ResearchAgent: Sendable {
         // A run that spent its steps searching can reach the end with few
         // pages read (Qwen read 2 in a long run). Top up from the search
         // results so the answer rests on a few real sources.
+        // The pages are in the last message, which shortening never touches,
+        // so they get at most half the prompt budget between them. A draft
+        // kept from before looking wider is left alone: if the final answer
+        // fails, that draft is returned and must match the sources.
         var finalRequest = Self.budgetUsedUpRequest
-        if state.searched, state.sources.count < Self.minimumPagesRead,
+        let missing = Self.minimumPagesRead - state.sources.count
+        let perPage = min(options.pageSliceCharacters,
+                          promptBudget(state) / 2 / max(1, missing))
+        if state.searched, missing > 0, answerBeforeSearchingMore == nil,
+           perPage >= Self.minimumTopUpCharacters,
            state.topResults().contains(where: { url in
                !state.sources.contains { $0.url == url } }) {
             onEvent(.openingTopResults)
             let pages = await openTopResults(
-                state: &state, wanted: Self.minimumPagesRead - state.sources.count)
+                state: &state, wanted: missing, maxCharacters: perPage)
             if !pages.isEmpty {
                 finalRequest += "\n\n" + Self.topUpNote + "\n\n"
                     + pages.joined(separator: "\n\n")
@@ -489,14 +497,16 @@ public struct ResearchAgent: Sendable {
     /// Opens the top results of the searches so far, the first hit of each
     /// search before any second hit, and returns the pages read.
     private func openTopResults(state: inout State,
-                                wanted: Int = ResearchAgent.autoOpenedPages) async -> [String] {
+                                wanted: Int = ResearchAgent.autoOpenedPages,
+                                maxCharacters: Int? = nil) async -> [String] {
         var pages: [String] = []
         let unread = state.topResults().filter { url in
             !state.sources.contains { $0.url == url }
         }
         for url in unread.prefix(Self.autoOpenAttempts) where pages.count < wanted {
             let read = state.sources.count
-            let result = await openPage(url: url, offset: 0, state: &state)
+            let result = await openPage(url: url, offset: 0, state: &state,
+                                        maxCharacters: maxCharacters)
             if state.sources.count > read {
                 pages.append(result)
             }
@@ -515,6 +525,8 @@ public struct ResearchAgent: Sendable {
     /// Pages a finished run should rest on. When the step budget runs out
     /// with fewer read, the loop opens more of the top results itself.
     static let minimumPagesRead = 3
+    /// A top-up page shorter than this is not worth the fetch.
+    static let minimumTopUpCharacters = 500
 
     static let searchMoreRequest = "Before you answer, look wider if you can: one search or one "
         + "page can miss facts or be out of date. Run one or two more web_search calls with "
@@ -678,11 +690,13 @@ public struct ResearchAgent: Sendable {
         }
     }
 
-    private func openPage(url: String, offset: Int, state: inout State) async -> String {
+    private func openPage(url: String, offset: Int, state: inout State,
+                          maxCharacters: Int? = nil) async -> String {
         do {
             onEvent(.reading(url))
             let page = try await sandbox.fetch(
-                url: url, offset: offset, maxCharacters: options.pageSliceCharacters)
+                url: url, offset: offset,
+                maxCharacters: maxCharacters ?? options.pageSliceCharacters)
             let alreadyNumbered = state.sources.contains { $0.url == page.url }
             let source = state.source(for: page)
             return Self.formatPage(page, source: source, alreadyNumbered: alreadyNumbered)
@@ -721,8 +735,8 @@ public struct ResearchAgent: Sendable {
 
     static func formatSearch(query: String, results: [ResearchSearchResult]) -> String {
         guard !results.isEmpty else {
-            return "No results for \"\(sanitized(query))\". Try different search terms, "
-                + "without quotation marks."
+            return "No results for \"\(sanitized(query))\". Try different search terms"
+                + (query.contains("\"") ? ", without quotation marks." : ".")
         }
         var lines = ["Search results for \"\(sanitized(query))\":", untrustedOpen]
         // Bullets, not numbers: only pages read with open_page get source
@@ -813,9 +827,14 @@ public struct ResearchAgent: Sendable {
                            searchQueries: shownQueries)
         }
 
-        /// Case and spacing do not make a query new.
+        /// Case, spacing, quotation marks and word order do not make a query
+        /// new: Qwen ran the same words in quotes and out of order again and
+        /// again instead of trying other words.
         static func normalized(_ query: String) -> String {
-            query.lowercased().split(whereSeparator: \.isWhitespace).joined(separator: " ")
+            let quotes: Set<Character> = ["\"", "'", "“", "”", "„", "«", "»", "‚", "‘", "’"]
+            let words = String(query.lowercased().map { quotes.contains($0) ? " " : $0 })
+                .split(whereSeparator: \.isWhitespace)
+            return words.sorted().joined(separator: " ")
         }
 
         func hasSearched(_ query: String) -> Bool {
