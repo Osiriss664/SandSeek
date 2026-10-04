@@ -502,14 +502,18 @@ public struct ResearchAgent: Sendable {
     /// Sends the conversation. A turn that runs past the request timeout,
     /// usually because the model reasoned for its whole token limit on a
     /// slow Mac, is asked once more with reasoning off, so a long run is not
-    /// lost to one slow step. TUFF may finish the abandoned reply before it
-    /// starts the retry; that reply is bounded by the same token limit.
+    /// lost to one slow step. Reasoning then stays off for the rest of the
+    /// run, as the next turns would most likely be as slow. TUFF may finish
+    /// the abandoned reply before it starts the retry; that reply is bounded
+    /// by the same token limit.
     private func complete(_ state: inout State,
                           allowTools: Bool,
                           thinking: Bool? = nil) async throws -> ResearchAssistantTurn {
+        let thinking = state.thinkingTimedOut ? false : thinking
         do {
             return try await send(&state, allowTools: allowTools, thinking: thinking)
         } catch ResearchError.modelTimedOut where (thinking ?? chat.enableThinking) == true {
+            state.thinkingTimedOut = true
             onEvent(.retryingAfterTimeout)
             return try await send(&state, allowTools: allowTools, thinking: false)
         }
@@ -771,6 +775,9 @@ public struct ResearchAgent: Sendable {
         /// Every listed model's window, to pick again once a reply names
         /// the model that answered.
         var contextWindows: [String: Int] = [:]
+        /// A turn ran past the request timeout while reasoning, so the rest
+        /// of the run asks without it.
+        var thinkingTimedOut = false
         /// How many characters one prompt token holds. It starts low, as web
         /// text in German with links and numbers needs many tokens, and is
         /// measured from the prompt tokens the server reports.

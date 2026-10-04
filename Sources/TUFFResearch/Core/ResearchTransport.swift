@@ -22,9 +22,11 @@ public protocol ResearchHTTPTransport: Sendable {
 public struct URLSessionResearchTransport: ResearchHTTPTransport {
     private let session: URLSession
 
-    /// Model turns can take minutes on large streamed models, so the request
-    /// timeout is generous; the sandbox enforces its own fetch timeouts.
-    public init(timeout: TimeInterval = 900) {
+    /// Model turns can take minutes on large streamed models: Qwen3.6 35B
+    /// on a 16 GB Mac needed 858 s for one turn that reasoned for its whole
+    /// token limit. So the request timeout is generous; the sandbox enforces
+    /// its own fetch timeouts.
+    public init(timeout: TimeInterval = 1_800) {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = timeout
         configuration.timeoutIntervalForResource = timeout
@@ -66,9 +68,8 @@ public enum ResearchError: Error, Equatable, CustomStringConvertible {
             "could not reach the TUFF server: \(message). Start it with `tuff serve` "
                 + "or enable the Background API in TUFF's Server screen."
         case .modelTimedOut:
-            "one model step took longer than the request time limit, even with thinking off. "
-                + "The model may be too slow on this Mac for this question; try fewer steps, "
-                + "or thinking off."
+            "one model step took longer than the request time limit. The model may be too "
+                + "slow on this Mac for this question; try fewer steps, or thinking off."
         case .modelRequestFailed(let status, let message, _):
             "the TUFF server refused the request (HTTP \(status)): \(message)"
         case .malformedModelReply(let message):

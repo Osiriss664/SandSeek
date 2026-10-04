@@ -988,7 +988,7 @@ struct ResearchAgentTests {
         let none = ResearchAgent.State.extract("a\nb\nc", limit: 200, stems: ["berlin"])
         #expect(none == "a … b … c")
         // A match longer than the room next to the lead keeps its start.
-        let match = "Berlin " + String(repeating: "x", count: 280)
+        let match = "Berlin " + String(repeating: "x", count: 300)
         let cut = ResearchAgent.State.extract("Menü\n" + match, limit: 300, stems: ["berlin"])
         #expect(cut.hasPrefix("Menü … Berlin xxx"))
         #expect(cut.count <= 300)
@@ -1090,7 +1090,9 @@ struct ResearchAgentTests {
         #expect(log.events.filter { $0 == .retryingAfterTimeout }.count == 1)
         // The retry is the second request that reached the server.
         #expect(services.modelRequests[1]["enable_thinking"] == .bool(false))
-        #expect(services.modelRequests[2]["enable_thinking"] == .bool(true))
+        // Reasoning stays off for the rest of the run.
+        #expect(services.modelRequests[2]["enable_thinking"] == .bool(false))
+        #expect(services.modelRequests[0]["enable_thinking"] == .bool(true))
 
         // Without reasoning there is nothing to turn off, so the run stops.
         let plain = FakeServices(modelReplies: [FakeServices.answer("never")])
