@@ -143,6 +143,9 @@ public enum ResearchEvent: Equatable, Sendable {
     /// Older results were shortened so the conversation fits the model's
     /// context window.
     case shortenedOlderResults
+    /// A turn ran past the request timeout, and is asked again with
+    /// reasoning off.
+    case retryingAfterTimeout
 }
 
 /// The research loop. The model can only search the web and read pages, and
@@ -494,11 +497,27 @@ public struct ResearchAgent: Sendable {
         return Int(min(characters, Double(Self.largestBudgetCharacters)))
     }
 
-    /// Sends the conversation, shortening older results to fit the budget.
-    /// A context overflow the estimate missed gets one retry at half budget.
+    /// Sends the conversation. A turn that runs past the request timeout,
+    /// usually because the model reasoned for its whole token limit on a
+    /// slow Mac, is asked once more with reasoning off, so a long run is not
+    /// lost to one slow step. TUFF may finish the abandoned reply before it
+    /// starts the retry; that reply is bounded by the same token limit.
     private func complete(_ state: inout State,
                           allowTools: Bool,
                           thinking: Bool? = nil) async throws -> ResearchAssistantTurn {
+        do {
+            return try await send(&state, allowTools: allowTools, thinking: thinking)
+        } catch ResearchError.modelTimedOut where (thinking ?? chat.enableThinking) == true {
+            onEvent(.retryingAfterTimeout)
+            return try await send(&state, allowTools: allowTools, thinking: false)
+        }
+    }
+
+    /// Sends the conversation, shortening older results to fit the budget.
+    /// A context overflow the estimate missed gets one retry at half budget.
+    private func send(_ state: inout State,
+                      allowTools: Bool,
+                      thinking: Bool?) async throws -> ResearchAssistantTurn {
         if state.compact(toFit: promptBudget(state), overhead: Self.toolCharacters) {
             onEvent(.shortenedOlderResults)
         }

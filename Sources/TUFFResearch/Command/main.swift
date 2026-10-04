@@ -61,6 +61,7 @@ let agent = ResearchAgent(
         case .askingToSearchMore: writeProgress("    answered from one search or page; asking it to look wider")
         case .openingTopResults: writeProgress("    answered from search previews again; opening the top results")
         case .shortenedOlderResults: writeProgress("    shortened older results to fit the model's context")
+        case .retryingAfterTimeout: writeProgress("    step took too long; asking again without thinking")
         }
     })
 

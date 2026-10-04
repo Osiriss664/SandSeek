@@ -126,18 +126,41 @@ private final class FakeServices: ResearchHTTPTransport, @unchecked Sendable {
 
 private func agent(_ services: FakeServices,
                    options: ResearchOptions = ResearchOptions(),
-                   events: EventLog? = nil) -> ResearchAgent {
+                   events: EventLog? = nil,
+                   transport: (any ResearchHTTPTransport)? = nil) -> ResearchAgent {
     ResearchAgent(
         chat: ResearchChatClient(
             serverURL: URL(string: "http://127.0.0.1:8080")!,
             model: "default",
             maxTokens: 512,
             enableThinking: nil,
-            transport: services),
+            transport: transport ?? services),
         sandbox: ResearchSandboxClient(
             baseURL: URL(string: "http://127.0.0.1:9000")!, transport: services),
         options: options,
         onEvent: { event in events?.append(event) })
+}
+
+/// Times out one model call, counted from 1, as URLSession does when a
+/// reply takes longer than the request timeout, and passes the rest on.
+private final class TimingOutTransport: ResearchHTTPTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private let services: FakeServices
+    private let timeOutOnModelCall: Int
+    private var modelCalls = 0
+
+    init(_ services: FakeServices, timeOutOnModelCall: Int) {
+        self.services = services
+        self.timeOutOnModelCall = timeOutOnModelCall
+    }
+
+    func send(method: String, url: URL, body: Data?) async throws -> ResearchHTTPResponse {
+        if url.path.hasSuffix("/chat/completions") {
+            let call = lock.withLock { modelCalls += 1; return modelCalls }
+            if call == timeOutOnModelCall { throw URLError(.timedOut) }
+        }
+        return try await services.send(method: method, url: url, body: body)
+    }
 }
 
 private final class EventLog: @unchecked Sendable {
@@ -1040,6 +1063,36 @@ struct ResearchAgentTests {
         #expect(tools[0].count < 1_500)
         #expect(tools[0].contains("verteilt in Berlin jeden Samstag eine Zeitung"))
         #expect(tools[1].contains(page))
+    }
+
+    @Test func aStepThatTimesOutIsAskedAgainWithoutThinking() async throws {
+        let services = FakeServices(modelReplies: [
+            FakeServices.answer("Without searching."),
+            FakeServices.calls([("a", "open_page", #"{"url":"https://a.example/"}"#)]),
+            FakeServices.answer("Answer [1]."),
+            FakeServices.answer("Answer [1]."),
+        ])
+        let slow = TimingOutTransport(services, timeOutOnModelCall: 2)
+        let log = EventLog()
+        let report = try await ResearchAgent(
+            chat: ResearchChatClient(
+                serverURL: URL(string: "http://127.0.0.1:8080")!, model: "default",
+                maxTokens: 8_192, enableThinking: true, transport: slow),
+            sandbox: ResearchSandboxClient(
+                baseURL: URL(string: "http://127.0.0.1:9000")!, transport: services),
+            onEvent: { log.append($0) }).run(question: "q")
+        #expect(report.answer == "Answer [1].")
+        #expect(log.events.filter { $0 == .retryingAfterTimeout }.count == 1)
+        // The retry is the second request that reached the server.
+        #expect(services.modelRequests[1]["enable_thinking"] == .bool(false))
+        #expect(services.modelRequests[2]["enable_thinking"] == .bool(true))
+
+        // Without reasoning there is nothing to turn off, so the run stops.
+        let plain = FakeServices(modelReplies: [FakeServices.answer("never")])
+        await #expect(throws: ResearchError.modelTimedOut) {
+            _ = try await agent(plain, events: nil, transport: TimingOutTransport(
+                plain, timeOutOnModelCall: 1)).run(question: "q")
+        }
     }
 
     @Test func theContextWindowIsReadFromTheModelList() async {

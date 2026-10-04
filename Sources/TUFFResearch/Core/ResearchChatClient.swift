@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 import TUFFModelCatalog
 
 public struct ResearchToolCall: Equatable, Sendable {
@@ -73,6 +76,8 @@ public struct ResearchChatClient: Sendable {
         let response: ResearchHTTPResponse
         do {
             response = try await transport.send(method: "POST", url: endpoint, body: body)
+        } catch let error as URLError where error.code == .timedOut {
+            throw ResearchError.modelTimedOut
         } catch {
             throw ResearchError.modelUnavailable(error.localizedDescription)
         }

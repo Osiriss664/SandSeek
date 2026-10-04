@@ -50,6 +50,8 @@ public struct URLSessionResearchTransport: ResearchHTTPTransport {
 public enum ResearchError: Error, Equatable, CustomStringConvertible {
     case invalidEndpoint(String)
     case modelUnavailable(String)
+    /// One model turn took longer than the request timeout.
+    case modelTimedOut
     case modelRequestFailed(status: Int, message: String, code: String?)
     case malformedModelReply(String)
     case sandboxUnavailable(String)
@@ -63,6 +65,10 @@ public enum ResearchError: Error, Equatable, CustomStringConvertible {
         case .modelUnavailable(let message):
             "could not reach the TUFF server: \(message). Start it with `tuff serve` "
                 + "or enable the Background API in TUFF's Server screen."
+        case .modelTimedOut:
+            "one model step took longer than the request time limit, even with thinking off. "
+                + "The model may be too slow on this Mac for this question; try fewer steps, "
+                + "or thinking off."
         case .modelRequestFailed(let status, let message, _):
             "the TUFF server refused the request (HTTP \(status)): \(message)"
         case .malformedModelReply(let message):

@@ -160,6 +160,8 @@ public final class ResearchRunController {
             append(.turn, "Answered from search previews again; opening the top results", started: started)
         case .shortenedOlderResults:
             append(.turn, "Shortened older results to fit the model's context", started: started)
+        case .retryingAfterTimeout:
+            append(.turn, "Step took too long; asking again without thinking", started: started)
         }
     }
 
