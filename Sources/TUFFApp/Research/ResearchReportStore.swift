@@ -67,6 +67,10 @@ public struct SavedResearchReport: Codable, Equatable, Identifiable, Sendable {
     private let answerWasCutOff: Bool?
     /// True when the answer stopped at the model's token limit.
     public var answerCutOff: Bool { answerWasCutOff ?? false }
+    /// Optional so reports saved before it existed still load.
+    private let savedSearchQueries: [String]?
+    /// What the model searched for, in order.
+    public var searchQueries: [String] { savedSearchQueries ?? [] }
     public let unknownCitations: [Int]
     public let steps: [ResearchStep]
     /// The report as `tuff research` prints it, made inert for viewers.
@@ -91,6 +95,7 @@ public struct SavedResearchReport: Codable, Equatable, Identifiable, Sendable {
         self.durationSeconds = durationSeconds
         budgetExhausted = report.budgetExhausted
         answerWasCutOff = report.answerCutOff
+        savedSearchQueries = report.searchQueries.map(ResearchText.terminalSafe)
         unknownCitations = report.unknownCitations
         self.steps = steps
         markdown = report.markdown

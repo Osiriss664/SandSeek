@@ -58,6 +58,7 @@ let agent = ResearchAgent(
         case .retryingEmptyAnswer: writeProgress("    no answer yet; asking for a short one")
         case .askingToSearchFirst: writeProgress("    answered without searching; asking it to search")
         case .askingToReadPages: writeProgress("    answered from search previews; asking it to read pages")
+        case .askingToSearchMore: writeProgress("    answered from one search or page; asking it to look wider")
         }
     })
 

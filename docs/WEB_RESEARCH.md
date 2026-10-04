@@ -101,6 +101,18 @@ The loop gives the model two tools and no others:
 The loop calls the sandbox. The sandbox's code never calls the Mac, and a
 firewall inside the VM stops anything else running there from doing so.
 
+The system prompt walks the model through a research method: plan the facts
+it needs, run two to four different searches (short keywords, synonyms, the
+official source, the newest state, English as well as the question's
+language), read at least two independent pages, compare their dates and
+claims, then answer in the question's language with a short answer first,
+the details with source numbers, and what it could not verify. The last tool
+result of each turn ends with a line such as `Research so far: 2 searches
+("…", "…"), 1 page read, step 3 of 8.`, so the model keeps track after older
+results are shortened. A query it already ran is answered from the loop
+without reaching the search engine. The report lists every search under
+**Searches**.
+
 ## What Apple container does here
 
 [Apple `container`](https://github.com/apple/container) is Apple's open-source
@@ -286,6 +298,10 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
   pages. If it answers the same way again, that answer is kept, and the report
   says that no page was read and notes any citations that match no page the
   research read.
+- A model that answers after fewer than two searches or two pages is asked
+  once to search with other words and read another source. A turn that
+  reached the token limit is not asked. This makes a run a little longer,
+  mostly for slow models. A report with a single search says so.
 - Reasoning shares each turn's token limit with the answer. With reasoning on,
   the limit defaults to 8192 tokens. If a turn still ends without an answer,
   the model is asked once more for a short answer with reasoning off; if that

@@ -736,6 +736,22 @@ private struct ResearchReportView: View {
                     }
                 }
             }
+            if !report.searchQueries.isEmpty {
+                Text("Searches").appFont(.headline)
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(Array(report.searchQueries.enumerated()), id: \.offset) { _, query in
+                        Label(query, systemImage: "magnifyingglass")
+                            .appFont(.callout)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                }
+                if report.searchQueries.count == 1 {
+                    Text("Only one search was run, so other sources may have been missed.")
+                        .appFont(.caption)
+                        .foregroundStyle(.orange)
+                }
+            }
             Label("Written from web pages by a local model (\(report.model)). Check the sources before you rely on it.",
                   systemImage: "info.circle")
                 .appFont(.caption)

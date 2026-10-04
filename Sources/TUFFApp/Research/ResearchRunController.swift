@@ -154,6 +154,8 @@ public final class ResearchRunController {
             append(.turn, "Answered without searching; asking it to search", started: started)
         case .askingToReadPages:
             append(.turn, "Answered from search previews; asking it to read pages", started: started)
+        case .askingToSearchMore:
+            append(.turn, "Answered from one search or page; asking it to look wider", started: started)
         }
     }
 

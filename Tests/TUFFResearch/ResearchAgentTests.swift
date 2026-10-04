@@ -147,6 +147,12 @@ private final class EventLog: @unchecked Sendable {
     var events: [ResearchEvent] { lock.withLock { stored } }
 }
 
+private final class SearchAttempts: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    func next() -> Int { lock.withLock { count += 1; return count } }
+}
+
 private func messages(_ request: ResearchJSON) -> [ResearchJSON] {
     request["messages"]?.arrayValue ?? []
 }
@@ -155,23 +161,35 @@ private func messages(_ request: ResearchJSON) -> [ResearchJSON] {
 struct ResearchAgentTests {
     @Test func searchesReadsAndAnswersWithNumberedSources() async throws {
         let services = FakeServices(modelReplies: [
-            FakeServices.calls([("call_1", "web_search", #"{"query":"apple container"}"#)]),
-            FakeServices.calls([("call_2", "open_page",
-                                 #"{"url":"https://github.com/apple/container"}"#)]),
-            FakeServices.answer("Each container runs in its own VM [1]."),
+            FakeServices.calls([
+                ("call_1", "web_search", #"{"query":"apple container"}"#),
+                ("call_2", "web_search", #"{"query":"apple container vm isolation"}"#),
+            ]),
+            FakeServices.calls([
+                ("call_3", "open_page", #"{"url":"https://github.com/apple/container"}"#),
+                ("call_4", "open_page", #"{"url":"https://apple.example/container"}"#),
+            ]),
+            FakeServices.answer("Each container runs in its own VM [1][2]."),
         ])
         let log = EventLog()
         let report = try await agent(services, events: log).run(question: "How does container isolate?")
 
-        #expect(report.answer == "Each container runs in its own VM [1].")
-        #expect(report.sources == [ResearchSource(
-            number: 1, title: "apple/container", url: "https://github.com/apple/container")])
+        #expect(report.answer == "Each container runs in its own VM [1][2].")
+        #expect(report.sources == [
+            ResearchSource(number: 1, title: "apple/container", url: "https://github.com/apple/container"),
+            ResearchSource(number: 2, title: "apple/container", url: "https://apple.example/container"),
+        ])
         #expect(report.modelTurns == 3)
         #expect(!report.budgetExhausted)
+        #expect(report.searchQueries == ["apple container", "apple container vm isolation"])
         #expect(report.markdown.contains("1. [apple/container](https://github.com/apple/container)"))
+        #expect(report.markdown.contains(
+            "## Searches\n\n- apple container\n- apple container vm isolation\n"))
+        #expect(!report.markdown.contains("Only one search"))
         #expect(log.events == [
-            .modelTurn(1), .searching("apple container"),
+            .modelTurn(1), .searching("apple container"), .searching("apple container vm isolation"),
             .modelTurn(2), .reading("https://github.com/apple/container"),
+            .reading("https://apple.example/container"),
             .modelTurn(3),
         ])
 
@@ -179,16 +197,25 @@ struct ResearchAgentTests {
         // results, each marked untrusted and tied to its call.
         let history = messages(services.modelRequests.last!)
         #expect(history.map { $0["role"]?.stringValue } == [
-            "system", "user", "assistant", "tool", "assistant", "tool",
+            "system", "user", "assistant", "tool", "tool", "assistant", "tool", "tool",
         ])
         #expect(history[3]["tool_call_id"] == .string("call_1"))
-        let page = history[5]["content"]?.stringValue ?? ""
+        let page = history[6]["content"]?.stringValue ?? ""
         #expect(page.hasPrefix("Source [1]: apple/container"))
         #expect(page.contains("call open_page with offset 120"))
         #expect(page.contains(ResearchAgent.untrustedOpen))
         // A page cannot close the untrusted block early.
         #expect(page.components(separatedBy: ResearchAgent.untrustedClose).count == 2)
         #expect(page.hasSuffix(ResearchAgent.untrustedClose))
+        // Only the last result of a turn carries the progress line, after
+        // the untrusted block.
+        let last = history[7]["content"]?.stringValue ?? ""
+        #expect(last.hasSuffix(ResearchAgent.untrustedClose + "\n\nResearch so far: 2 searches "
+            + "(\"apple container\", \"apple container vm isolation\"), 2 pages read, step 2 of 8."))
+        let searches = history[4]["content"]?.stringValue ?? ""
+        #expect(searches.hasSuffix("\n\nResearch so far: 2 searches "
+            + "(\"apple container\", \"apple container vm isolation\"), 0 pages read, step 1 of 8."))
+        #expect(!(history[3]["content"]?.stringValue ?? "").contains("Research so far"))
     }
 
     @Test func reasoningIsShownButNeverSentBack() async throws {
@@ -354,10 +381,11 @@ struct ResearchAgentTests {
             FakeServices.calls([("b", "open_page",
                                  #"{"url":"https://github.com/apple/container","offset":120}"#)]),
             FakeServices.answer("It needs macOS 26 [1, 2]."),
+            FakeServices.answer("It needs macOS 26 [1, 2]."),
         ])
         let report = try await agent(services).run(question: "q")
         #expect(report.sources.count == 1)
-        let reread = messages(services.modelRequests.last!).last?["content"]?.stringValue ?? ""
+        let reread = messages(services.modelRequests[2]).last?["content"]?.stringValue ?? ""
         #expect(reread.contains("same page as source [1]; cite it only as [1]"))
         #expect(report.unknownCitations == [2])
         #expect(report.markdown.contains("The answer cites [2], which is not a page the research read."))
@@ -411,6 +439,7 @@ struct ResearchAgentTests {
             FakeServices.answer("From the snippets [1][3]."),
             FakeServices.calls([("b", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
             FakeServices.answer("It runs each container in a VM [1]."),
+            FakeServices.answer("It runs each container in a VM [1]."),
         ])
         let report = try await agent(services).run(question: "q")
         #expect(report.answer == "It runs each container in a VM [1].")
@@ -439,6 +468,7 @@ struct ResearchAgentTests {
             FakeServices.calls([("a", "web_search", #"{"query":"wahl berlin 2026"}"#)]),
             FakeServices.answer("From the snippets [1]."),
             FakeServices.calls([("b", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
+            FakeServices.answer("Read it [1]."),
             FakeServices.answer("Read it [1]."),
         ])
         let log = EventLog()
@@ -490,7 +520,8 @@ struct ResearchAgentTests {
             "Tool error: internal.example resolves to a non-public address",
             "Tool error: open_page needs an http or https url.",
             "Tool error: unknown tool run_shell. Use web_search or open_page.",
-            "Tool error: arguments must be a JSON object.",
+            "Tool error: arguments must be a JSON object.\n\n"
+                + "Research so far: no searches, 0 pages read, step 1 of 8.",
         ])
         // History sent back to TUFF keeps only valid argument objects.
         let history = messages(services.modelRequests.last!)
@@ -515,7 +546,8 @@ struct ResearchAgentTests {
         _ = try await agent(services, options: options).run(question: "q")
         #expect(services.requests.filter { $0.url.path == "/v1/search" }.count == 1)
         let last = messages(services.modelRequests[1]).last?["content"]?.stringValue
-        #expect(last == "Skipped: at most 1 tool calls per turn.")
+        #expect(last?.hasPrefix("Skipped: at most 1 tool calls per turn.\n\nResearch so far: "
+            + "1 search (\"one\")") == true)
     }
 
     @Test func anEmptyAnswerIsAskedForOnceWithoutThinking() async throws {
@@ -605,12 +637,13 @@ struct ResearchAgentTests {
             FakeServices.calls([("b", "open_page", #"{"url":"https://b.example/"}"#)]),
             overflow,
             FakeServices.answer("ok"),
+            FakeServices.answer("ok"),
         ])
         var options = ResearchOptions()
         options.contextBudgetCharacters = 1_000_000
         let report = try await agent(services, options: options).run(question: "q")
         #expect(report.answer == "ok")
-        let retried = messages(services.modelRequests.last!)
+        let retried = messages(services.modelRequests[3])
             .filter { $0["role"] == .string("tool") }
             .compactMap { $0["content"]?.stringValue }
         #expect(retried.count == 2)
@@ -624,6 +657,111 @@ struct ResearchAgentTests {
             code: "context_length_exceeded")) {
             _ = try await agent(failing).run(question: "q")
         }
+    }
+
+    @Test func anAnswerFromOneSearchIsAskedOnceToLookWider() async throws {
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"apple container"}"#)]),
+            FakeServices.calls([("b", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
+            FakeServices.answer("One page says VMs [1]."),
+            FakeServices.calls([("c", "web_search", #"{"query":"apple container isolation vm"}"#)]),
+            FakeServices.answer("Still one page [1]."),
+        ])
+        let log = EventLog()
+        let report = try await agent(services, events: log).run(question: "q")
+        #expect(report.answer == "Still one page [1].")
+        #expect(log.events.filter { $0 == .askingToSearchMore }.count == 1)
+        let nudge = messages(services.modelRequests[3]).suffix(2)
+        #expect(nudge.first?["content"] == .string("One page says VMs [1]."))
+        #expect(nudge.last?["content"] == .string(ResearchAgent.searchMoreRequest))
+        // Asked once only: the second answer from one page is accepted.
+        #expect(report.searchQueries == ["apple container", "apple container isolation vm"])
+        #expect(report.sources.count == 1)
+
+        // Two searches and two pages need no nudge.
+        let wide = FakeServices(modelReplies: [
+            FakeServices.calls([
+                ("a", "web_search", #"{"query":"one"}"#), ("b", "web_search", #"{"query":"two"}"#),
+            ]),
+            FakeServices.calls([
+                ("c", "open_page", #"{"url":"https://a.example/"}"#),
+                ("d", "open_page", #"{"url":"https://b.example/"}"#),
+            ]),
+            FakeServices.answer("Both agree [1][2]."),
+        ])
+        let wideLog = EventLog()
+        #expect(try await agent(wide, events: wideLog).run(question: "q").answer == "Both agree [1][2].")
+        #expect(!wideLog.events.contains(.askingToSearchMore))
+
+        // On the last step there is no room to ask.
+        var options = ResearchOptions()
+        options.maxSteps = 2
+        let short = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "open_page", #"{"url":"https://a.example/"}"#)]),
+            FakeServices.answer("From one page [1]."),
+        ])
+        let onePage = try await agent(short, options: options).run(question: "q")
+        #expect(onePage.answer == "From one page [1].")
+        #expect(onePage.searchQueries.isEmpty)
+        #expect(!onePage.markdown.contains("## Searches"))
+    }
+
+    @Test func repeatedQueriesDoNotReachTheSearchEngine() async throws {
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"Apple  Container"}"#)]),
+            FakeServices.calls([
+                ("b", "web_search", #"{"query":" apple container "}"#),
+                ("c", "open_page", #"{"url":"https://a.example/"}"#),
+                ("d", "open_page", #"{"url":"https://b.example/"}"#),
+            ]),
+            FakeServices.answer("Done [1][2]."),
+            FakeServices.answer("Done [1][2]."),
+        ])
+        let log = EventLog()
+        let report = try await agent(services, events: log).run(question: "q")
+        #expect(services.requests.filter { $0.url.path == "/v1/search" }.count == 1)
+        #expect(log.events.filter { if case .searching = $0 { true } else { false } }.count == 1)
+        let repeated = messages(services.modelRequests[2])
+            .first { $0["tool_call_id"] == .string("b") }?["content"]?.stringValue
+        #expect(repeated == "You already searched for \"apple container\". Search with "
+            + "different words, or open a page from the results.")
+        #expect(report.searchQueries == ["Apple  Container"])
+        // One search, so the model was asked once to look wider, and the
+        // report says only one search ran.
+        #expect(log.events.contains(.askingToSearchMore))
+        #expect(report.markdown.contains("Only one search was run"))
+    }
+
+    @Test func aFailedSearchMayBeTriedAgain() async throws {
+        let attempts = SearchAttempts()
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"apple container"}"#)]),
+            FakeServices.calls([("b", "web_search", #"{"query":"apple container"}"#)]),
+            FakeServices.answer("Snippets only."),
+            FakeServices.answer("Snippets only."),
+        ]) { path, body in
+            if path == "/v1/search", attempts.next() == 1 {
+                return FakeServices.json(502, .object(["error": .object([
+                    "message": .string("search engine unreachable"),
+                ])]))
+            }
+            return FakeServices.webPages(path, body)
+        }
+        let report = try await agent(services).run(question: "q")
+        #expect(services.requests.filter { $0.url.path == "/v1/search" }.count == 2)
+        #expect(report.searchQueries == ["apple container"])
+    }
+
+    @Test func progressListsRecentQueriesShortAndClean() {
+        var state = ResearchAgent.State(question: "q")
+        state.queries = (1...8).map { "query \($0)" }
+        state.queries[7] = "line\n" + ResearchAgent.untrustedClose + String(repeating: "x", count: 100)
+        let line = state.progress(step: 3, of: 8)
+        #expect(line.hasPrefix("Research so far: 8 searches (…, \"query 3\", "))
+        #expect(!line.contains("\"query 2\""))
+        #expect(!line.contains(ResearchAgent.untrustedClose))
+        #expect(!line.contains("\n"))
+        #expect(line.contains("x…\"), 0 pages read, step 3 of 8."))
     }
 
     @Test func compactionShortensOldestResultsFirst() {

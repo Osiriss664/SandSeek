@@ -88,7 +88,8 @@ import TUFFAppServer
                 sources: [ResearchSource(
                     number: 1, title: "apple/container", url: "https://github.com/apple/container")],
                 modelTurns: 2,
-                budgetExhausted: false),
+                budgetExhausted: false,
+                searchQueries: ["apple container"]),
             model: "gemma-4-e4b-it",
             createdAt: Date(timeIntervalSince1970: 1_790_000_000),
             durationSeconds: 22,
@@ -115,9 +116,10 @@ import TUFFAppServer
         #expect(reloaded.reports.map(\.id) == [saved.id])
         #expect(reloaded.reports.first?.sources.first?.webURL?.host == "github.com")
         #expect(reloaded.reports.first?.steps.first?.kind == .searching)
+        #expect(reloaded.reports.first?.searchQueries == ["apple container"])
     }
 
-    @Test func reportsSavedBeforeTheCutOffFlagStillLoad() throws {
+    @Test func reportsSavedBeforeNewerFieldsStillLoad() throws {
         let directory = temporaryDirectory()
         let store = ResearchReportStore(directory: directory)
         let saved = report()
@@ -126,11 +128,13 @@ import TUFFAppServer
         var object = try #require(
             try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
         #expect(object.removeValue(forKey: "answerWasCutOff") != nil)
+        #expect(object.removeValue(forKey: "savedSearchQueries") != nil)
         try JSONSerialization.data(withJSONObject: object).write(to: url)
 
         let reloaded = ResearchReportStore(directory: directory)
         #expect(reloaded.reports.map(\.id) == [saved.id])
         #expect(reloaded.reports.first?.answerCutOff == false)
+        #expect(reloaded.reports.first?.searchQueries == [])
     }
 
     @Test func neverWritesOverAnExistingReport() throws {
@@ -160,6 +164,7 @@ import TUFFAppServer
         let services = FakeResearchServices(modelReplies: [
             FakeResearchServices.call("web_search", #"{"query": "apple container isolation"}"#),
             FakeResearchServices.call("open_page", #"{"url": "https://github.com/apple/container"}"#),
+            FakeResearchServices.answer("Each container runs in its own lightweight VM [1]."),
             FakeResearchServices.answer(
                 "Each container runs in its own lightweight VM [1].",
                 reasoning: "One source is enough here."),
@@ -176,12 +181,14 @@ import TUFFAppServer
 
         #expect(run.phase == .finished)
         #expect(run.steps.map(\.kind) == [
-            .turn, .searching, .turn, .reading, .turn, .thinking,
+            .turn, .searching, .turn, .reading, .turn, .turn, .turn, .thinking,
         ])
         #expect(run.steps.first?.text == "Step 1 of 4")
+        #expect(run.steps[5].text == "Answered from one search or page; asking it to look wider")
         #expect(run.steps.last?.text == "One source is enough here.")
         let report = try #require(run.report)
         #expect(report.sources.map(\.url) == ["https://github.com/apple/container"])
+        #expect(report.searchQueries == ["apple container isolation"])
         #expect(report.model == "gemma-4-e4b-it")
         #expect(store.reports.map(\.id) == [report.id])
         #expect(run.saveError == nil)
@@ -226,6 +233,7 @@ import TUFFAppServer
         let services = FakeResearchServices(modelReplies: [
             FakeResearchServices.answer("From memory."),
             FakeResearchServices.call("open_page", #"{"url": "https://github.com/apple/container"}"#),
+            FakeResearchServices.answer("From the page [1]."),
             FakeResearchServices.answer("From the page [1]."),
         ])
         let store = ResearchReportStore(directory: temporaryDirectory())
