@@ -254,7 +254,9 @@ public struct ResearchAgent: Sendable {
         try await sandbox.checkHealth()
         var state = State(question: question)
         if options.contextBudgetCharacters == nil {
-            state.contextTokens = await chat.contextTokens()
+            state.contextWindows = await chat.contextWindows()
+            state.contextTokens = ResearchChatClient.window(
+                for: chat.model, in: state.contextWindows)
         }
         state.messages = [
             .object(["role": .string("system"), "content": .string(systemPrompt())]),
@@ -540,6 +542,10 @@ public struct ResearchAgent: Sendable {
                 thinking: thinking)
         }
         state.calibrate(sentCharacters: sent, promptTokens: turn.promptTokens)
+        // `default` routes to the model selected in TUFF; the reply names it.
+        if let served = turn.model, let window = state.contextWindows[served] {
+            state.contextTokens = window
+        }
         if let reasoning = turn.reasoning?.trimmingCharacters(in: .whitespacesAndNewlines),
            !reasoning.isEmpty {
             onEvent(.reasoning(reasoning))
@@ -663,7 +669,10 @@ public struct ResearchAgent: Sendable {
         // grapheme clusters, so offsets match what it expects.
         let end = page.offset + page.text.unicodeScalars.count
         let url = sanitized(ResearchText.url(page.url))
-        var header = "Source [\(source.number)]: \(page.title.isEmpty ? url : sanitized(page.title))\n"
+        // Titles come from the page; one line keeps the header lines apart.
+        let title = page.title.isEmpty ? url
+            : sanitized(ResearchText.oneLine(page.title, limit: 300))
+        var header = "Source [\(source.number)]: \(title)\n"
         if alreadyNumbered {
             header += "This is the same page as source [\(source.number)]; cite it only as "
                 + "[\(source.number)].\n"
@@ -759,6 +768,9 @@ public struct ResearchAgent: Sendable {
 
         /// The model's context window in tokens, when the server lists it.
         var contextTokens: Int?
+        /// Every listed model's window, to pick again once a reply names
+        /// the model that answered.
+        var contextWindows: [String: Int] = [:]
         /// How many characters one prompt token holds. It starts low, as web
         /// text in German with links and numbers needs many tokens, and is
         /// measured from the prompt tokens the server reports.
@@ -805,7 +817,6 @@ public struct ResearchAgent: Sendable {
         @discardableResult
         mutating func compact(toFit budget: Int, overhead: Int = 0) -> Bool {
             guard size(overhead: overhead) > budget else { return false }
-            let target = budget * 3 / 4
             let firstUser = messages.firstIndex { $0["role"]?.stringValue == "user" }
             let newestTool = messages.lastIndex { $0["role"]?.stringValue == "tool" }
             let candidates = messages.indices.filter { index in
@@ -813,10 +824,22 @@ public struct ResearchAgent: Sendable {
                 return role != "system" && index != firstUser && index != newestTool
                     && index != messages.count - 1
             }
+            // The protected part cannot shrink, so the target leaves room
+            // below the budget only out of what can.
+            var fixed = self
+            fixed.messages = messages.indices.filter { !candidates.contains($0) }
+                .map { messages[$0] }
+            let protected = fixed.size(overhead: overhead)
+            let target = min(budget, max(budget * 3 / 4, protected + (budget - protected) / 2))
+            // Results of the current turn the model has not acted on yet are
+            // only cut to one line as a last resort.
+            let currentTurn = (messages.lastIndex { $0["role"]?.stringValue == "assistant" })
+                .map { $0 + 1 } ?? messages.count
             let stems = keywordStems()
             var changed = false
             for level in 0...3 {
-                for index in candidates where size(overhead: overhead) > target {
+                for index in candidates where size(overhead: overhead) > target
+                    && (level == 3 || index < currentTurn) {
                     guard case .object(var message) = messages[index],
                           let content = message["content"]?.stringValue else { continue }
                     let shorter: String?
@@ -844,7 +867,8 @@ public struct ResearchAgent: Sendable {
                   let key = Self.pageKeys(content).first,
                   Self.pageKeys(content).count == 1 else { return false }
             return messages[(index + 1)...].contains { later in
-                Self.pageKeys(later["content"]?.stringValue ?? "").contains(key)
+                ["tool", "user"].contains(later["role"]?.stringValue ?? "")
+                    && Self.pageKeys(later["content"]?.stringValue ?? "").contains(key)
             }
         }
 
@@ -971,7 +995,7 @@ public struct ResearchAgent: Sendable {
         static func extract(_ body: String, limit: Int, stems: [String]) -> String {
             let parts = passages(body)
             guard !parts.isEmpty else { return String(body.prefix(limit)) }
-            let lead = String(parts[0].prefix(leadCharacters))
+            let lead = String(parts[0].prefix(min(leadCharacters, limit / 4)))
             var chosen: [Int: String] = [0: lead]
             var used = lead.count
             let scores = parts.map { part in
@@ -980,9 +1004,16 @@ public struct ResearchAgent: Sendable {
             }
             let ranked = parts.indices.dropFirst().filter { scores[$0] > 0 }
                 .sorted { scores[$0] != scores[$1] ? scores[$0] > scores[$1] : $0 < $1 }
-            for index in ranked where used + parts[index].count + 3 <= limit {
-                chosen[index] = parts[index]
-                used += parts[index].count + 3
+            for index in ranked {
+                let room = limit - used - 3
+                if parts[index].count <= room {
+                    chosen[index] = parts[index]
+                    used += parts[index].count + 3
+                } else if chosen.count == 1, room >= 60 {
+                    // The best match is longer than the room left: keep its start.
+                    chosen[index] = String(parts[index].prefix(room - 1)) + "…"
+                    used = limit
+                }
             }
             if chosen.count == 1 {
                 for index in parts.indices.dropFirst() {

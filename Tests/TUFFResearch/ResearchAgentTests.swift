@@ -987,6 +987,11 @@ struct ResearchAgentTests {
         #expect(kept == "Title line … Zeitungen in Berlin … Berlin only")
         let none = ResearchAgent.State.extract("a\nb\nc", limit: 200, stems: ["berlin"])
         #expect(none == "a … b … c")
+        // A match longer than the room next to the lead keeps its start.
+        let match = "Berlin " + String(repeating: "x", count: 280)
+        let cut = ResearchAgent.State.extract("Menü\n" + match, limit: 300, stems: ["berlin"])
+        #expect(cut.hasPrefix("Menü … Berlin xxx"))
+        #expect(cut.count <= 300)
         let long = String(repeating: "Wort ", count: 200)
         #expect(ResearchAgent.State.passages(long).allSatisfy { $0.count <= 300 })
     }
@@ -1114,6 +1119,10 @@ struct ResearchAgentTests {
         #expect(await window("default") == 8_192)
         #expect(models.requests.allSatisfy { $0.url.absoluteString == "http://127.0.0.1:8080/v1/models" })
         #expect(await window("x") == 8_192)
+        // A reply naming the model that answered picks its window.
+        #expect(ResearchChatClient.window(
+            for: "qwen3.6-35b-a3b", in: ["qwen3.6-35b-a3b": 16_384, "small": 4_096]) == 16_384)
+        #expect(ResearchChatClient.window(for: "x", in: [:]) == nil)
         let silent = FakeServices(modelReplies: [])
         #expect(await ResearchChatClient(
             serverURL: URL(string: "http://127.0.0.1:8080")!, model: "x", maxTokens: 512,

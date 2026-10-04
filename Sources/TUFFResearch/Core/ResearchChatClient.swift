@@ -21,6 +21,8 @@ public struct ResearchAssistantTurn: Equatable, Sendable {
     public var finishReason: String? = nil
     /// Tokens the server counted in the prompt, when it reports usage.
     public var promptTokens: Int? = nil
+    /// The model that answered, as the server names it.
+    public var model: String? = nil
 }
 
 /// Talks to TUFF's OpenAI-compatible Chat Completions endpoint. It sends only
@@ -105,27 +107,38 @@ public struct ResearchChatClient: Sendable {
         return ResearchAssistantTurn(content: message["content"]?.stringValue, toolCalls: calls,
                                      reasoning: message["reasoning_content"]?.stringValue,
                                      finishReason: choice?["finish_reason"]?.stringValue,
-                                     promptTokens: reply?["usage"]?["prompt_tokens"]?.intValue)
+                                     promptTokens: reply?["usage"]?["prompt_tokens"]?.intValue,
+                                     model: reply?["model"]?.stringValue)
     }
 
-    /// The model's context window in tokens, as TUFF lists it in
-    /// `/v1/models`, or nil when the server does not say. A name the list
-    /// does not hold, such as `default`, gets the smallest listed window.
-    public func contextTokens() async -> Int? {
+    /// The context window of each model TUFF lists in `/v1/models`, in
+    /// tokens. Empty when the server does not say.
+    public func contextWindows() async -> [String: Int] {
         guard let response = try? await transport.send(
                 method: "GET", url: endpoint.deletingLastPathComponent()
                     .deletingLastPathComponent().appendingPathComponent("models"),
                 body: nil),
               response.status == 200,
               let models = (try? ResearchJSON.decode(response.body))?["data"]?.arrayValue
-        else { return nil }
-        let windows = models.compactMap { entry -> (id: String, tokens: Int)? in
+        else { return [:] }
+        let windows = models.compactMap { entry -> (String, Int)? in
             guard let id = entry["id"]?.stringValue,
                   let tokens = entry["context_length"]?.intValue, tokens > 0 else { return nil }
             return (id, tokens)
         }
-        // `tuff research --model qwen36` names the model by its selector.
+        return Dictionary(windows, uniquingKeysWith: min)
+    }
+
+    /// The window for `model`. `tuff research --model qwen36` names it by its
+    /// selector. A name the list does not hold, such as `default`, gets the
+    /// smallest window until a reply says which model answered.
+    public static func window(for model: String, in windows: [String: Int]) -> Int? {
         let names = [model] + TUFFModelCatalog.all.filter { $0.selector == model }.map(\.apiModelID)
-        return windows.first { names.contains($0.id) }?.tokens ?? windows.map(\.tokens).min()
+        return names.lazy.compactMap { windows[$0] }.first ?? windows.values.min()
+    }
+
+    /// The model's context window in tokens, or nil when the server does not say.
+    public func contextTokens() async -> Int? {
+        Self.window(for: model, in: await contextWindows())
     }
 }
