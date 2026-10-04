@@ -300,8 +300,10 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
   research read.
 - A model that answers after fewer than two searches or two pages is asked
   once to search with other words and read another source. A turn that
-  reached the token limit is not asked. This makes a run a little longer,
-  mostly for slow models. A report with a single search says so.
+  reached the token limit is not asked, and if the answer after asking comes
+  back empty or cut off, the earlier answer is kept. This makes a run a little
+  longer, mostly for slow models. A report with a single search says so. Two
+  pages count as two sources even when they come from the same site.
 - Reasoning shares each turn's token limit with the answer. With reasoning on,
   the limit defaults to 8192 tokens. If a turn still ends without an answer,
   the model is asked once more for a short answer with reasoning off; if that

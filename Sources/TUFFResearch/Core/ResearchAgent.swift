@@ -38,7 +38,8 @@ public struct ResearchReport: Equatable, Sendable {
     public let budgetExhausted: Bool
     /// True when the answer stopped at the model's token limit.
     public var answerCutOff: Bool = false
-    /// The searches that reached the search engine, in order, without repeats.
+    /// The searches that reached the search engine, in order, without
+    /// repeats, each on one line and shortened.
     public var searchQueries: [String] = []
     /// True when no web page was read, so the answer rests on the model's
     /// memory or on search previews only.
@@ -63,8 +64,7 @@ public struct ResearchReport: Equatable, Sendable {
         if !searchQueries.isEmpty {
             text += "\n## Searches\n\n"
             for query in searchQueries {
-                let line = query.split(whereSeparator: \.isNewline).joined(separator: " ")
-                text += "- \(ResearchText.inertMarkdown(line))\n"
+                text += "- \(ResearchText.inertMarkdown(query))\n"
             }
         }
         let unknown = unknownCitations
@@ -216,8 +216,8 @@ public struct ResearchAgent: Sendable {
         short keywords, not full sentences. Vary them: other words and \
         synonyms, the official or primary source (for example with site:), \
         the newest state (add the year), and English as well as the \
-        question's language. You may make several web_search calls in one \
-        turn. Never repeat a query you already ran.
+        question's language. You may make up to \(options.maxToolCallsPerTurn) \
+        tool calls in one turn. Never repeat a query you already ran.
         3. Read: open the most relevant pages with open_page. Read at least \
         two independent sources before you answer. Snippets are not sources.
         4. Check: compare the sources. Note the date on each page and prefer \
@@ -245,6 +245,9 @@ public struct ResearchAgent: Sendable {
         var askedToSearch = false
         var askedToRead = false
         var askedToSearchMore = false
+        // The answer given before the model was asked to look wider. It is
+        // kept if the next answer comes back empty or cut off.
+        var answerBeforeSearchingMore: String?
         for step in 1...max(1, options.maxSteps) {
             onEvent(.modelTurn(step))
             let turn = try await complete(&state, allowTools: true)
@@ -272,6 +275,7 @@ public struct ResearchAgent: Sendable {
                               turn.finishReason != "length",
                               let content = turn.content, !Self.isBlank(content) {
                         askedToSearchMore = true
+                        answerBeforeSearchingMore = content
                         request = Self.searchMoreRequest
                         onEvent(.askingToSearchMore)
                     }
@@ -286,6 +290,9 @@ public struct ResearchAgent: Sendable {
                         "content": .string(request),
                     ]))
                     continue
+                }
+                if let earlier = answerBeforeSearchingMore, Self.isIncomplete(turn) {
+                    return state.report(answer: earlier, turns: step, exhausted: false)
                 }
                 let (text, cutOff) = try await answer(from: turn, state: &state)
                 return state.report(answer: text, turns: step, exhausted: false, cutOff: cutOff)
@@ -320,6 +327,10 @@ public struct ResearchAgent: Sendable {
                     + "citing source numbers, and say what remains unverified."),
         ]))
         let final = try await complete(&state, allowTools: false)
+        if let earlier = answerBeforeSearchingMore, Self.isIncomplete(final) {
+            return state.report(
+                answer: earlier, turns: options.maxSteps + 1, exhausted: true)
+        }
         let (text, cutOff) = try await answer(from: final, state: &state)
         return state.report(
             answer: text, turns: options.maxSteps + 1, exhausted: true, cutOff: cutOff)
@@ -358,6 +369,11 @@ public struct ResearchAgent: Sendable {
             tokenLimit: turn.finishReason == "length" || retry.finishReason == "length")
     }
 
+    /// A turn with no answer, or one that stopped at the token limit.
+    private static func isIncomplete(_ turn: ResearchAssistantTurn) -> Bool {
+        isBlank(turn.content ?? "") || turn.finishReason == "length"
+    }
+
     private static func isBlank(_ text: String) -> Bool {
         ResearchText.terminalSafe(text).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
@@ -375,10 +391,10 @@ public struct ResearchAgent: Sendable {
         + "out of date, and no page has a source number yet. Open the most relevant pages with "
         + "open_page, then answer from what they say, citing the source numbers open_page gives."
 
-    static let searchMoreRequest = "Before you answer, look wider: one search or one page can miss "
-        + "facts or be out of date. Run one or two more web_search calls with different words, "
-        + "or in another language, open at least one more independent page with open_page, then "
-        + "answer, citing the source numbers open_page gives."
+    static let searchMoreRequest = "Before you answer, look wider if you can: one search or one "
+        + "page can miss facts or be out of date. Run one or two more web_search calls with "
+        + "different words, or in another language, open at least one more independent page "
+        + "with open_page, then answer, citing the source numbers open_page gives."
 
     private func assistantMessage(_ turn: ResearchAssistantTurn) -> ResearchJSON {
         var message: [String: ResearchJSON] = [
@@ -447,7 +463,7 @@ public struct ResearchAgent: Sendable {
                 // A repeated query would only bring the same results, and
                 // sends one more request to the search engine for nothing.
                 if state.hasSearched(query) {
-                    return "You already searched for \"\(Self.sanitized(query))\". "
+                    return "You already searched for \(Self.quoted(query)). "
                         + "Search with different words, or open a page from the results."
                 }
                 onEvent(.searching(query))
@@ -455,6 +471,7 @@ public struct ResearchAgent: Sendable {
                     query: query, maxResults: options.searchResults)
                 state.searched = state.searched || !results.isEmpty
                 state.queries.append(query)
+                state.shownQueries.append(ResearchText.oneLine(query, limit: 200))
                 return Self.formatSearch(query: query, results: results)
             case "open_page":
                 guard let url = arguments["url"]?.stringValue?
@@ -493,6 +510,17 @@ public struct ResearchAgent: Sendable {
             if next == current { return current }
             current = next
         }
+    }
+
+    static let quotedQueryCharacters = 80
+
+    /// A query the model wrote, quoted for the loop's own text after the
+    /// untrusted block: on one line, short, without markers, and with its
+    /// double quotes turned into single ones so it cannot close the quote.
+    static func quoted(_ query: String) -> String {
+        // Markers are removed last, so joining lines cannot rebuild one.
+        let line = sanitized(ResearchText.oneLine(query, limit: quotedQueryCharacters))
+        return "\"" + line.replacingOccurrences(of: "\"", with: "'") + "\""
     }
 
     static func formatSearch(query: String, results: [ResearchSearchResult]) -> String {
@@ -541,6 +569,8 @@ public struct ResearchAgent: Sendable {
         /// Queries the search engine answered, in order. A query that failed
         /// is left out, so the model may try it again.
         var queries: [String] = []
+        /// The same queries on one line each, for the report.
+        var shownQueries: [String] = []
 
         init(question: String) {
             self.question = question
@@ -559,7 +589,7 @@ public struct ResearchAgent: Sendable {
                     cutOff: Bool = false) -> ResearchReport {
             ResearchReport(question: question, answer: answer, sources: sources,
                            modelTurns: turns, budgetExhausted: exhausted, answerCutOff: cutOff,
-                           searchQueries: queries)
+                           searchQueries: shownQueries)
         }
 
         /// Case and spacing do not make a query new.
@@ -573,7 +603,6 @@ public struct ResearchAgent: Sendable {
         }
 
         static let progressQueryLimit = 6
-        static let progressQueryCharacters = 80
 
         /// One line on the research so far. Queries are the model's own words,
         /// cleaned like web text because a page may have suggested them.
@@ -582,13 +611,7 @@ public struct ResearchAgent: Sendable {
             if queries.isEmpty {
                 line += "no searches"
             } else {
-                let shown = queries.suffix(Self.progressQueryLimit).map { query -> String in
-                    let clean = ResearchAgent.sanitized(query)
-                        .split(whereSeparator: \.isWhitespace).joined(separator: " ")
-                    let short = clean.count > Self.progressQueryCharacters
-                        ? String(clean.prefix(Self.progressQueryCharacters)) + "…" : clean
-                    return "\"\(short)\""
-                }
+                let shown = queries.suffix(Self.progressQueryLimit).map(ResearchAgent.quoted)
                 let earlier = queries.count > shown.count ? "…, " : ""
                 line += "\(queries.count) \(queries.count == 1 ? "search" : "searches") "
                     + "(\(earlier)\(shown.joined(separator: ", ")))"

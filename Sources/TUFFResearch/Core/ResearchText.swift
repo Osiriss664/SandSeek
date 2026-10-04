@@ -102,6 +102,13 @@ public enum ResearchText {
         return result
     }
 
+    /// Text on one line: unsafe characters removed, runs of whitespace and
+    /// line breaks turned into one space, cut to `limit` characters.
+    public static func oneLine(_ text: String, limit: Int) -> String {
+        let line = terminalSafe(text).split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        return line.count > limit ? String(line.prefix(limit)) + "…" : line
+    }
+
     /// A URL as one printable token: control characters and whitespace removed.
     public static func url(_ text: String) -> String {
         var scalars = String.UnicodeScalarView()
