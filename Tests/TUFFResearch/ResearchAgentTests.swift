@@ -703,6 +703,26 @@ struct ResearchAgentTests {
         let final = try #require(services.modelRequests.last)
         #expect(final["tool_choice"] == .string("none"))
         #expect(messages(final).last?["role"] == .string("user"))
+        // No page was read, so the top result (both searches found the same
+        // one) is opened and handed over with the request for the answer.
+        #expect(report.sources.map(\.url) == ["https://github.com/apple/container"])
+        let request = messages(final).last?["content"]?.stringValue ?? ""
+        #expect(request.hasPrefix(ResearchAgent.budgetUsedUpRequest + "\n\n"
+            + ResearchAgent.topUpNote + "\n\nSource [1]: apple/container"))
+        #expect(request.hasSuffix(ResearchAgent.untrustedClose))
+
+        // A result that was already read is not opened again.
+        let read = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"one"}"#)]),
+            FakeServices.calls([("b", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
+            FakeServices.answer("Partial answer [1]."),
+        ])
+        let readReport = try await agent(read, options: options).run(question: "q")
+        #expect(readReport.sources.count == 1)
+        #expect(read.requests.filter { $0.url.path == "/v1/fetch" }.count == 1)
+        let readFinal = try #require(read.modelRequests.last)
+        #expect(messages(readFinal).last?["content"]
+            == .string(ResearchAgent.budgetUsedUpRequest))
     }
 
     @Test func contextOverflowRetriesOnce() async throws {

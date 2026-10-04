@@ -157,7 +157,7 @@ public final class ResearchRunController {
         case .askingToSearchMore:
             append(.turn, "Answered from one search or page; asking it to look wider", started: started)
         case .openingTopResults:
-            append(.turn, "No page read yet; opening the top results", started: started)
+            append(.turn, "Few or no pages read; opening top search results", started: started)
         case .repeatedSearchRefused(let query):
             append(.searching, "Repeated search refused: \(query)", started: started)
         case .shortenedOlderResults:

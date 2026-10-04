@@ -104,8 +104,11 @@ firewall inside the VM stops anything else running there from doing so.
 The system prompt walks the model through a research method: plan the facts
 it needs, run two to four different searches (short keywords, synonyms, the
 official source, the newest state, English as well as the question's
-language), read at least two independent pages, compare their dates and
-claims, then answer in the question's language with a short answer first,
+language; quotation marks only for exact phrases, and names of
+organisations, people and places the results mention), read at least three
+independent pages, compare their dates and claims, check every item against
+each condition in the question (for example "non-violent") and leave out or
+mark as excluded the ones that break it, then answer in the question's language with a short answer first,
 the details with source numbers, and what it could not verify. The last tool
 result of each turn ends with a line such as `Research so far: 2 searches
 ("…", "…"), 1 page read, step 3 of 8.`, so the model keeps track after older
@@ -302,7 +305,9 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
   already ran (Qwen did in a long run): after two refused repeats with no page
   read, the research opens the top results for it. A refused repeat shows as
   "repeated search refused" in the progress. That model is then not asked to
-  look wider (below). On the
+  look wider (below). When the step budget runs out with fewer than three
+  pages read, the research opens more of the top results (ones not read yet)
+  and hands them over with the request for the final answer. On the
   last step there is no room for any of these requests. A model that
   never searched, or whose results could not be opened, keeps its answer, and
   the report says that no page was read and notes any citations that match no

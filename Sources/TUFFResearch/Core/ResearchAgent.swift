@@ -137,9 +137,10 @@ public enum ResearchEvent: Equatable, Sendable {
     /// The model answered after one search or one page, and is asked once to
     /// search with other words and read another source.
     case askingToSearchMore
-    /// The model read no page: it answered from search previews again after
-    /// it was asked to read, or kept repeating searches it already ran. The
-    /// loop opens the top search results itself.
+    /// The model read no page (it answered from search previews again after
+    /// it was asked to read, or kept repeating searches it already ran), or
+    /// the step budget ran out with fewer than three pages read. The loop
+    /// opens top search results itself.
     case openingTopResults
     /// The model ran a search it already ran, and was told so instead.
     case repeatedSearchRefused(String)
@@ -237,12 +238,20 @@ public struct ResearchAgent: Sendable {
         synonyms, the official or primary source (for example with site:), \
         the newest state (add the year), and English as well as the \
         question's language. You may make up to \(options.maxToolCallsPerTurn) \
-        tool calls in one turn. Never repeat a query you already ran.
+        tool calls in one turn. Never repeat a query you already ran. Use \
+        quotation marks only when you need an exact phrase; when a search \
+        brings few or poor results, drop the quotes and use other words \
+        rather than a small variation of the same query. Search for the \
+        names of organisations, people and places the results mention.
         3. Read: open the most relevant pages with open_page. Read at least \
-        two independent sources before you answer. Snippets are not sources.
+        three independent sources before you answer. Snippets are not sources.
         4. Check: compare the sources. Note the date on each page and prefer \
         the newest for anything that changes over time. If sources disagree \
-        or the results are poor, search again with new words.
+        or the results are poor, search again with new words. Check every \
+        item you plan to name against each condition in the question (for \
+        example "non-violent" or "not party-political"). Leave out items \
+        that break a condition, or list them separately as excluded, with \
+        the reason and the source.
         5. Answer in the language of the question, in Markdown: a short \
         direct answer first, then the details, citing pages with the source \
         numbers the tools gave you, like [1] or [2][3], then what you could \
@@ -375,11 +384,24 @@ public struct ResearchAgent: Sendable {
             }
         }
 
+        // A run that spent its steps searching can reach the end with few
+        // pages read (Qwen read 2 in a long run). Top up from the search
+        // results so the answer rests on a few real sources.
+        var finalRequest = Self.budgetUsedUpRequest
+        if state.searched, state.sources.count < Self.minimumPagesRead,
+           state.topResults().contains(where: { url in
+               !state.sources.contains { $0.url == url } }) {
+            onEvent(.openingTopResults)
+            let pages = await openTopResults(
+                state: &state, wanted: Self.minimumPagesRead - state.sources.count)
+            if !pages.isEmpty {
+                finalRequest += "\n\n" + Self.topUpNote + "\n\n"
+                    + pages.joined(separator: "\n\n")
+            }
+        }
         state.messages.append(.object([
             "role": .string("user"),
-            "content": .string(
-                "The research budget is used up. Answer now from what you have read, "
-                    + "citing source numbers, and say what remains unverified."),
+            "content": .string(finalRequest),
         ]))
         let final = try await complete(&state, allowTools: false)
         if let earlier = answerBeforeSearchingMore, Self.isIncomplete(final) {
@@ -466,10 +488,13 @@ public struct ResearchAgent: Sendable {
 
     /// Opens the top results of the searches so far, the first hit of each
     /// search before any second hit, and returns the pages read.
-    private func openTopResults(state: inout State) async -> [String] {
+    private func openTopResults(state: inout State,
+                                wanted: Int = ResearchAgent.autoOpenedPages) async -> [String] {
         var pages: [String] = []
-        for url in state.topResults().prefix(Self.autoOpenAttempts)
-        where pages.count < Self.autoOpenedPages {
+        let unread = state.topResults().filter { url in
+            !state.sources.contains { $0.url == url }
+        }
+        for url in unread.prefix(Self.autoOpenAttempts) where pages.count < wanted {
             let read = state.sources.count
             let result = await openPage(url: url, offset: 0, state: &state)
             if state.sources.count > read {
@@ -478,6 +503,18 @@ public struct ResearchAgent: Sendable {
         }
         return pages
     }
+
+    static let budgetUsedUpRequest = "The research budget is used up. Answer now from what "
+        + "you have read, citing source numbers, and say what remains unverified. Check every "
+        + "item against each condition in the question, and leave out, or list as excluded "
+        + "with the reason, any item that breaks one."
+
+    static let topUpNote = "Few pages had been read, so the research opened more of the top "
+        + "search results for you. They follow below; use them like the pages you opened."
+
+    /// Pages a finished run should rest on. When the step budget runs out
+    /// with fewer read, the loop opens more of the top results itself.
+    static let minimumPagesRead = 3
 
     static let searchMoreRequest = "Before you answer, look wider if you can: one search or one "
         + "page can miss facts or be out of date. Run one or two more web_search calls with "
@@ -684,7 +721,8 @@ public struct ResearchAgent: Sendable {
 
     static func formatSearch(query: String, results: [ResearchSearchResult]) -> String {
         guard !results.isEmpty else {
-            return "No results for \"\(sanitized(query))\". Try different search terms."
+            return "No results for \"\(sanitized(query))\". Try different search terms, "
+                + "without quotation marks."
         }
         var lines = ["Search results for \"\(sanitized(query))\":", untrustedOpen]
         // Bullets, not numbers: only pages read with open_page get source
