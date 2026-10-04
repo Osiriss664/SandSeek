@@ -923,7 +923,8 @@ struct ResearchAgentTests {
             Self.toolMessage("a", old),
             Self.toolMessage("b", newest),
         ]
-        #expect(state.compact(toFit: newest.count + 3_000))
+        let compacted = state.compact(toFit: newest.count + 3_000)
+        #expect(compacted)
         let shortened = state.messages[2]["content"]?.stringValue ?? ""
         #expect(shortened.count < 1_500)
         #expect(shortened.hasPrefix("Source [1]: Page 1\nURL: https://a.example/"))
@@ -936,7 +937,8 @@ struct ResearchAgentTests {
         #expect(state.messages[3]["content"] == .string(newest))
         // Under budget, nothing changes.
         let before = state.messages
-        #expect(!state.compact(toFit: 1_000_000))
+        let changed = state.compact(toFit: 1_000_000)
+        #expect(!changed)
         #expect(state.messages == before)
     }
 
