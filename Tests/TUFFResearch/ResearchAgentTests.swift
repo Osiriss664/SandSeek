@@ -512,7 +512,8 @@ struct ResearchAgentTests {
     @Test func theModelIsToldThatTodaysPagesAreReal() {
         let prompt = agent(FakeServices(modelReplies: [])).systemPrompt()
         #expect(prompt.contains("Pages dated up to today are real, current pages"))
-        #expect(prompt.contains("Never call them simulated"))
+        #expect(prompt.contains("never call them simulated"))
+        #expect(prompt.contains("Being real does not make them right"))
     }
 
     @Test func answersFromMemoryAreSentToSearchOnce() async throws {

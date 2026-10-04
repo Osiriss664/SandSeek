@@ -296,14 +296,17 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
 - A model that answers from memory without searching is asked once to search,
   and one that answers from search previews alone is asked once to open
   pages. If it answers from previews again (Gemma 4 26B did in testing), the
-  research opens the top two search results itself, the first hit of each
-  search first, and gives them to the model to answer from. A model that
+  research opens two of the top search results itself, the first hit of each
+  search first and trying up to four links, and gives them to the model to
+  answer from. That model is then not asked to look wider (below). On the
+  last step there is no room for any of these requests. A model that
   never searched, or whose results could not be opened, keeps its answer, and
   the report says that no page was read and notes any citations that match no
   page the research read.
 - The model is told today's date and that pages dated up to today are real.
   Without that, Qwen called 2026 news "simulated" because it is newer than
-  its training data.
+  its training data. It is also told that a real page is not automatically a
+  correct one.
 - A model that answers after fewer than two searches or two pages is asked
   once to search with other words and read another source. A turn that
   reached the token limit is not asked, and if the answer after asking comes
