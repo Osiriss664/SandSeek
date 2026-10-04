@@ -274,7 +274,7 @@ import TUFFAppServer
 
     @Test func thinkingRaisesTheTokenLimit() {
         #expect(ResearchRunSettings(model: "m", showThinking: true).maxTokens == 8_192)
-        #expect(ResearchRunSettings(model: "m", showThinking: false).maxTokens == 1_024)
+        #expect(ResearchRunSettings(model: "m", showThinking: false).maxTokens == 2_048)
     }
 }
 

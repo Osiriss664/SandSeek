@@ -23,7 +23,7 @@ public struct ResearchRunSettings: Equatable, Sendable {
     /// Reasoning shares the token limit with the answer and tool calls.
     /// Larger models such as Gemma 4 26B can think for more than 4,096
     /// tokens on a long research turn, which cut the turn off with no answer.
-    var maxTokens: Int { showThinking ? 8_192 : 1_024 }
+    var maxTokens: Int { showThinking ? 8_192 : 2_048 }
 }
 
 /// Runs one research question at a time with the same loop as `tuff
@@ -157,7 +157,9 @@ public final class ResearchRunController {
         case .askingToSearchMore:
             append(.turn, "Answered from one search or page; asking it to look wider", started: started)
         case .openingTopResults:
-            append(.turn, "Answered from search previews again; opening the top results", started: started)
+            append(.turn, "No page read yet; opening the top results", started: started)
+        case .repeatedSearchRefused(let query):
+            append(.searching, "Repeated search refused: \(query)", started: started)
         case .shortenedOlderResults:
             append(.turn, "Shortened older results to fit the model's context", started: started)
         case .retryingAfterTimeout:

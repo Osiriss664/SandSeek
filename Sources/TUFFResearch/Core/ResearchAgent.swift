@@ -137,9 +137,12 @@ public enum ResearchEvent: Equatable, Sendable {
     /// The model answered after one search or one page, and is asked once to
     /// search with other words and read another source.
     case askingToSearchMore
-    /// The model answered from search previews again after it was asked to
-    /// read, so the loop opens the top search results itself.
+    /// The model read no page: it answered from search previews again after
+    /// it was asked to read, or kept repeating searches it already ran. The
+    /// loop opens the top search results itself.
     case openingTopResults
+    /// The model ran a search it already ran, and was told so instead.
+    case repeatedSearchRefused(String)
     /// Older results were shortened so the conversation fits the model's
     /// context window.
     case shortenedOlderResults
@@ -352,6 +355,24 @@ public struct ResearchAgent: Sendable {
                     "content": .string(result),
                 ]))
             }
+            // A model that only repeats searches it already ran (Qwen did in
+            // long runs) never answers without tools, so the check above
+            // never opens pages for it. After a few refused repeats with
+            // nothing read, open the top results here as well.
+            if state.sources.isEmpty, state.searched, !openedTopResults,
+               state.refusedRepeats >= Self.repeatsBeforeOpening,
+               step < options.maxSteps {
+                openedTopResults = true
+                onEvent(.openingTopResults)
+                let pages = await openTopResults(state: &state)
+                if !pages.isEmpty {
+                    state.messages.append(.object([
+                        "role": .string("user"),
+                        "content": .string(Self.repeatedSearchesRequest + "\n\n"
+                            + pages.joined(separator: "\n\n")),
+                    ]))
+                }
+            }
         }
 
         state.messages.append(.object([
@@ -428,6 +449,15 @@ public struct ResearchAgent: Sendable {
     static let topResultsRequest = "You answered from search snippets again, so the research "
         + "opened the top search results for you. They follow below. Answer from what these "
         + "pages say, citing their source numbers. You may still search or open more pages."
+
+    static let repeatedSearchesRequest = "You keep repeating searches you already ran and have "
+        + "not opened any page, so the research opened the top search results for you. They "
+        + "follow below. Answer from what these pages say, citing their source numbers, or "
+        + "open other pages from the results. Do not repeat earlier searches."
+
+    /// Refused repeated searches, with no page read, before the loop opens
+    /// the top results itself.
+    static let repeatsBeforeOpening = 2
 
     /// Pages the loop opens itself when the model will not.
     static let autoOpenedPages = 2
@@ -577,6 +607,8 @@ public struct ResearchAgent: Sendable {
                 // A repeated query would only bring the same results, and
                 // sends one more request to the search engine for nothing.
                 if state.hasSearched(query) {
+                    state.refusedRepeats += 1
+                    onEvent(.repeatedSearchRefused(query))
                     return "You already searched for \(Self.quoted(query)). "
                         + "Search with different words, or open a page from the results."
                 }
@@ -703,6 +735,8 @@ public struct ResearchAgent: Sendable {
         var shownQueries: [String] = []
         /// The result links of each search, in order.
         var resultURLs: [[String]] = []
+        /// Searches refused because they repeated an earlier query.
+        var refusedRepeats = 0
 
         init(question: String) {
             self.question = question

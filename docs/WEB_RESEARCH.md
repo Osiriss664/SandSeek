@@ -298,7 +298,11 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
   pages. If it answers from previews again (Gemma 4 26B did in testing), the
   research opens two of the top search results itself, the first hit of each
   search first and trying up to four links, and gives them to the model to
-  answer from. That model is then not asked to look wider (below). On the
+  answer from. The same happens when a model keeps repeating searches it
+  already ran (Qwen did in a long run): after two refused repeats with no page
+  read, the research opens the top results for it. A refused repeat shows as
+  "repeated search refused" in the progress. That model is then not asked to
+  look wider (below). On the
   last step there is no room for any of these requests. A model that
   never searched, or whose results could not be opened, keeps its answer, and
   the report says that no page was read and notes any citations that match no
@@ -326,8 +330,8 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
   The firewall makes one exception for it, its address and port only. Give it
   as an IP address if the name only resolves on your local network.
 - Long pages are read in slices. The loop asks TUFF for the model's context
-  window (`/v1/models`), keeps room in it for the reply (`--max-tokens`, 8192
-  with reasoning on), and shortens older results once the conversation would
+  window (`/v1/models`), keeps room in it for the reply (`--max-tokens`, 2048,
+  or 8192 with reasoning on), and shortens older results once the conversation would
   outgrow the rest; `--context-chars` sets a fixed budget instead. Shortening
   is done by the loop, not by the model, so page text never gets a chance to
   steer it: a page read twice keeps only its newest copy, older pages keep

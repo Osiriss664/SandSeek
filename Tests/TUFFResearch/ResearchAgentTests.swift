@@ -804,10 +804,36 @@ struct ResearchAgentTests {
         #expect(repeated == "You already searched for \"apple container\". Search with "
             + "different words, or open a page from the results.")
         #expect(report.searchQueries == ["Apple Container"])
+        #expect(log.events.contains(.repeatedSearchRefused("apple container")))
         // One search, so the model was asked once to look wider, and the
         // report says only one search ran.
         #expect(log.events.contains(.askingToSearchMore))
         #expect(report.markdown.contains("Only one search was run"))
+    }
+
+    @Test func repeatedSearchesWithNothingReadOpenTheTopResults() async throws {
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"berlin"}"#)]),
+            FakeServices.calls([("b", "web_search", #"{"query":"berlin"}"#)]),
+            FakeServices.calls([("c", "web_search", #"{"query":"Berlin"}"#)]),
+            FakeServices.answer("From the page [1]."),
+        ])
+        let log = EventLog()
+        let report = try await agent(services, events: log).run(question: "q")
+        #expect(report.answer == "From the page [1].")
+        #expect(report.sources.map(\.url) == ["https://github.com/apple/container"])
+        #expect(services.requests.filter { $0.url.path == "/v1/search" }.count == 1)
+        #expect(log.events.contains(.repeatedSearchRefused("berlin")))
+        #expect(log.events.contains(.repeatedSearchRefused("Berlin")))
+        #expect(log.events.filter { $0 == .openingTopResults }.count == 1)
+        // Not asked to look wider after the loop opened the pages.
+        #expect(!log.events.contains(.askingToSearchMore))
+        let handed = messages(services.modelRequests[3]).last
+        #expect(handed?["role"] == .string("user"))
+        let pages = handed?["content"]?.stringValue ?? ""
+        #expect(pages.hasPrefix(
+            ResearchAgent.repeatedSearchesRequest + "\n\nSource [1]: apple/container"))
+        #expect(pages.hasSuffix(ResearchAgent.untrustedClose))
     }
 
     @Test func aFailedSearchMayBeTriedAgain() async throws {
@@ -1184,7 +1210,7 @@ struct ResearchArgumentsTests {
             ["q", "--max-tokens", "2000", "--thinking", "off", "--show-thinking"])
         #expect(chosen.enableThinking == false)
         #expect(chosen.maxTokens == 2_000)
-        #expect(try ResearchArguments.parse(["q"]).maxTokens == 1_024)
+        #expect(try ResearchArguments.parse(["q"]).maxTokens == 2_048)
     }
 
     @Test func servicesMustBeLocal() {
