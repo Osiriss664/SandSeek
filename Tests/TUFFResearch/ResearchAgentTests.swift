@@ -1265,10 +1265,42 @@ struct ResearchAgentTests {
         #expect(report.searchQueries == ["apple container vm"])
         #expect(log.events.filter { $0 == .continuingAfterCutOff }.count == 1)
         #expect(!log.events.contains(.retryingEmptyAnswer))
-        // Only the turn after the cut-off goes without reasoning.
+        // The rest of the run goes without reasoning.
+        #expect(services.modelRequests[0]["enable_thinking"] == nil)
         #expect(services.modelRequests[2]["enable_thinking"] == .bool(false))
         #expect(services.modelRequests[2]["tool_choice"] == .string("auto"))
-        #expect(services.modelRequests[3]["enable_thinking"] == nil)
+        #expect(services.modelRequests[3]["enable_thinking"] == .bool(false))
+
+        // A second cut-off, with reasoning already off, is answered as before.
+        let twice = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
+            FakeServices.cutOff(),
+            FakeServices.cutOff(),
+            FakeServices.answer("Each container is a VM [1]."),
+        ])
+        let twiceLog = EventLog()
+        let short = try await agent(twice, events: twiceLog).run(question: "q")
+        #expect(short.answer == "Each container is a VM [1].")
+        #expect(twiceLog.events.filter { $0 == .continuingAfterCutOff }.count == 1)
+        #expect(twiceLog.events.contains(.retryingEmptyAnswer))
+
+        // GPT-OSS refuses enable_thinking; the turn goes without it.
+        let gptOss = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
+            FakeServices.cutOff(),
+            FakeServices.json(400, .object(["error": .object([
+                "message": .string("enable_thinking is not supported by GPT-OSS"),
+                "code": .string("unsupported_parameter"),
+            ])])),
+            FakeServices.answer("Each container is a VM [1]."),
+            FakeServices.answer("Each container is a VM [1]."),
+        ])
+        let refused = try await agent(gptOss).run(question: "q")
+        #expect(refused.answer == "Each container is a VM [1].")
+        #expect(gptOss.modelRequests[3]["enable_thinking"] == nil)
+        // Later turns are not refused again.
+        #expect(gptOss.modelRequests.count == 5)
+        #expect(gptOss.modelRequests[4]["enable_thinking"] == nil)
     }
 
     @Test func aContextThatStillOverflowsShortensTheNewestResultsToo() async throws {

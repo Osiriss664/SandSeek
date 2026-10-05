@@ -297,15 +297,14 @@ public struct ResearchAgent: Sendable {
             onEvent(.modelTurn(step))
             let turn = try await complete(&state, allowTools: true)
             // A turn cut off while thinking has not chosen to answer; with
-            // steps left, the research goes on rather than ending here.
+            // steps left, the research goes on rather than ending here, with
+            // reasoning off from now on. A turn cut off with reasoning
+            // already off would only repeat, so it is answered as before.
             if turn.toolCalls.isEmpty, turn.finishReason == "length",
-               Self.isBlank(turn.content ?? ""), step < options.maxSteps {
+               Self.isBlank(turn.content ?? ""), step < options.maxSteps,
+               !state.reasoningOff {
                 onEvent(.continuingAfterCutOff)
-                state.nextTurnWithoutThinking = true
-                if state.compact(toFit: promptBudget(state), overhead: Self.toolCharacters,
-                                 emergency: true) {
-                    onEvent(.shortenedOlderResults)
-                }
+                state.thinkingCutOff = true
                 continue
             }
             guard !turn.toolCalls.isEmpty else {
@@ -678,15 +677,31 @@ public struct ResearchAgent: Sendable {
     private func complete(_ state: inout State,
                           allowTools: Bool,
                           thinking: Bool? = nil) async throws -> ResearchAssistantTurn {
-        let thinking = state.thinkingTimedOut || state.nextTurnWithoutThinking
-            ? false : thinking
-        state.nextTurnWithoutThinking = false
+        let thinking = state.reasoningOff ? false : thinking
         do {
-            return try await send(&state, allowTools: allowTools, thinking: thinking)
+            return try await sendTurningThinkingOff(&state, allowTools: allowTools,
+                                                    thinking: thinking)
         } catch ResearchError.modelTimedOut where (thinking ?? chat.enableThinking) == true {
             state.thinkingTimedOut = true
             onEvent(.retryingAfterTimeout)
-            return try await send(&state, allowTools: allowTools, thinking: false)
+            return try await sendTurningThinkingOff(&state, allowTools: allowTools,
+                                                    thinking: false)
+        }
+    }
+
+    /// GPT-OSS takes reasoning_effort and refuses enable_thinking; a turn
+    /// that asked for reasoning off is then sent with the client's own
+    /// setting, and so are the turns after it.
+    private func sendTurningThinkingOff(_ state: inout State,
+                                        allowTools: Bool,
+                                        thinking: Bool?) async throws -> ResearchAssistantTurn {
+        let thinking = thinking == false && state.enableThinkingRefused ? nil : thinking
+        do {
+            return try await send(&state, allowTools: allowTools, thinking: thinking)
+        } catch ResearchError.modelRequestFailed(_, _, "unsupported_parameter"?)
+                    where thinking == false {
+            state.enableThinkingRefused = true
+            return try await send(&state, allowTools: allowTools, thinking: nil)
         }
     }
 
@@ -977,9 +992,13 @@ public struct ResearchAgent: Sendable {
         /// A turn ran past the request timeout while reasoning, so the rest
         /// of the run asks without it.
         var thinkingTimedOut = false
-        /// The previous turn ran out of tokens while thinking, so the next
-        /// one is asked without reasoning.
-        var nextTurnWithoutThinking = false
+        /// A turn ran out of tokens while thinking, so the rest of the run
+        /// asks without reasoning.
+        var thinkingCutOff = false
+        /// The server refused enable_thinking (GPT-OSS).
+        var enableThinkingRefused = false
+        /// Reasoning is off for the rest of the run.
+        var reasoningOff: Bool { thinkingTimedOut || thinkingCutOff }
         /// How many characters one prompt token holds. It starts low, as web
         /// text in German with links and numbers needs many tokens, and is
         /// measured from the prompt tokens the server reports.
