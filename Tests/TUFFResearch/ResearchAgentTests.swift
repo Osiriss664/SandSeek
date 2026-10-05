@@ -732,13 +732,16 @@ struct ResearchAgentTests {
     }
 
     @Test func anEmptyAnswerIsAskedForOnceWithoutThinking() async throws {
+        // On the last step: a turn cut off earlier lets the research go on.
+        var options = ResearchOptions()
+        options.maxSteps = 2
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
             FakeServices.cutOff(),
             FakeServices.answer("Each container is a VM [1]."),
         ])
         let log = EventLog()
-        let report = try await agent(services, events: log).run(question: "q")
+        let report = try await agent(services, options: options, events: log).run(question: "q")
         #expect(report.answer == "Each container is a VM [1].")
         #expect(report.sources.count == 1)
         #expect(log.events.contains(.retryingEmptyAnswer))
@@ -753,7 +756,7 @@ struct ResearchAgentTests {
             FakeServices.cutOff(),
         ])
         await #expect(throws: ResearchError.noAnswer(tokenLimit: true)) {
-            try await agent(silent).run(question: "q")
+            try await agent(silent, options: options).run(question: "q")
         }
     }
 
@@ -768,7 +771,9 @@ struct ResearchAgentTests {
             ])])),
             FakeServices.answer("Each container is a VM [1]."),
         ])
-        let report = try await agent(services).run(question: "q")
+        var options = ResearchOptions()
+        options.maxSteps = 2
+        let report = try await agent(services, options: options).run(question: "q")
         #expect(report.answer == "Each container is a VM [1].")
         let last = try #require(services.modelRequests.last)
         #expect(last["enable_thinking"] == nil)
@@ -1009,7 +1014,9 @@ struct ResearchAgentTests {
             FakeServices.cutOff(),
         ])
         let log = EventLog()
-        let report = try await agent(services, events: log).run(question: "q")
+        var lastStep = ResearchOptions()
+        lastStep.maxSteps = 3
+        let report = try await agent(services, options: lastStep, events: log).run(question: "q")
         #expect(report.answer == "Each container is a VM [1].")
         #expect(!report.answerCutOff)
         #expect(log.events.contains(.askingToSearchMore))
@@ -1241,6 +1248,62 @@ struct ResearchAgentTests {
         #expect(tools[0].count < 1_500)
         #expect(tools[0].contains("verteilt in Berlin jeden Samstag eine Zeitung"))
         #expect(tools[1].contains(page))
+    }
+
+    @Test func aTurnCutOffWhileThinkingContinuesTheResearch() async throws {
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
+            FakeServices.cutOff(),
+            FakeServices.calls([("b", "web_search", #"{"query":"apple container vm"}"#)]),
+            FakeServices.answer("Each container is a VM [1]."),
+            FakeServices.answer("Each container is a VM [1]."),
+        ])
+        let log = EventLog()
+        let report = try await agent(services, events: log).run(question: "q")
+        #expect(report.answer == "Each container is a VM [1].")
+        #expect(!report.budgetExhausted)
+        #expect(report.searchQueries == ["apple container vm"])
+        #expect(log.events.filter { $0 == .continuingAfterCutOff }.count == 1)
+        #expect(!log.events.contains(.retryingEmptyAnswer))
+        // Only the turn after the cut-off goes without reasoning.
+        #expect(services.modelRequests[2]["enable_thinking"] == .bool(false))
+        #expect(services.modelRequests[2]["tool_choice"] == .string("auto"))
+        #expect(services.modelRequests[3]["enable_thinking"] == nil)
+    }
+
+    @Test func aContextThatStillOverflowsShortensTheNewestResultsToo() async throws {
+        let page = Self.longPageText
+        let overflow = FakeServices.json(400, .object(["error": .object([
+            "message": .string("effective prompt exceeds the configured context"),
+            "code": .string("context_length_exceeded"),
+        ])]))
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "open_page", #"{"url":"https://a.example/"}"#)]),
+            overflow,
+            overflow,
+            FakeServices.answer("Eine Gruppe [1]."),
+            FakeServices.answer("Eine Gruppe [1]."),
+        ]) { path, body in
+            guard path == "/v1/fetch" else { return FakeServices.webPages(path, body) }
+            return FakeServices.json(200, .object([
+                "url": body?["url"] ?? .string(""), "title": .string("Gruppe"),
+                "text": .string(page), "offset": .integer(0),
+                "total_chars": .integer(page.unicodeScalars.count),
+            ]))
+        }
+        var options = ResearchOptions()
+        options.contextBudgetCharacters = 6_000
+        let report = try await agent(services, options: options)
+            .run(question: "Welche Gruppen verteilen in Berlin Zeitungen?")
+        #expect(report.answer == "Eine Gruppe [1].")
+        func newestResult(in request: ResearchJSON) -> String {
+            messages(request).last { $0["role"] == .string("tool") }?["content"]?.stringValue ?? ""
+        }
+        // The first retry keeps the newest page whole; the second shortens it.
+        #expect(newestResult(in: services.modelRequests[2]).contains(page))
+        let shortened = newestResult(in: services.modelRequests[3])
+        #expect(shortened.hasPrefix("Source [1]: Gruppe\n"))
+        #expect(!shortened.contains("Lorem ipsum"))
     }
 
     @Test func aStepThatTimesOutIsAskedAgainWithoutThinking() async throws {
