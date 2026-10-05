@@ -318,13 +318,15 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
   never searched, or whose results could not be opened, keeps its answer, and
   the report says that no page was read and notes any citations that match no
   page the research read.
-- An answer that cites source numbers no page was read for (Qwen cited pages
-  it had only seen in search previews) is sent back once, with the list of
-  pages that were read, to be rewritten using only those. Claims that rest
-  only on unread sources are left out or listed as not verified. The rewrite
-  is kept only if it is complete and cites fewer unread numbers; otherwise
-  the first answer stays, and the report still flags its unread citations.
-  This costs one more model turn, and only when it happens.
+- When at least one page was read, an answer that cites source numbers no
+  page was read for (Qwen cited pages it had only seen in search previews) is
+  sent back once, with the list of pages that were read, to be rewritten
+  using only those, with reasoning off. Claims that rest only on unread
+  sources are left out or listed as not verified. The rewrite is kept only if
+  it is complete, cites fewer unread numbers and no new one, and is at least a
+  third as long as the first answer; otherwise the first answer stays, and
+  the report still flags its unread citations. This costs one more model
+  turn, and only when it happens.
 - The model is told today's date and that pages dated up to today are real.
   Without that, Qwen called 2026 news "simulated" because it is newer than
   its training data. It is also told that a real page is not automatically a

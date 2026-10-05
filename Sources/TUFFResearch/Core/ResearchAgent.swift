@@ -479,9 +479,15 @@ public struct ResearchAgent: Sendable {
             "content": .string(Self.unreadCitationsRequest(
                 unknown: unknown, read: state.sources.map(\.number))),
         ]))
+        // Rewriting needs no reasoning, which would only make the turn slow.
         let revision: ResearchAssistantTurn
         do {
-            revision = try await complete(&state, allowTools: false)
+            do {
+                revision = try await complete(&state, allowTools: false, thinking: false)
+            } catch ResearchError.modelRequestFailed(_, _, "unsupported_parameter"?) {
+                // GPT-OSS refuses enable_thinking; ask with the client's setting.
+                revision = try await complete(&state, allowTools: false)
+            }
         } catch {
             // A stopped run stays stopped; any other failure keeps the answer.
             try Task.checkCancellation()
@@ -490,9 +496,20 @@ public struct ResearchAgent: Sendable {
         guard let content = revision.content, !Self.isIncomplete(revision) else {
             return answer
         }
+        // Kept only if it cites no new unread number, fewer of them, and is
+        // not a stub in place of the whole answer.
         let left = state.report(answer: content, turns: 0, exhausted: false).unknownCitations
-        return left.count < unknown.count ? (content, false) : answer
+        let shrunk = ResearchText.terminalSafe(content).count * Self.shortestRewriteDivisor
+            < ResearchText.terminalSafe(answer.0).count
+        guard left.allSatisfy(unknown.contains), left.count < unknown.count, !shrunk else {
+            return answer
+        }
+        return (content, false)
     }
+
+    /// A rewrite shorter than this fraction of the answer (one third) is
+    /// taken as a stub, not a rewrite.
+    static let shortestRewriteDivisor = 3
 
     static func unreadCitationsRequest(unknown: [Int], read: [Int]) -> String {
         let cited = unknown.map { "[\($0)]" }.joined(separator: ", ")

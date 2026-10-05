@@ -568,6 +568,7 @@ struct ResearchAgentTests {
         #expect(log.events.filter { $0 == .revisingUnreadCitations }.count == 1)
         let rewrite = try #require(services.modelRequests.last)
         #expect(rewrite["tool_choice"] == .string("none"))
+        #expect(rewrite["enable_thinking"] == .bool(false))
         let asked = messages(rewrite).suffix(2)
         #expect(asked.first?["content"] == .string("VMs [1], and Linux 6 [3][4]."))
         #expect(asked.last?["content"] == .string(
@@ -587,6 +588,19 @@ struct ResearchAgentTests {
         let kept = try await agent(stubborn).run(question: "q")
         #expect(kept.answer == "VMs [1], and Linux 6 [3].")
         #expect(kept.unknownCitations == [3])
+
+        // Nor one that swaps an unread number for another, or is a stub.
+        for reply in ["VMs and Linux 6 [1][5].", "Unverified."] {
+            let swapped = FakeServices(modelReplies: [
+                FakeServices.calls([("a", "web_search", #"{"query":"apple container"}"#)]),
+                FakeServices.calls([("b", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
+                FakeServices.answer("Draft [1]."),
+                FakeServices.answer("Each container runs in its own VM [1], on Linux 6 [3][4]."),
+                FakeServices.answer(reply),
+            ])
+            #expect(try await agent(swapped).run(question: "q").answer
+                == "Each container runs in its own VM [1], on Linux 6 [3][4].")
+        }
 
         // Nor is a rewrite cut off at the token limit.
         let cut = FakeServices(modelReplies: [
