@@ -341,7 +341,7 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
   searches; stopping and asking for the answer", and the report notes the
   early stop. A step with any new search or page read starts the count again,
   and so do the top results opened for a model that had read no page.
-  This stop is always on. When the step budget runs out, or the research stops
+  This stop is always on; on the last step the run ends anyway, as before. When the step budget runs out, or the research stops
   this way, with fewer than three (`--min-pages`)
   pages read, the research opens more of the top results (ones not read yet)
   and hands them over with the request for the final answer. These top-up
