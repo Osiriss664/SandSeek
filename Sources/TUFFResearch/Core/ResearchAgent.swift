@@ -151,8 +151,8 @@ public enum ResearchEvent: Equatable, Sendable {
     /// reasoning off.
     case retryingAfterTimeout
     /// A turn ran out of tokens while thinking, before it called a tool or
-    /// answered, with steps left. The research goes on: the next turn gets
-    /// more room and reasoning off, instead of the run ending there.
+    /// answered, with steps left. The research goes on with reasoning off,
+    /// instead of the run ending there.
     case continuingAfterCutOff
     /// The answer cited pages the research never read, and the model is
     /// asked once to rewrite it from the pages it did read.
@@ -302,7 +302,7 @@ public struct ResearchAgent: Sendable {
             // already off would only repeat, so it is answered as before.
             if turn.toolCalls.isEmpty, turn.finishReason == "length",
                Self.isBlank(turn.content ?? ""), step < options.maxSteps,
-               !state.reasoningOff {
+               !state.reasoningOff, chat.enableThinking != false {
                 onEvent(.continuingAfterCutOff)
                 state.thinkingCutOff = true
                 continue
