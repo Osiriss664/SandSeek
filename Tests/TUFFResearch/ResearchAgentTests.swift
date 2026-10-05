@@ -1136,7 +1136,7 @@ struct ResearchAgentTests {
         let final = messages(services.modelRequests[4]).last?["content"]?.stringValue ?? ""
         #expect(final.hasPrefix(ResearchAgent.repeatedSearchesStopRequest + "\n\n"
             + ResearchAgent.topUpNote + "\n\nSource [2]: "))
-        #expect(services.modelRequests[4]["tools"] == nil)
+        #expect(services.modelRequests[4]["tool_choice"] == .string("none"))
     }
 
     @Test func aStepWithANewSearchOrPageStartsTheCountAgain() async throws {

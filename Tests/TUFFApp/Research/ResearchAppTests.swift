@@ -344,8 +344,15 @@ private final class DefaultsDomains: @unchecked Sendable {
     }
 
     deinit {
+        // Emptying a domain leaves its file behind, so the file goes too,
+        // after the emptied domain is written out.
+        let preferences = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Preferences", isDirectory: true)
         for name in names {
             UserDefaults.standard.removePersistentDomain(forName: name)
+            CFPreferencesAppSynchronize(name as CFString)
+            try? FileManager.default.removeItem(
+                at: preferences.appendingPathComponent("\(name).plist"))
         }
     }
 }
