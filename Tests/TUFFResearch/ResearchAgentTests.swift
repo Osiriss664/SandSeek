@@ -520,6 +520,95 @@ struct ResearchAgentTests {
         #expect(blocked.requests.filter { $0.url.path == "/v1/fetch" }.count == 1)
     }
 
+    @Test func theLoopOpensThreePagesFromAllSearches() async throws {
+        // Each search finds two pages of its own.
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"one"}"#)]),
+            FakeServices.calls([("b", "web_search", #"{"query":"two"}"#)]),
+            FakeServices.answer("Snippets."),
+            FakeServices.answer("Still snippets."),
+            FakeServices.answer("From the pages [1][2][3]."),
+        ]) { path, body in
+            guard path == "/v1/search" else { return FakeServices.webPages(path, body) }
+            let query = body?["query"]?.stringValue ?? ""
+            return FakeServices.json(200, .object(["query": .string(query), "results": .array(
+                (1...2).map { rank in
+                    .object([
+                        "title": .string("\(query) \(rank)"),
+                        "url": .string("https://\(query).example/\(rank)"),
+                        "snippet": .string("A snippet."),
+                    ])
+                })]))
+        }
+        let report = try await agent(services).run(question: "q")
+        #expect(report.answer == "From the pages [1][2][3].")
+        // The first hit of every search comes before any second hit.
+        #expect(report.sources.map(\.url) == [
+            "https://one.example/1", "https://two.example/1", "https://one.example/2",
+        ])
+        #expect(services.requests.filter { $0.url.path == "/v1/fetch" }.count == 3)
+        let pages = messages(services.modelRequests[4]).last?["content"]?.stringValue ?? ""
+        #expect(pages.hasPrefix(ResearchAgent.topResultsRequest + "\n\nSource [1]: "))
+        #expect(pages.contains("Source [3]: "))
+    }
+
+    @Test func anAnswerCitingUnreadPagesIsRewrittenOnce() async throws {
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"apple container"}"#)]),
+            FakeServices.calls([("b", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
+            FakeServices.answer("Draft [1]."),
+            // After the request to look wider.
+            FakeServices.answer("VMs [1], and Linux 6 [3][4]."),
+            FakeServices.answer("VMs [1]. Not verified: the Linux version."),
+        ])
+        let log = EventLog()
+        let report = try await agent(services, events: log).run(question: "q")
+        #expect(report.answer == "VMs [1]. Not verified: the Linux version.")
+        #expect(report.unknownCitations.isEmpty)
+        #expect(log.events.filter { $0 == .revisingUnreadCitations }.count == 1)
+        let rewrite = try #require(services.modelRequests.last)
+        #expect(rewrite["tool_choice"] == .string("none"))
+        let asked = messages(rewrite).suffix(2)
+        #expect(asked.first?["content"] == .string("VMs [1], and Linux 6 [3][4]."))
+        #expect(asked.last?["content"] == .string(
+            ResearchAgent.unreadCitationsRequest(unknown: [3, 4], read: [1])))
+        #expect(ResearchAgent.unreadCitationsRequest(unknown: [3, 4], read: [1])
+            .hasPrefix("Your answer cites [3], [4], which are not pages the research read. "
+                + "Only these pages were read: [1]."))
+
+        // A rewrite that still cites as many unread pages is not kept.
+        let stubborn = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"apple container"}"#)]),
+            FakeServices.calls([("b", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
+            FakeServices.answer("Draft [1]."),
+            FakeServices.answer("VMs [1], and Linux 6 [3]."),
+            FakeServices.answer("Linux 6 [4]."),
+        ])
+        let kept = try await agent(stubborn).run(question: "q")
+        #expect(kept.answer == "VMs [1], and Linux 6 [3].")
+        #expect(kept.unknownCitations == [3])
+
+        // Nor is a rewrite cut off at the token limit.
+        let cut = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"apple container"}"#)]),
+            FakeServices.calls([("b", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
+            FakeServices.answer("Draft [1]."),
+            FakeServices.answer("VMs [1], and Linux 6 [3]."),
+            FakeServices.answer("VMs [1], and", finishReason: "length"),
+        ])
+        #expect(try await agent(cut).run(question: "q").answer == "VMs [1], and Linux 6 [3].")
+
+        // With no page read there is nothing to rewrite from.
+        let unread = FakeServices(modelReplies: [
+            FakeServices.answer("From memory [1]."),
+            FakeServices.answer("Still from memory [1]."),
+        ])
+        let unreadLog = EventLog()
+        let memory = try await agent(unread, events: unreadLog).run(question: "q")
+        #expect(memory.answer == "Still from memory [1].")
+        #expect(!unreadLog.events.contains(.revisingUnreadCitations))
+    }
+
     @Test func topResultsTakeTheFirstHitOfEverySearchFirst() {
         var state = ResearchAgent.State(question: "q")
         state.resultURLs = [

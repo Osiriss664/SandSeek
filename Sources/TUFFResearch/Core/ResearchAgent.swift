@@ -150,6 +150,9 @@ public enum ResearchEvent: Equatable, Sendable {
     /// A turn ran past the request timeout, and is asked again with
     /// reasoning off.
     case retryingAfterTimeout
+    /// The answer cited pages the research never read, and the model is
+    /// asked once to rewrite it from the pages it did read.
+    case revisingUnreadCitations
 }
 
 /// The research loop. The model can only search the web and read pages, and
@@ -340,7 +343,8 @@ public struct ResearchAgent: Sendable {
                 if let earlier = answerBeforeSearchingMore, Self.isIncomplete(turn) {
                     return state.report(answer: earlier, turns: step, exhausted: false)
                 }
-                let (text, cutOff) = try await answer(from: turn, state: &state)
+                let first = try await answer(from: turn, state: &state)
+                let (text, cutOff) = try await reviseUnreadCitations(first, state: &state)
                 return state.report(answer: text, turns: step, exhausted: false, cutOff: cutOff)
             }
             calledTools = true
@@ -416,7 +420,8 @@ public struct ResearchAgent: Sendable {
             return state.report(
                 answer: earlier, turns: options.maxSteps + 1, exhausted: true)
         }
-        let (text, cutOff) = try await answer(from: final, state: &state)
+        let first = try await answer(from: final, state: &state)
+        let (text, cutOff) = try await reviseUnreadCitations(first, state: &state)
         return state.report(
             answer: text, turns: options.maxSteps + 1, exhausted: true, cutOff: cutOff)
     }
@@ -454,6 +459,51 @@ public struct ResearchAgent: Sendable {
             tokenLimit: turn.finishReason == "length" || retry.finishReason == "length")
     }
 
+    /// An answer that cites source numbers no page was read for (Qwen cited
+    /// pages it only saw in search previews) is sent back once, to be
+    /// rewritten from the pages read. The rewrite is kept only if it is
+    /// complete and cites fewer unread numbers; otherwise the first answer
+    /// stays, and the report flags its unread citations.
+    private func reviseUnreadCitations(_ answer: (String, Bool),
+                                       state: inout State) async throws -> (String, Bool) {
+        let unknown = state.report(answer: answer.0, turns: 0, exhausted: false)
+            .unknownCitations
+        guard !unknown.isEmpty, !state.sources.isEmpty else { return answer }
+        onEvent(.revisingUnreadCitations)
+        state.messages.append(.object([
+            "role": .string("assistant"),
+            "content": .string(answer.0),
+        ]))
+        state.messages.append(.object([
+            "role": .string("user"),
+            "content": .string(Self.unreadCitationsRequest(
+                unknown: unknown, read: state.sources.map(\.number))),
+        ]))
+        let revision: ResearchAssistantTurn
+        do {
+            revision = try await complete(&state, allowTools: false)
+        } catch {
+            // A stopped run stays stopped; any other failure keeps the answer.
+            try Task.checkCancellation()
+            return answer
+        }
+        guard let content = revision.content, !Self.isIncomplete(revision) else {
+            return answer
+        }
+        let left = state.report(answer: content, turns: 0, exhausted: false).unknownCitations
+        return left.count < unknown.count ? (content, false) : answer
+    }
+
+    static func unreadCitationsRequest(unknown: [Int], read: [Int]) -> String {
+        let cited = unknown.map { "[\($0)]" }.joined(separator: ", ")
+        let pages = read.map { "[\($0)]" }.joined(separator: ", ")
+        let what = unknown.count == 1 ? "which is not a page" : "which are not pages"
+        return "Your answer cites \(cited), \(what) the research read. Only these pages "
+            + "were read: \(pages). Rewrite the whole answer using only the pages you read, "
+            + "citing only their numbers. Leave out claims that rest only on other sources, or "
+            + "list them without a citation under what could not be verified."
+    }
+
     /// A turn with no answer, or one that stopped at the token limit.
     private static func isIncomplete(_ turn: ResearchAssistantTurn) -> Bool {
         isBlank(turn.content ?? "") || turn.finishReason == "length"
@@ -489,16 +539,20 @@ public struct ResearchAgent: Sendable {
     /// the top results itself.
     static let repeatsBeforeOpening = 2
 
-    /// Pages the loop opens itself when the model will not.
-    static let autoOpenedPages = 2
-    /// Search results tried for them, so a few broken links cannot stop it.
-    static let autoOpenAttempts = 4
+    /// Search results tried when the loop opens pages itself, so a few
+    /// broken links cannot stop it.
+    static let autoOpenAttempts = 6
 
     /// Opens the top results of the searches so far, the first hit of each
-    /// search before any second hit, and returns the pages read.
+    /// search before any second hit, so a search that found little is made
+    /// up for by the others. Returns the pages read. Without a page size,
+    /// the pages share half the prompt budget, as they arrive in one message.
     private func openTopResults(state: inout State,
-                                wanted: Int = ResearchAgent.autoOpenedPages,
+                                wanted: Int = ResearchAgent.minimumPagesRead,
                                 maxCharacters: Int? = nil) async -> [String] {
+        let maxCharacters = maxCharacters ?? min(
+            options.pageSliceCharacters,
+            max(Self.minimumTopUpCharacters, promptBudget(state) / 2 / max(1, wanted)))
         var pages: [String] = []
         let unread = state.topResults().filter { url in
             !state.sources.contains { $0.url == url }

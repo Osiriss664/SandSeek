@@ -301,9 +301,11 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
 - A model that answers from memory without searching is asked once to search,
   and one that answers from search previews alone is asked once to open
   pages. If it answers from previews again (Gemma 4 26B did in testing), the
-  research opens two of the top search results itself, the first hit of each
-  search first and trying up to four links, and gives them to the model to
-  answer from. The same happens when a model keeps repeating searches it
+  research opens three of the top search results itself, the first hit of
+  every search before any second hit, so other searches make up for one that
+  found little. It tries up to six links, so a few broken ones cannot stop it,
+  and gives the pages to the model to answer from, sharing half of the prompt
+  budget. The same happens when a model keeps repeating searches it
   already ran (Qwen did in a long run): after two refused repeats with no page
   read, the research opens the top results for it. A refused repeat shows as
   "repeated search refused" in the progress. That model is then not asked to
@@ -316,6 +318,13 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
   never searched, or whose results could not be opened, keeps its answer, and
   the report says that no page was read and notes any citations that match no
   page the research read.
+- An answer that cites source numbers no page was read for (Qwen cited pages
+  it had only seen in search previews) is sent back once, with the list of
+  pages that were read, to be rewritten using only those. Claims that rest
+  only on unread sources are left out or listed as not verified. The rewrite
+  is kept only if it is complete and cites fewer unread numbers; otherwise
+  the first answer stays, and the report still flags its unread citations.
+  This costs one more model turn, and only when it happens.
 - The model is told today's date and that pages dated up to today are real.
   Without that, Qwen called 2026 news "simulated" because it is newer than
   its training data. It is also told that a real page is not automatically a
