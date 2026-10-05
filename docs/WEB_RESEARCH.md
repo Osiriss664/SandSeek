@@ -383,6 +383,10 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
   only the passages that contain words from the question and the searches,
   and older searches lose their snippets. Only when that is not enough does
   an older result shrink to its first line. Models with small catalog
-  contexts get fewer pages per answer.
+  contexts get fewer pages per answer. Shortening never ends the research:
+  the model is told it is normal, a turn that runs out of tokens while
+  thinking is followed by one without reasoning, and a context that still
+  overflows has even the newest results shortened. A run ends when the
+  model answers or the step limit (`--max-steps`) is reached.
 - The sandbox scripts are run from a clone of this repository. The packaged
   app includes `tuff research` but not the sandbox image.
