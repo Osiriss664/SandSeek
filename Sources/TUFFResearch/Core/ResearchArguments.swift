@@ -30,7 +30,7 @@ public struct ResearchArguments: Equatable, Sendable {
                                the model selected in TUFF).
       --server <url>           TUFF server (default: http://127.0.0.1:8080).
       --sandbox <url>          Web sandbox (default: http://127.0.0.1:9000).
-      --max-steps <1...32>     Model turns that may use tools (default 8).
+      --max-steps <1...100>    Model turns that may use tools (default 8).
       --max-tokens <n>         Completion tokens per model turn, 64...32768
                                (default 2048, or 8192 with reasoning on).
       --page-chars <n>         Page text per read, 500...20000 (default 3000).

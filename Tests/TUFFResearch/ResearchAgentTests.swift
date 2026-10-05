@@ -1593,6 +1593,7 @@ struct ResearchArgumentsTests {
         #expect(parsed.stepTimeoutMinutes == 10)
         #expect(parsed.options.contextBudgetCharacters == 32_000)
         #expect(parsed.maxTokens == 4_096)
+        #expect(try ResearchArguments.parse(["q", "--max-steps", "100"]).options.maxSteps == 100)
         for flag in ["--search-results", "--tool-calls", "--min-pages", "--auto-open",
                      "--nudges", "--rewrite", "--step-timeout"] {
             #expect(ResearchArguments.usage.contains(flag), "\(flag)")
@@ -1605,7 +1606,7 @@ struct ResearchArgumentsTests {
                           ["q", "--search-results", "11"], ["q", "--tool-calls", "0"],
                           ["q", "--min-pages", "7"], ["q", "--step-timeout", "61"],
                           ["q", "--auto-open", "yes"], ["q", "--nudges"],
-                          ["q", "--rewrite", "maybe"]] {
+                          ["q", "--rewrite", "maybe"], ["q", "--max-steps", "101"]] {
             #expect(throws: (any Error).self) { _ = try ResearchArguments.parse(arguments) }
         }
         #expect((try? ResearchArguments.parse(["--help"]))?.showHelp == true)

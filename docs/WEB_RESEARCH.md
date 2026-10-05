@@ -19,7 +19,7 @@ also writes it to a new file. `--show-thinking` turns on the model's reasoning
 and prints it under each `[n] thinking…` line; it is not added to the report.
 The server returns that reasoning as `reasoning_content` on non-streaming
 replies; streams leave it out.
-`--max-steps <1...32>` sets how many search and read rounds the model may take
+`--max-steps <1...100>` sets how many search and read rounds the model may take
 before it has to answer (default 8). Run `tuff research --help` for every
 option.
 
@@ -31,7 +31,7 @@ launches; **Restore Defaults** resets them.
 
 | Command line | App | Default | What it does |
 | --- | --- | --- | --- |
-| `--max-steps <1...32>` | Steps | 8 | Search and read rounds before the model must answer. |
+| `--max-steps <1...100>` | Steps | 8 | Search and read rounds before the model must answer. |
 | `--thinking on\|off` | Thinking | model's own | Reasoning on or off. Show thinking (`--show-thinking`) turns it on unless it is off; in the app, Show thinking is on by default. |
 | `--max-tokens <64...32768>` | Token limit per step | 2048, or 8192 with reasoning | Tokens the model may write per step. |
 | `--page-chars <500...20000>` | Page text per read | 3000 | Characters one page read returns. |

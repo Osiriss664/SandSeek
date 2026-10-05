@@ -294,12 +294,12 @@ import TUFFAppServer
         #expect(ResearchRunSettings(model: "m", maxTokensLimit: 4_096).maxTokens == 4_096)
 
         let wild = ResearchRunSettings(
-            model: "m", maxSteps: 99, pageCharacters: 10, contextCharacters: 5,
+            model: "m", maxSteps: 500, pageCharacters: 10, contextCharacters: 5,
             searchResults: 50, toolCallsPerTurn: 0, minimumPages: 9,
             autoOpenPages: false, nudges: false, reviseUnreadCitations: false,
             stepTimeoutMinutes: 500)
         let options = wild.options
-        #expect(options.maxSteps == 32)
+        #expect(options.maxSteps == 100)
         #expect(options.pageSliceCharacters == 500)
         #expect(options.contextBudgetCharacters == 2_000)
         #expect(options.searchResults == 10)

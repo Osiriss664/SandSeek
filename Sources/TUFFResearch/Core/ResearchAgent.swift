@@ -33,7 +33,7 @@ public struct ResearchOptions: Equatable, Sendable {
     /// The ranges the command line and the app accept. Limits that protect
     /// the Mac (the sandbox, its firewall, fetch sizes and the sandbox's own
     /// timeouts) are not options at all.
-    public static let maxStepsRange = 1...32
+    public static let maxStepsRange = 1...100
     public static let toolCallsRange = 1...8
     public static let searchResultsRange = 1...10
     public static let minimumPagesRange = 1...6
