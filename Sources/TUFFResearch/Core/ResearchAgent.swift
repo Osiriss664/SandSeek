@@ -31,8 +31,8 @@ public struct ResearchOptions: Equatable, Sendable {
     public var currentDate: String = ResearchOptions.today()
 
     /// The ranges the command line and the app accept. Limits that protect
-    /// the Mac (the sandbox, its firewall, fetch sizes and timeouts) are not
-    /// options at all.
+    /// the Mac (the sandbox, its firewall, fetch sizes and the sandbox's own
+    /// timeouts) are not options at all.
     public static let maxStepsRange = 1...32
     public static let toolCallsRange = 1...8
     public static let searchResultsRange = 1...10
@@ -167,7 +167,8 @@ public enum ResearchEvent: Equatable, Sendable {
     case askingToSearchMore
     /// The model read no page (it answered from search previews again after
     /// it was asked to read, or kept repeating searches it already ran), or
-    /// the step budget ran out with fewer than three pages read. The loop
+    /// the step budget ran out with fewer pages read than the run asks for
+    /// (three by default). The loop
     /// opens top search results itself.
     case openingTopResults
     /// The model ran a search it already ran, and was told so instead.

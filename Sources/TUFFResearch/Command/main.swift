@@ -31,8 +31,12 @@ if let path = arguments.outputPath, FileManager.default.fileExists(atPath: path)
     exit(2)
 }
 
+// The step timeout is for the model. Sandbox calls keep the default, which
+// is far above the sandbox's own limits, so a short step timeout cannot cut
+// off a slow page fetch.
 let transport = URLSessionResearchTransport(
     timeout: TimeInterval(arguments.stepTimeoutMinutes * 60))
+let sandboxTransport = URLSessionResearchTransport()
 let quiet = arguments.quiet
 let showThinking = arguments.showThinking
 let agent = ResearchAgent(
@@ -42,7 +46,7 @@ let agent = ResearchAgent(
         maxTokens: arguments.maxTokens,
         enableThinking: arguments.enableThinking,
         transport: transport),
-    sandbox: ResearchSandboxClient(baseURL: arguments.sandboxURL, transport: transport),
+    sandbox: ResearchSandboxClient(baseURL: arguments.sandboxURL, transport: sandboxTransport),
     options: arguments.options,
     onEvent: { event in
         guard !quiet else { return }

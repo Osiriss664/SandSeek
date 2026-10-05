@@ -1480,7 +1480,9 @@ struct ResearchArgumentsTests {
 
     @Test func researchSettingsAreParsed() throws {
         let defaults = try ResearchArguments.parse(["q"])
-        #expect(defaults.options == ResearchOptions())
+        var expected = ResearchOptions()
+        expected.currentDate = defaults.options.currentDate
+        #expect(defaults.options == expected)
         #expect(defaults.stepTimeoutMinutes == 30)
         let parsed = try ResearchArguments.parse([
             "q", "--search-results", "8", "--tool-calls", "2", "--min-pages", "5",

@@ -152,8 +152,11 @@ public final class ResearchRunController {
         phase = .running
 
         let options = settings.options
+        // The step timeout is for the model; sandbox calls keep the default,
+        // far above the sandbox's own limits.
         let transport = self.transport
             ?? URLSessionResearchTransport(timeout: settings.stepTimeout)
+        let sandboxTransport = self.transport ?? URLSessionResearchTransport()
         let (events, continuation) = AsyncStream<ResearchEvent>.makeStream()
         let agent = ResearchAgent(
             chat: ResearchChatClient(
@@ -162,7 +165,7 @@ public final class ResearchRunController {
                 maxTokens: settings.maxTokens,
                 enableThinking: settings.enableThinking,
                 transport: transport),
-            sandbox: ResearchSandboxClient(baseURL: sandboxURL, transport: transport),
+            sandbox: ResearchSandboxClient(baseURL: sandboxURL, transport: sandboxTransport),
             options: options,
             onEvent: { continuation.yield($0) })
 

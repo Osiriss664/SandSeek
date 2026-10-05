@@ -32,7 +32,7 @@ launches; **Restore Defaults** resets them.
 | Command line | App | Default | What it does |
 | --- | --- | --- | --- |
 | `--max-steps <1...32>` | Steps | 8 | Search and read rounds before the model must answer. |
-| `--thinking on\|off` | Thinking | model's own | Reasoning on or off. Show thinking (`--show-thinking`) turns it on unless it is off. |
+| `--thinking on\|off` | Thinking | model's own | Reasoning on or off. Show thinking (`--show-thinking`) turns it on unless it is off; in the app, Show thinking is on by default. |
 | `--max-tokens <64...32768>` | Token limit per step | 2048, or 8192 with reasoning | Tokens the model may write per step. |
 | `--page-chars <500...20000>` | Page text per read | 3000 | Characters one page read returns. |
 | `--context-chars <2000...1000000>` | Prompt budget | from the model | How long the conversation may grow before older results are shortened. |
@@ -131,7 +131,7 @@ it needs, run two to four different searches (short keywords, synonyms, the
 official source, the newest state, English as well as the question's
 language; quotation marks only for exact phrases, and names of
 organisations, people and places the results mention), read at least three
-independent pages, compare their dates and claims, check every item against
+independent pages (`--min-pages`), compare their dates and claims, check every item against
 each condition in the question (for example "non-violent") and leave out or
 mark as excluded the ones that break it, then answer in the question's
 language with a short answer first, the details with source numbers, and
@@ -326,7 +326,7 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
 - A model that answers from memory without searching is asked once to search,
   and one that answers from search previews alone is asked once to open
   pages. If it answers from previews again (Gemma 4 26B did in testing), the
-  research opens three of the top search results itself, the first hit of
+  research opens three (`--min-pages`) of the top search results itself, the first hit of
   every search before any second hit, so other searches make up for one that
   found little. It tries up to six links, so a few broken ones cannot stop it,
   and gives the pages to the model to answer from, sharing half of the prompt
@@ -334,7 +334,7 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
   already ran (Qwen did in a long run): after two refused repeats with no page
   read, the research opens the top results for it. A refused repeat shows as
   "repeated search refused" in the progress. That model is then not asked to
-  look wider (below). When the step budget runs out with fewer than three
+  look wider (below). When the step budget runs out with fewer than three (`--min-pages`)
   pages read, the research opens more of the top results (ones not read yet)
   and hands them over with the request for the final answer. These top-up
   pages share half of the prompt budget, and they are skipped when an

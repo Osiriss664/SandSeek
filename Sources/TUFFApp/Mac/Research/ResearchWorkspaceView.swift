@@ -220,6 +220,7 @@ struct ResearchWorkspaceView: View {
         let defaults = ResearchOptions()
         maxSteps = defaults.maxSteps
         pageCharacters = defaults.pageSliceCharacters
+        showThinking = true
         thinking = "auto"
         maxTokens = 0
         contextCharacters = 0

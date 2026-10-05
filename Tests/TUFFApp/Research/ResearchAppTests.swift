@@ -279,7 +279,9 @@ import TUFFAppServer
 
     @Test func settingsMatchTheCommandLineDefaultsAndRanges() {
         let defaults = ResearchRunSettings(model: "m", showThinking: false)
-        #expect(defaults.options == ResearchOptions())
+        var expected = ResearchOptions()
+        expected.currentDate = defaults.options.currentDate
+        #expect(defaults.options == expected)
         #expect(defaults.enableThinking == nil)
         #expect(defaults.stepTimeout == 1_800)
 
