@@ -2,6 +2,8 @@ import Foundation
 import Observation
 import TUFFResearchCore
 
+/// The same settings as the `tuff research` options, with the same
+/// defaults and ranges (`ResearchOptions`).
 public struct ResearchRunSettings: Equatable, Sendable {
     public var model: String
     /// Turns reasoning on and shows it in the progress list, as
@@ -9,21 +11,90 @@ public struct ResearchRunSettings: Equatable, Sendable {
     public var showThinking: Bool
     public var maxSteps: Int
     public var pageCharacters: Int
+    /// Reasoning on or off, as `--thinking`; nil leaves it to Show thinking
+    /// and otherwise to the model.
+    public var thinking: Bool?
+    /// Completion tokens per turn, as `--max-tokens`; nil picks by reasoning.
+    public var maxTokensLimit: Int?
+    /// Fixed prompt budget, as `--context-chars`; nil follows the model.
+    public var contextCharacters: Int?
+    public var searchResults: Int
+    public var toolCallsPerTurn: Int
+    public var minimumPages: Int
+    public var autoOpenPages: Bool
+    public var nudges: Bool
+    public var reviseUnreadCitations: Bool
+    public var stepTimeoutMinutes: Int
 
     public init(model: String,
                 showThinking: Bool = true,
                 maxSteps: Int = 8,
-                pageCharacters: Int = 3_000) {
+                pageCharacters: Int = 3_000,
+                thinking: Bool? = nil,
+                maxTokensLimit: Int? = nil,
+                contextCharacters: Int? = nil,
+                searchResults: Int = ResearchOptions().searchResults,
+                toolCallsPerTurn: Int = ResearchOptions().maxToolCallsPerTurn,
+                minimumPages: Int = ResearchOptions().minimumPagesRead,
+                autoOpenPages: Bool = true,
+                nudges: Bool = true,
+                reviseUnreadCitations: Bool = true,
+                stepTimeoutMinutes: Int = ResearchOptions.defaultStepTimeoutMinutes) {
         self.model = model
         self.showThinking = showThinking
         self.maxSteps = maxSteps
         self.pageCharacters = pageCharacters
+        self.thinking = thinking
+        self.maxTokensLimit = maxTokensLimit
+        self.contextCharacters = contextCharacters
+        self.searchResults = searchResults
+        self.toolCallsPerTurn = toolCallsPerTurn
+        self.minimumPages = minimumPages
+        self.autoOpenPages = autoOpenPages
+        self.nudges = nudges
+        self.reviseUnreadCitations = reviseUnreadCitations
+        self.stepTimeoutMinutes = stepTimeoutMinutes
     }
+
+    /// Reasoning as sent to the server: Show thinking turns it on unless it
+    /// was turned off, as `--show-thinking` does with `--thinking`.
+    var enableThinking: Bool? { thinking ?? (showThinking ? true : nil) }
 
     /// Reasoning shares the token limit with the answer and tool calls.
     /// Larger models such as Gemma 4 26B can think for more than 4,096
     /// tokens on a long research turn, which cut the turn off with no answer.
-    var maxTokens: Int { showThinking ? 8_192 : 2_048 }
+    var maxTokens: Int {
+        let limit = maxTokensLimit ?? (enableThinking == true ? 8_192 : 2_048)
+        return limit.clamped(to: ResearchOptions.maxTokensRange)
+    }
+
+    /// The loop options, each clamped to the range the command line accepts.
+    var options: ResearchOptions {
+        var options = ResearchOptions()
+        options.maxSteps = maxSteps.clamped(to: ResearchOptions.maxStepsRange)
+        options.pageSliceCharacters = pageCharacters.clamped(
+            to: ResearchOptions.pageCharactersRange)
+        options.contextBudgetCharacters = contextCharacters?.clamped(
+            to: ResearchOptions.contextCharactersRange)
+        options.searchResults = searchResults.clamped(to: ResearchOptions.searchResultsRange)
+        options.maxToolCallsPerTurn = toolCallsPerTurn.clamped(
+            to: ResearchOptions.toolCallsRange)
+        options.minimumPagesRead = minimumPages.clamped(to: ResearchOptions.minimumPagesRange)
+        options.autoOpenPages = autoOpenPages
+        options.nudges = nudges
+        options.reviseUnreadCitations = reviseUnreadCitations
+        return options
+    }
+
+    var stepTimeout: TimeInterval {
+        TimeInterval(stepTimeoutMinutes.clamped(to: ResearchOptions.stepTimeoutMinutesRange) * 60)
+    }
+}
+
+extension Comparable {
+    fileprivate func clamped(to range: ClosedRange<Self>) -> Self {
+        min(max(self, range.lowerBound), range.upperBound)
+    }
 }
 
 /// Runs one research question at a time with the same loop as `tuff
@@ -48,13 +119,14 @@ public final class ResearchRunController {
     public private(set) var saveError: String?
 
     private let store: ResearchReportStore
-    private let transport: any ResearchHTTPTransport
+    /// Nil makes a transport per run with that run's step timeout.
+    private let transport: (any ResearchHTTPTransport)?
     private let now: @Sendable () -> Date
     private var task: Task<Void, Never>?
     private var runID = UUID()
 
     public init(store: ResearchReportStore,
-                transport: any ResearchHTTPTransport = URLSessionResearchTransport(),
+                transport: (any ResearchHTTPTransport)? = nil,
                 now: @escaping @Sendable () -> Date = { Date() }) {
         self.store = store
         self.transport = transport
@@ -79,22 +151,22 @@ public final class ResearchRunController {
         startedAt = started
         phase = .running
 
-        var options = ResearchOptions()
-        options.maxSteps = settings.maxSteps
-        options.pageSliceCharacters = settings.pageCharacters
+        let options = settings.options
+        let transport = self.transport
+            ?? URLSessionResearchTransport(timeout: settings.stepTimeout)
         let (events, continuation) = AsyncStream<ResearchEvent>.makeStream()
         let agent = ResearchAgent(
             chat: ResearchChatClient(
                 serverURL: serverURL,
                 model: settings.model,
                 maxTokens: settings.maxTokens,
-                enableThinking: settings.showThinking ? true : nil,
+                enableThinking: settings.enableThinking,
                 transport: transport),
             sandbox: ResearchSandboxClient(baseURL: sandboxURL, transport: transport),
             options: options,
             onEvent: { continuation.yield($0) })
 
-        let maxSteps = settings.maxSteps
+        let maxSteps = options.maxSteps
         let listener = Task { [weak self] in
             for await event in events {
                 self?.record(event, runID: id, started: started, maxSteps: maxSteps)

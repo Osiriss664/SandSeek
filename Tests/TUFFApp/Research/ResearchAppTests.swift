@@ -276,6 +276,36 @@ import TUFFAppServer
         #expect(ResearchRunSettings(model: "m", showThinking: true).maxTokens == 8_192)
         #expect(ResearchRunSettings(model: "m", showThinking: false).maxTokens == 2_048)
     }
+
+    @Test func settingsMatchTheCommandLineDefaultsAndRanges() {
+        let defaults = ResearchRunSettings(model: "m", showThinking: false)
+        #expect(defaults.options == ResearchOptions())
+        #expect(defaults.enableThinking == nil)
+        #expect(defaults.stepTimeout == 1_800)
+
+        // Thinking off wins over Show thinking, as with --thinking off.
+        let off = ResearchRunSettings(model: "m", showThinking: true, thinking: false)
+        #expect(off.enableThinking == false)
+        #expect(off.maxTokens == 2_048)
+        #expect(ResearchRunSettings(model: "m", showThinking: false, thinking: true)
+            .maxTokens == 8_192)
+        #expect(ResearchRunSettings(model: "m", maxTokensLimit: 4_096).maxTokens == 4_096)
+
+        let wild = ResearchRunSettings(
+            model: "m", maxSteps: 99, pageCharacters: 10, contextCharacters: 5,
+            searchResults: 50, toolCallsPerTurn: 0, minimumPages: 9,
+            autoOpenPages: false, nudges: false, reviseUnreadCitations: false,
+            stepTimeoutMinutes: 500)
+        let options = wild.options
+        #expect(options.maxSteps == 32)
+        #expect(options.pageSliceCharacters == 500)
+        #expect(options.contextBudgetCharacters == 2_000)
+        #expect(options.searchResults == 10)
+        #expect(options.maxToolCallsPerTurn == 1)
+        #expect(options.minimumPagesRead == 6)
+        #expect(!options.autoOpenPages && !options.nudges && !options.reviseUnreadCitations)
+        #expect(wild.stepTimeout == 3_600)
+    }
 }
 
 @Suite @MainActor struct ResearchSandboxControllerTests {

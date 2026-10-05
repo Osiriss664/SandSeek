@@ -31,7 +31,8 @@ if let path = arguments.outputPath, FileManager.default.fileExists(atPath: path)
     exit(2)
 }
 
-let transport = URLSessionResearchTransport()
+let transport = URLSessionResearchTransport(
+    timeout: TimeInterval(arguments.stepTimeoutMinutes * 60))
 let quiet = arguments.quiet
 let showThinking = arguments.showThinking
 let agent = ResearchAgent(

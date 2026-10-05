@@ -23,6 +23,31 @@ replies; streams leave it out.
 before it has to answer (default 8). Run `tuff research --help` for every
 option.
 
+## Settings
+
+The same settings exist on the command line and in the app (Research screen,
+**More Options**), with the same defaults. The app keeps them between
+launches; **Restore Defaults** resets them.
+
+| Command line | App | Default | What it does |
+| --- | --- | --- | --- |
+| `--max-steps <1...32>` | Steps | 8 | Search and read rounds before the model must answer. |
+| `--thinking on\|off` | Thinking | model's own | Reasoning on or off. Show thinking (`--show-thinking`) turns it on unless it is off. |
+| `--max-tokens <64...32768>` | Token limit per step | 2048, or 8192 with reasoning | Tokens the model may write per step. |
+| `--page-chars <500...20000>` | Page text per read | 3000 | Characters one page read returns. |
+| `--context-chars <2000...1000000>` | Prompt budget | from the model | How long the conversation may grow before older results are shortened. |
+| `--search-results <1...10>` | Results per search | 5 | Results each search returns. |
+| `--tool-calls <1...8>` | Tool calls per step | 4 | Searches and page reads the model may ask for in one step. |
+| `--min-pages <1...6>` | Pages to read | 3 | Pages the model is asked to read; the research opens top results to reach it. |
+| `--auto-open on\|off` | Open top results when too few pages are read | on | The research opens top results itself (see [Limits](#limits)). |
+| `--nudges on\|off` | Ask the model to search, read and look wider | on | The requests to search first, open pages and look wider (see [Limits](#limits)). |
+| `--rewrite on\|off` | Rewrite answers that cite unread pages | on | One rewrite when the answer cites pages that were never read. |
+| `--step-timeout <1...60>` | Step time limit | 30 minutes | A step that takes longer is asked again without reasoning, then given up. |
+
+The model is chosen with `--model` or the app's model menu. Limits that
+protect the Mac are not settings: the sandbox, its firewall, the loopback-only
+addresses, the fetch size and time limits and the report rules stay fixed.
+
 ## In the TUFF app
 
 The **Research** screen (Command-2) does the same without Terminal. **Start

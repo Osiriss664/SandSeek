@@ -12,6 +12,8 @@ public struct ResearchArguments: Equatable, Sendable {
     public var enableThinking: Bool?
     public var showThinking = false
     public var quiet = false
+    /// Minutes one model step may take before it is retried without reasoning.
+    public var stepTimeoutMinutes = ResearchOptions.defaultStepTimeoutMinutes
     public var showHelp = false
     public var options = ResearchOptions()
 
@@ -29,12 +31,28 @@ public struct ResearchArguments: Equatable, Sendable {
       --server <url>           TUFF server (default: http://127.0.0.1:8080).
       --sandbox <url>          Web sandbox (default: http://127.0.0.1:9000).
       --max-steps <1...32>     Model turns that may use tools (default 8).
-      --max-tokens <n>         Completion tokens per model turn (default 2048,
-                               or 8192 with reasoning on).
+      --max-tokens <n>         Completion tokens per model turn, 64...32768
+                               (default 2048, or 8192 with reasoning on).
       --page-chars <n>         Page text per read, 500...20000 (default 3000).
-      --context-chars <n>      Prompt budget before old results are shortened
-                               (default: from the model's context window, or
-                               16000 when the server does not list it).
+      --context-chars <n>      Prompt budget before old results are shortened,
+                               2000...1000000 (default: from the model's
+                               context window, or 16000 when not listed).
+      --search-results <1...10>
+                               Results per search (default 5).
+      --tool-calls <1...8>     Tool calls the model may make per turn
+                               (default 4).
+      --min-pages <1...6>      Pages the research should read; the prompt asks
+                               for this many and the loop opens top results
+                               to reach it (default 3).
+      --auto-open on|off       Let the loop open top results itself when the
+                               model reads too few pages (default on).
+      --nudges on|off          Ask the model once to search, to open pages, or
+                               to look wider when it answers too early
+                               (default on).
+      --rewrite on|off         Ask once for a rewrite when the answer cites
+                               pages that were never read (default on).
+      --step-timeout <1...60>  Minutes one model step may take before it is
+                               retried without reasoning (default 30).
       --thinking on|off        Gemma and Qwen reasoning (default: model's own).
       --show-thinking          Turn reasoning on and print it with the
                                progress. It is not added to the report.
@@ -64,6 +82,13 @@ public struct ResearchArguments: Equatable, Sendable {
             }
             return number
         }
+        func onOff(_ flag: String) throws -> Bool {
+            switch try value(flag) {
+            case "on": return true
+            case "off": return false
+            default: throw ResearchArgumentError("\(flag) must be on or off")
+            }
+        }
         while index < arguments.count {
             let argument = arguments[index]
             switch argument {
@@ -76,20 +101,36 @@ public struct ResearchArguments: Equatable, Sendable {
             case "--sandbox":
                 parsed.sandboxURL = try ResearchEndpoint.loopbackURL(try value(argument), flag: argument)
             case "--max-steps":
-                parsed.options.maxSteps = try integer(argument, 1...32)
+                parsed.options.maxSteps = try integer(argument, ResearchOptions.maxStepsRange)
             case "--max-tokens":
-                parsed.maxTokens = try integer(argument, 64...32_768)
+                parsed.maxTokens = try integer(argument, ResearchOptions.maxTokensRange)
                 maxTokensGiven = true
             case "--page-chars":
-                parsed.options.pageSliceCharacters = try integer(argument, 500...20_000)
+                parsed.options.pageSliceCharacters = try integer(
+                    argument, ResearchOptions.pageCharactersRange)
             case "--context-chars":
-                parsed.options.contextBudgetCharacters = try integer(argument, 2_000...1_000_000)
+                parsed.options.contextBudgetCharacters = try integer(
+                    argument, ResearchOptions.contextCharactersRange)
+            case "--search-results":
+                parsed.options.searchResults = try integer(
+                    argument, ResearchOptions.searchResultsRange)
+            case "--tool-calls":
+                parsed.options.maxToolCallsPerTurn = try integer(
+                    argument, ResearchOptions.toolCallsRange)
+            case "--min-pages":
+                parsed.options.minimumPagesRead = try integer(
+                    argument, ResearchOptions.minimumPagesRange)
+            case "--auto-open":
+                parsed.options.autoOpenPages = try onOff(argument)
+            case "--nudges":
+                parsed.options.nudges = try onOff(argument)
+            case "--rewrite":
+                parsed.options.reviseUnreadCitations = try onOff(argument)
+            case "--step-timeout":
+                parsed.stepTimeoutMinutes = try integer(
+                    argument, ResearchOptions.stepTimeoutMinutesRange)
             case "--thinking":
-                switch try value(argument) {
-                case "on": parsed.enableThinking = true
-                case "off": parsed.enableThinking = false
-                default: throw ResearchArgumentError("--thinking must be on or off")
-                }
+                parsed.enableThinking = try onOff(argument)
             case "--show-thinking":
                 parsed.showThinking = true
             case "--output":

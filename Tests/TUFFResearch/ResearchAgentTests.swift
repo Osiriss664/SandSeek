@@ -635,6 +635,117 @@ struct ResearchAgentTests {
         ])
     }
 
+    @Test func theModelIsAskedForTheConfiguredNumberOfPages() {
+        #expect(agent(FakeServices(modelReplies: [])).systemPrompt()
+            .contains("Read at least three independent sources before you answer."))
+        var options = ResearchOptions()
+        options.minimumPagesRead = 5
+        #expect(agent(FakeServices(modelReplies: []), options: options).systemPrompt()
+            .contains("Read at least five independent sources before you answer."))
+        options.minimumPagesRead = 1
+        #expect(agent(FakeServices(modelReplies: []), options: options).systemPrompt()
+            .contains("Read at least one source before you answer."))
+    }
+
+    @Test func safetyNetsCanBeTurnedOff() async throws {
+        // Without nudges, an answer from memory is taken as it is.
+        var quiet = ResearchOptions()
+        quiet.nudges = false
+        let memory = FakeServices(modelReplies: [FakeServices.answer("From memory.")])
+        let memoryLog = EventLog()
+        let fromMemory = try await agent(memory, options: quiet, events: memoryLog)
+            .run(question: "q")
+        #expect(fromMemory.answer == "From memory.")
+        #expect(!memoryLog.events.contains(.askingToSearchFirst))
+
+        // Without nudges, a snippet answer gets the top results at once.
+        let snippets = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"x"}"#)]),
+            FakeServices.answer("Snippets."),
+            FakeServices.answer("From the page [1]."),
+        ])
+        let snippetLog = EventLog()
+        let opened = try await agent(snippets, options: quiet, events: snippetLog)
+            .run(question: "q")
+        #expect(opened.answer == "From the page [1].")
+        #expect(snippetLog.events.contains(.openingTopResults))
+        #expect(!snippetLog.events.contains(.askingToReadPages))
+        #expect(!snippetLog.events.contains(.askingToSearchMore))
+
+        // Without auto-open, the loop never opens pages itself, also not at
+        // the end of the budget.
+        var manual = ResearchOptions()
+        manual.autoOpenPages = false
+        let stubborn = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"x"}"#)]),
+            FakeServices.answer("Snippets."),
+            FakeServices.answer("Still snippets."),
+        ])
+        let stubbornLog = EventLog()
+        let unopened = try await agent(stubborn, options: manual, events: stubbornLog)
+            .run(question: "q")
+        #expect(unopened.answer == "Still snippets.")
+        #expect(unopened.noPagesRead)
+        #expect(stubbornLog.events.contains(.askingToReadPages))
+        #expect(!stubbornLog.events.contains(.openingTopResults))
+        #expect(stubborn.requests.filter { $0.url.path == "/v1/fetch" }.isEmpty)
+        manual.maxSteps = 2
+        let spent = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"x"}"#)]),
+            FakeServices.calls([("b", "web_search", #"{"query":"y"}"#)]),
+            FakeServices.answer("Final."),
+        ])
+        let spentReport = try await agent(spent, options: manual).run(question: "q")
+        #expect(spentReport.answer == "Final.")
+        #expect(spentReport.budgetExhausted)
+        #expect(spent.requests.filter { $0.url.path == "/v1/fetch" }.isEmpty)
+        #expect(messages(try #require(spent.modelRequests.last)).last?["content"]
+            == .string(ResearchAgent.budgetUsedUpRequest))
+
+        // Without the rewrite, unread citations stay and are flagged.
+        var asIs = ResearchOptions()
+        asIs.reviseUnreadCitations = false
+        let cited = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"apple container"}"#)]),
+            FakeServices.calls([("b", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
+            FakeServices.answer("Draft [1]."),
+            FakeServices.answer("VMs [1], and Linux 6 [3]."),
+        ])
+        let citedLog = EventLog()
+        let flagged = try await agent(cited, options: asIs, events: citedLog).run(question: "q")
+        #expect(flagged.answer == "VMs [1], and Linux 6 [3].")
+        #expect(flagged.unknownCitations == [3])
+        #expect(!citedLog.events.contains(.revisingUnreadCitations))
+        #expect(cited.modelRequests.count == 4)
+    }
+
+    @Test func theLoopOpensTheConfiguredNumberOfPages() async throws {
+        var options = ResearchOptions()
+        options.minimumPagesRead = 2
+        options.searchResults = 3
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"one"}"#)]),
+            FakeServices.answer("Snippets."),
+            FakeServices.answer("Still snippets."),
+            FakeServices.answer("From the pages [1][2]."),
+        ]) { path, body in
+            guard path == "/v1/search" else { return FakeServices.webPages(path, body) }
+            let count = body?["max_results"]?.intValue ?? 0
+            return FakeServices.json(200, .object(["query": body?["query"] ?? .null,
+                "results": .array((1...max(1, count)).map { rank in
+                    .object([
+                        "title": .string("Hit \(rank)"),
+                        "url": .string("https://hits.example/\(rank)"),
+                        "snippet": .string("A snippet."),
+                    ])
+                })]))
+        }
+        let report = try await agent(services, options: options).run(question: "q")
+        #expect(report.sources.map(\.url) == ["https://hits.example/1", "https://hits.example/2"])
+        let search = services.requests.first { $0.url.path == "/v1/search" }
+        #expect(search?.body?["max_results"] == .integer(3))
+    }
+
     @Test func theModelIsToldThatTodaysPagesAreReal() {
         let prompt = agent(FakeServices(modelReplies: [])).systemPrompt()
         #expect(prompt.contains("Pages dated up to today are real, current pages"))
@@ -1367,9 +1478,37 @@ struct ResearchArgumentsTests {
         }
     }
 
+    @Test func researchSettingsAreParsed() throws {
+        let defaults = try ResearchArguments.parse(["q"])
+        #expect(defaults.options == ResearchOptions())
+        #expect(defaults.stepTimeoutMinutes == 30)
+        let parsed = try ResearchArguments.parse([
+            "q", "--search-results", "8", "--tool-calls", "2", "--min-pages", "5",
+            "--auto-open", "off", "--nudges", "off", "--rewrite", "off",
+            "--step-timeout", "10", "--context-chars", "32000", "--max-tokens", "4096",
+        ])
+        #expect(parsed.options.searchResults == 8)
+        #expect(parsed.options.maxToolCallsPerTurn == 2)
+        #expect(parsed.options.minimumPagesRead == 5)
+        #expect(!parsed.options.autoOpenPages)
+        #expect(!parsed.options.nudges)
+        #expect(!parsed.options.reviseUnreadCitations)
+        #expect(parsed.stepTimeoutMinutes == 10)
+        #expect(parsed.options.contextBudgetCharacters == 32_000)
+        #expect(parsed.maxTokens == 4_096)
+        for flag in ["--search-results", "--tool-calls", "--min-pages", "--auto-open",
+                     "--nudges", "--rewrite", "--step-timeout"] {
+            #expect(ResearchArguments.usage.contains(flag), "\(flag)")
+        }
+    }
+
     @Test func badInputIsRefused() {
         for arguments in [[String](), ["--max-steps", "0", "q"], ["--thinking", "maybe", "q"],
-                          ["--frobnicate", "q"], ["q", "--model"]] {
+                          ["--frobnicate", "q"], ["q", "--model"],
+                          ["q", "--search-results", "11"], ["q", "--tool-calls", "0"],
+                          ["q", "--min-pages", "7"], ["q", "--step-timeout", "61"],
+                          ["q", "--auto-open", "yes"], ["q", "--nudges"],
+                          ["q", "--rewrite", "maybe"]] {
             #expect(throws: (any Error).self) { _ = try ResearchArguments.parse(arguments) }
         }
         #expect((try? ResearchArguments.parse(["--help"]))?.showHelp == true)

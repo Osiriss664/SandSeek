@@ -5,7 +5,20 @@ public struct ResearchOptions: Equatable, Sendable {
     /// asks for the answer if the budget runs out.
     public var maxSteps: Int = 8
     public var maxToolCallsPerTurn: Int = 4
+    /// Results each web_search returns.
     public var searchResults: Int = 5
+    /// Pages a finished run should rest on. The prompt asks for this many,
+    /// and the loop's own page opening fills up to it.
+    public var minimumPagesRead: Int = 3
+    /// Whether the loop opens top search results itself when the model reads
+    /// too few pages.
+    public var autoOpenPages = true
+    /// Whether the model is asked once to search, to open pages, or to look
+    /// wider when it answers too early.
+    public var nudges = true
+    /// Whether an answer citing pages the research never read is sent back
+    /// once to be rewritten.
+    public var reviseUnreadCitations = true
     /// Characters of page text one `open_page` call returns.
     public var pageSliceCharacters: Int = 3_000
     /// Prompt budget in characters before older results are shortened. Nil
@@ -16,6 +29,21 @@ public struct ResearchOptions: Equatable, Sendable {
     /// The budget when the server does not say how large the context is.
     public static let fallbackBudgetCharacters = 16_000
     public var currentDate: String = ResearchOptions.today()
+
+    /// The ranges the command line and the app accept. Limits that protect
+    /// the Mac (the sandbox, its firewall, fetch sizes and timeouts) are not
+    /// options at all.
+    public static let maxStepsRange = 1...32
+    public static let toolCallsRange = 1...8
+    public static let searchResultsRange = 1...10
+    public static let minimumPagesRange = 1...6
+    public static let pageCharactersRange = 500...20_000
+    public static let contextCharactersRange = 2_000...1_000_000
+    public static let maxTokensRange = 64...32_768
+    /// Minutes one model step may take before it is retried without
+    /// reasoning, and then given up.
+    public static let stepTimeoutMinutesRange = 1...60
+    public static let defaultStepTimeoutMinutes = 30
 
     public init() {}
 
@@ -247,7 +275,7 @@ public struct ResearchAgent: Sendable {
         rather than a small variation of the same query. Search for the \
         names of organisations, people and places the results mention.
         3. Read: open the most relevant pages with open_page. Read at least \
-        three independent sources before you answer. Snippets are not sources.
+        \(Self.pagesWord(options.minimumPagesRead)) before you answer. Snippets are not sources.
         4. Check: compare the sources. Note the date on each page and prefer \
         the newest for anything that changes over time. If sources disagree \
         or the results are poor, search again with new words. Check every \
@@ -298,15 +326,16 @@ public struct ResearchAgent: Sendable {
                 var request: String?
                 if step < options.maxSteps {
                     if state.sources.isEmpty {
-                        if !calledTools, !askedToSearch {
+                        if !calledTools, !askedToSearch, options.nudges {
                             askedToSearch = true
                             request = Self.searchFirstRequest
                             onEvent(.askingToSearchFirst)
-                        } else if state.searched, !askedToRead {
+                        } else if state.searched, !askedToRead, options.nudges {
                             askedToRead = true
                             request = Self.readPagesRequest
                             onEvent(.askingToReadPages)
-                        } else if askedToRead, !openedTopResults {
+                        } else if state.searched, askedToRead || !options.nudges,
+                                  !openedTopResults, options.autoOpenPages {
                             // Some models (Gemma 4 26B) answer from previews
                             // again. Open the top results for them instead.
                             openedTopResults = true
@@ -317,7 +346,7 @@ public struct ResearchAgent: Sendable {
                                     + pages.joined(separator: "\n\n")
                             }
                         }
-                    } else if !askedToSearchMore, !openedTopResults,
+                    } else if options.nudges, !askedToSearchMore, !openedTopResults,
                               state.queries.count < 2 || state.sources.count < 2,
                               // A turn that ran into the token limit is not sent
                               // back for more text; it needs an answer.
@@ -372,7 +401,7 @@ public struct ResearchAgent: Sendable {
             // long runs) never answers without tools, so the check above
             // never opens pages for it. After a few refused repeats with
             // nothing read, open the top results here as well.
-            if state.sources.isEmpty, state.searched, !openedTopResults,
+            if options.autoOpenPages, state.sources.isEmpty, state.searched, !openedTopResults,
                state.refusedRepeats >= Self.repeatsBeforeOpening,
                step < options.maxSteps {
                 openedTopResults = true
@@ -396,10 +425,10 @@ public struct ResearchAgent: Sendable {
         // kept from before looking wider is left alone: if the final answer
         // fails, that draft is returned and must match the sources.
         var finalRequest = Self.budgetUsedUpRequest
-        let missing = Self.minimumPagesRead - state.sources.count
+        let missing = options.minimumPagesRead - state.sources.count
         let perPage = min(options.pageSliceCharacters,
                           promptBudget(state) / 2 / max(1, missing))
-        if state.searched, missing > 0, answerBeforeSearchingMore == nil,
+        if options.autoOpenPages, state.searched, missing > 0, answerBeforeSearchingMore == nil,
            perPage >= Self.minimumTopUpCharacters,
            state.topResults().contains(where: { url in
                !state.sources.contains { $0.url == url } }) {
@@ -468,7 +497,9 @@ public struct ResearchAgent: Sendable {
                                        state: inout State) async throws -> (String, Bool) {
         let unknown = state.report(answer: answer.0, turns: 0, exhausted: false)
             .unknownCitations
-        guard !unknown.isEmpty, !state.sources.isEmpty else { return answer }
+        guard options.reviseUnreadCitations, !unknown.isEmpty, !state.sources.isEmpty else {
+            return answer
+        }
         onEvent(.revisingUnreadCitations)
         state.messages.append(.object([
             "role": .string("assistant"),
@@ -565,8 +596,9 @@ public struct ResearchAgent: Sendable {
     /// up for by the others. Returns the pages read. Without a page size,
     /// the pages share half the prompt budget, as they arrive in one message.
     private func openTopResults(state: inout State,
-                                wanted: Int = ResearchAgent.minimumPagesRead,
+                                wanted: Int? = nil,
                                 maxCharacters: Int? = nil) async -> [String] {
+        let wanted = wanted ?? options.minimumPagesRead
         let maxCharacters = maxCharacters ?? min(
             options.pageSliceCharacters,
             max(Self.minimumTopUpCharacters, promptBudget(state) / 2 / max(1, wanted)))
@@ -593,9 +625,12 @@ public struct ResearchAgent: Sendable {
     static let topUpNote = "Few pages had been read, so the research opened more of the top "
         + "search results for you. They follow below; use them like the pages you opened."
 
-    /// Pages a finished run should rest on. When the step budget runs out
-    /// with fewer read, the loop opens more of the top results itself.
-    static let minimumPagesRead = 3
+    /// "three independent sources", for the prompt.
+    static func pagesWord(_ count: Int) -> String {
+        let words = ["one", "two", "three", "four", "five", "six"]
+        let number = words.indices.contains(count - 1) ? words[count - 1] : "\(count)"
+        return count == 1 ? "one source" : "\(number) independent sources"
+    }
     /// A top-up page shorter than this is not worth the fetch.
     static let minimumTopUpCharacters = 500
 

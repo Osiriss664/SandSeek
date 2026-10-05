@@ -18,6 +18,17 @@ struct ResearchWorkspaceView: View {
     @AppStorage("ResearchShowThinking") private var showThinking = true
     @AppStorage("ResearchMaxSteps") private var maxSteps = ResearchOptions().maxSteps
     @AppStorage("ResearchPageCharacters") private var pageCharacters = 3_000
+    // The same options as `tuff research`; 0 and "auto" mean its default.
+    @AppStorage("ResearchThinking") private var thinking = "auto"
+    @AppStorage("ResearchMaxTokens") private var maxTokens = 0
+    @AppStorage("ResearchContextCharacters") private var contextCharacters = 0
+    @AppStorage("ResearchSearchResults") private var searchResults = ResearchOptions().searchResults
+    @AppStorage("ResearchToolCalls") private var toolCalls = ResearchOptions().maxToolCallsPerTurn
+    @AppStorage("ResearchMinimumPages") private var minimumPages = ResearchOptions().minimumPagesRead
+    @AppStorage("ResearchAutoOpenPages") private var autoOpenPages = true
+    @AppStorage("ResearchNudges") private var nudges = true
+    @AppStorage("ResearchRewrite") private var rewrite = true
+    @AppStorage("ResearchStepTimeout") private var stepTimeout = ResearchOptions.defaultStepTimeoutMinutes
     @State private var showsOptions = false
     @State private var showsProgress = true
 
@@ -88,7 +99,7 @@ struct ResearchWorkspaceView: View {
                 }
                 .fixedSize()
                 .disabled(research.server.models.isEmpty || research.run.isRunning)
-                Stepper(value: $maxSteps, in: 1...32) {
+                Stepper(value: $maxSteps, in: ResearchOptions.maxStepsRange) {
                     Text("Steps: \(maxSteps)").appFont(.body.monospacedDigit())
                 }
                 .fixedSize()
@@ -119,20 +130,106 @@ struct ResearchWorkspaceView: View {
                 }
             }
             if showsOptions {
-                HStack(spacing: 24) {
-                    Picker("Page text per read", selection: $pageCharacters) {
-                        ForEach([2_000, 3_000, 5_000, 8_000], id: \.self) { size in
-                            Text("\(size.formatted()) characters").tag(size)
-                        }
-                    }
-                    .fixedSize()
-                    Spacer()
-                }
-                .disabled(research.run.isRunning)
+                optionsGrid
+                    .disabled(research.run.isRunning)
             }
         }
         .padding(18)
         .background(cardBackground, in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    /// The `tuff research` options, under the same names. Limits that protect
+    /// the Mac (the sandbox, its firewall, fetch sizes and timeouts) are not
+    /// here: they are fixed.
+    private var optionsGrid: some View {
+        Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 10) {
+            GridRow {
+                Picker("Thinking", selection: $thinking) {
+                    Text("Model default").tag("auto")
+                    Text("On").tag("on")
+                    Text("Off").tag("off")
+                }
+                .fixedSize()
+                .help("Reasoning on or off, as --thinking. Show thinking turns it on unless it is Off here.")
+                Picker("Token limit per step", selection: $maxTokens) {
+                    Text("Automatic").tag(0)
+                    ForEach([2_048, 4_096, 8_192, 16_384], id: \.self) { size in
+                        Text(size.formatted()).tag(size)
+                    }
+                }
+                .fixedSize()
+                .help("Tokens the model may write per step, as --max-tokens. Automatic is 2,048, or 8,192 with reasoning on.")
+            }
+            GridRow {
+                Picker("Page text per read", selection: $pageCharacters) {
+                    ForEach([2_000, 3_000, 5_000, 8_000], id: \.self) { size in
+                        Text("\(size.formatted()) characters").tag(size)
+                    }
+                }
+                .fixedSize()
+                .help("As --page-chars.")
+                Picker("Prompt budget", selection: $contextCharacters) {
+                    Text("From the model").tag(0)
+                    ForEach([8_000, 16_000, 32_000, 64_000], id: \.self) { size in
+                        Text("\(size.formatted()) characters").tag(size)
+                    }
+                }
+                .fixedSize()
+                .help("How long the conversation may grow before older results are shortened, as --context-chars.")
+            }
+            GridRow {
+                Stepper(value: $searchResults, in: ResearchOptions.searchResultsRange) {
+                    Text("Results per search: \(searchResults)").appFont(.body.monospacedDigit())
+                }
+                .fixedSize()
+                .help("As --search-results.")
+                Stepper(value: $toolCalls, in: ResearchOptions.toolCallsRange) {
+                    Text("Tool calls per step: \(toolCalls)").appFont(.body.monospacedDigit())
+                }
+                .fixedSize()
+                .help("Searches and page reads the model may ask for in one step, as --tool-calls.")
+            }
+            GridRow {
+                Stepper(value: $minimumPages, in: ResearchOptions.minimumPagesRange) {
+                    Text("Pages to read: \(minimumPages)").appFont(.body.monospacedDigit())
+                }
+                .fixedSize()
+                .help("The model is asked to read this many pages, and the research opens top results to reach it, as --min-pages.")
+                Stepper(value: $stepTimeout, in: ResearchOptions.stepTimeoutMinutesRange) {
+                    Text("Step time limit: \(stepTimeout) min").appFont(.body.monospacedDigit())
+                }
+                .fixedSize()
+                .help("A step that takes longer is asked again without reasoning, as --step-timeout.")
+            }
+            GridRow {
+                Toggle("Open top results when too few pages are read", isOn: $autoOpenPages)
+                    .help("As --auto-open.")
+                Toggle("Ask the model to search, read and look wider", isOn: $nudges)
+                    .help("Asks once each when the model answers too early, as --nudges.")
+            }
+            GridRow {
+                Toggle("Rewrite answers that cite unread pages", isOn: $rewrite)
+                    .help("As --rewrite.")
+                Button("Restore Defaults", action: restoreDefaultOptions)
+                    .buttonStyle(.link)
+            }
+        }
+    }
+
+    private func restoreDefaultOptions() {
+        let defaults = ResearchOptions()
+        maxSteps = defaults.maxSteps
+        pageCharacters = defaults.pageSliceCharacters
+        thinking = "auto"
+        maxTokens = 0
+        contextCharacters = 0
+        searchResults = defaults.searchResults
+        toolCalls = defaults.maxToolCallsPerTurn
+        minimumPages = defaults.minimumPagesRead
+        autoOpenPages = defaults.autoOpenPages
+        nudges = defaults.nudges
+        rewrite = defaults.reviseUnreadCitations
+        stepTimeout = ResearchOptions.defaultStepTimeoutMinutes
     }
 
     private var canAsk: Bool {
@@ -146,8 +243,18 @@ struct ResearchWorkspaceView: View {
         let settings = ResearchRunSettings(
             model: selectedModel,
             showThinking: showThinking,
-            maxSteps: min(max(maxSteps, 1), 32),
-            pageCharacters: min(max(pageCharacters, 500), 20_000))
+            maxSteps: maxSteps,
+            pageCharacters: pageCharacters,
+            thinking: thinking == "on" ? true : thinking == "off" ? false : nil,
+            maxTokensLimit: maxTokens > 0 ? maxTokens : nil,
+            contextCharacters: contextCharacters > 0 ? contextCharacters : nil,
+            searchResults: searchResults,
+            toolCallsPerTurn: toolCalls,
+            minimumPages: minimumPages,
+            autoOpenPages: autoOpenPages,
+            nudges: nudges,
+            reviseUnreadCitations: rewrite,
+            stepTimeoutMinutes: stepTimeout)
         let question = question
         showsProgress = true
         Task { await research.ask(question, settings: settings) }
