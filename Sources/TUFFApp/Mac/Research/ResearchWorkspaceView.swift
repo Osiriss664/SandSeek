@@ -825,6 +825,11 @@ private struct ResearchReportView: View {
                     .appFont(.caption)
                     .foregroundStyle(.orange)
             }
+            if report.stoppedRepeatedSearches {
+                Text("The research stopped early because the model kept repeating searches it had already run, so this answer may be incomplete.")
+                    .appFont(.caption)
+                    .foregroundStyle(.orange)
+            }
             if report.sources.isEmpty
                 && !report.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Text("No web page was read for this answer, so it comes from the model's memory or search previews and has no sources to check.")

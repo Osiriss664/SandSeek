@@ -244,6 +244,9 @@ public final class ResearchRunController {
                    started: started)
         case .revisingUnreadCitations:
             append(.turn, "Answer cites pages it never read; asking for a rewrite", started: started)
+        case .stoppingRepeatedSearches:
+            append(.turn, "Only repeated searches; stopping and asking for the answer",
+                   started: started)
         }
     }
 

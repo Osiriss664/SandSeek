@@ -70,6 +70,9 @@ public struct ResearchReport: Equatable, Sendable {
     public let budgetExhausted: Bool
     /// True when the answer stopped at the model's token limit.
     public var answerCutOff: Bool = false
+    /// True when the research stopped early because the model kept
+    /// repeating searches it had already run, and the answer was forced.
+    public var stoppedRepeatedSearches: Bool = false
     /// The searches that reached the search engine, in order, without
     /// repeats, each on one line and shortened.
     public var searchQueries: [String] = []
@@ -108,6 +111,10 @@ public struct ResearchReport: Equatable, Sendable {
         }
         if budgetExhausted {
             text += "\n_The research step budget ran out; this answer may be incomplete._\n"
+        }
+        if stoppedRepeatedSearches {
+            text += "\n_The research stopped early because the model kept repeating searches "
+                + "it had already run; this answer may be incomplete._\n"
         }
         if noPagesRead {
             text += "\n_No web page was read for this answer, so it comes from the model's "
@@ -186,6 +193,9 @@ public enum ResearchEvent: Equatable, Sendable {
     /// The answer cited pages the research never read, and the model is
     /// asked once to rewrite it from the pages it did read.
     case revisingUnreadCitations
+    /// The model spent steps in a row only repeating searches it already
+    /// ran, so the research stops and asks for the answer now.
+    case stoppingRepeatedSearches
 }
 
 /// The research loop. The model can only search the web and read pages, and
@@ -322,6 +332,10 @@ public struct ResearchAgent: Sendable {
         // The answer given before the model was asked to look wider. It is
         // kept if the next answer comes back empty or cut off.
         var answerBeforeSearchingMore: String?
+        // Steps in a row whose every tool call was a refused repeat, and the
+        // step at which the loop stopped for that, if it did.
+        var refusedOnlySteps = 0
+        var stoppedAtStep: Int?
         for step in 1...max(1, options.maxSteps) {
             onEvent(.modelTurn(step))
             let turn = try await complete(&state, allowTools: true)
@@ -397,6 +411,7 @@ public struct ResearchAgent: Sendable {
             }
             calledTools = true
             state.messages.append(assistantMessage(turn))
+            let refusedBefore = state.refusedRepeats
             for (index, call) in turn.toolCalls.enumerated() {
                 var result: String
                 if index < options.maxToolCallsPerTurn {
@@ -432,7 +447,26 @@ public struct ResearchAgent: Sendable {
                         "content": .string(Self.repeatedSearchesRequest + "\n\n"
                             + pages.joined(separator: "\n\n")),
                     ]))
+                    // The model gets a fresh chance with the pages in hand.
+                    refusedOnlySteps = 0
+                    continue
                 }
+            }
+            // A model stuck repeating searches it already ran (Qwen did from
+            // step 25 of a 40-step run, with pages read) only wastes its
+            // remaining steps. After two such steps in a row, stop and ask
+            // for the answer, with more top results opened if few pages
+            // were read.
+            let executed = min(turn.toolCalls.count, options.maxToolCallsPerTurn)
+            if executed > 0, state.refusedRepeats - refusedBefore == executed {
+                refusedOnlySteps += 1
+            } else {
+                refusedOnlySteps = 0
+            }
+            if refusedOnlySteps >= Self.refusedStepsBeforeAnswering, step < options.maxSteps {
+                onEvent(.stoppingRepeatedSearches)
+                stoppedAtStep = step
+                break
             }
         }
 
@@ -443,7 +477,8 @@ public struct ResearchAgent: Sendable {
         // so they get at most half the prompt budget between them. A draft
         // kept from before looking wider is left alone: if the final answer
         // fails, that draft is returned and must match the sources.
-        var finalRequest = Self.budgetUsedUpRequest
+        var finalRequest = stoppedAtStep == nil
+            ? Self.budgetUsedUpRequest : Self.repeatedSearchesStopRequest
         let missing = options.minimumPagesRead - state.sources.count
         let perPage = min(options.pageSliceCharacters,
                           promptBudget(state) / 2 / max(1, missing))
@@ -464,14 +499,19 @@ public struct ResearchAgent: Sendable {
             "content": .string(finalRequest),
         ]))
         let final = try await complete(&state, allowTools: false)
+        let turns = (stoppedAtStep ?? options.maxSteps) + 1
+        let exhausted = stoppedAtStep == nil
+        var report: ResearchReport
         if let earlier = answerBeforeSearchingMore, Self.isIncomplete(final) {
-            return state.report(
-                answer: earlier, turns: options.maxSteps + 1, exhausted: true)
+            report = state.report(answer: earlier, turns: turns, exhausted: exhausted)
+        } else {
+            let first = try await answer(from: final, state: &state)
+            let (text, cutOff) = try await reviseUnreadCitations(first, state: &state)
+            report = state.report(
+                answer: text, turns: turns, exhausted: exhausted, cutOff: cutOff)
         }
-        let first = try await answer(from: final, state: &state)
-        let (text, cutOff) = try await reviseUnreadCitations(first, state: &state)
-        return state.report(
-            answer: text, turns: options.maxSteps + 1, exhausted: true, cutOff: cutOff)
+        report.stoppedRepeatedSearches = stoppedAtStep != nil
+        return report
     }
 
     /// The answer in a turn without tool calls, and whether it stopped at the
@@ -606,6 +646,10 @@ public struct ResearchAgent: Sendable {
     /// the top results itself.
     static let repeatsBeforeOpening = 2
 
+    /// Steps in a row in which every tool call was a refused repeat, before
+    /// the loop stops and asks for the answer.
+    static let refusedStepsBeforeAnswering = 2
+
     /// Search results tried when the loop opens pages itself, so a few
     /// broken links cannot stop it.
     static let autoOpenAttempts = 6
@@ -640,6 +684,12 @@ public struct ResearchAgent: Sendable {
         + "you have read, citing source numbers, and say what remains unverified. Check every "
         + "item against each condition in the question, and leave out, or list as excluded "
         + "with the reason, any item that breaks one."
+
+    static let repeatedSearchesStopRequest = "You keep repeating searches you already ran, "
+        + "so the research stops here. Answer now from what you have read, citing source "
+        + "numbers, and say what remains unverified. Check every item against each condition "
+        + "in the question, and leave out, or list as excluded with the reason, any item that "
+        + "breaks one."
 
     static let topUpNote = "Few pages had been read, so the research opened more of the top "
         + "search results for you. They follow below; use them like the pages you opened."

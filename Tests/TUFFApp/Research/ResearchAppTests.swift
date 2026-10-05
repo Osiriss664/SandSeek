@@ -129,12 +129,31 @@ import TUFFAppServer
             try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
         #expect(object.removeValue(forKey: "answerWasCutOff") != nil)
         #expect(object.removeValue(forKey: "savedSearchQueries") != nil)
+        #expect(object.removeValue(forKey: "stoppedOnRepeats") != nil)
         try JSONSerialization.data(withJSONObject: object).write(to: url)
 
         let reloaded = ResearchReportStore(directory: directory)
         #expect(reloaded.reports.map(\.id) == [saved.id])
         #expect(reloaded.reports.first?.answerCutOff == false)
         #expect(reloaded.reports.first?.searchQueries == [])
+        #expect(reloaded.reports.first?.stoppedRepeatedSearches == false)
+    }
+
+    @Test func anEarlyStopOnRepeatedSearchesIsKept() throws {
+        let directory = temporaryDirectory()
+        let store = ResearchReportStore(directory: directory)
+        var stopped = ResearchReport(
+            question: "q", answer: "A [1].",
+            sources: [ResearchSource(number: 1, title: "t", url: "https://example.com")],
+            modelTurns: 5, budgetExhausted: false)
+        stopped.stoppedRepeatedSearches = true
+        let saved = SavedResearchReport(
+            report: stopped, model: "m", createdAt: Date(timeIntervalSince1970: 1_790_000_000),
+            durationSeconds: 1, steps: [])
+        try store.save(saved)
+        let reloaded = ResearchReportStore(directory: directory)
+        #expect(reloaded.reports.first?.stoppedRepeatedSearches == true)
+        #expect(reloaded.reports.first?.markdown.contains("stopped early") == true)
     }
 
     @Test func neverWritesOverAnExistingReport() throws {
@@ -310,12 +329,32 @@ import TUFFAppServer
     }
 }
 
-@Suite @MainActor struct ResearchSandboxControllerTests {
-    private func defaults() -> UserDefaults {
+/// Removes the throwaway defaults domains a test made once the test is
+/// done, so test runs leave no preference files behind.
+private final class DefaultsDomains: @unchecked Sendable {
+    private let lock = NSLock()
+    private var names: [String] = []
+
+    func make() -> UserDefaults {
         let name = "TUFFResearchTests-\(UUID().uuidString)"
+        lock.withLock { names.append(name) }
         let defaults = UserDefaults(suiteName: name)!
         defaults.removePersistentDomain(forName: name)
         return defaults
+    }
+
+    deinit {
+        for name in names {
+            UserDefaults.standard.removePersistentDomain(forName: name)
+        }
+    }
+}
+
+@Suite @MainActor struct ResearchSandboxControllerTests {
+    private let domains = DefaultsDomains()
+
+    private func defaults() -> UserDefaults {
+        domains.make()
     }
 
     private func controller(runner: FakeProcessRunner = FakeProcessRunner(),

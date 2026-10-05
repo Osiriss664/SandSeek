@@ -1097,6 +1097,91 @@ struct ResearchAgentTests {
         #expect(pages.hasSuffix(ResearchAgent.untrustedClose))
     }
 
+    /// Each search finds two pages of its own.
+    @Sendable private static func twoHitsPerSearch(_ path: String, _ body: ResearchJSON?)
+        -> ResearchHTTPResponse {
+        guard path == "/v1/search" else { return FakeServices.webPages(path, body) }
+        let query = body?["query"]?.stringValue ?? ""
+        return FakeServices.json(200, .object(["query": .string(query), "results": .array(
+            (1...2).map { rank in
+                .object([
+                    "title": .string("\(query) \(rank)"),
+                    "url": .string("https://\(query.lowercased()).example/\(rank)"),
+                    "snippet": .string("A snippet."),
+                ])
+            })]))
+    }
+
+    @Test func stepsOfOnlyRefusedSearchesEndTheResearch() async throws {
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"one"}"#)]),
+            FakeServices.calls([("b", "open_page", #"{"url":"https://one.example/1"}"#)]),
+            FakeServices.calls([("c", "web_search", #"{"query":"one"}"#)]),
+            FakeServices.calls([("d", "web_search", #"{"query":"ONE"}"#),
+                                ("e", "web_search", #"{"query":"\"one\""}"#)]),
+            FakeServices.answer("From the pages [1][2]."),
+        ], sandbox: Self.twoHitsPerSearch)
+        let log = EventLog()
+        let report = try await agent(services, events: log).run(question: "q")
+        #expect(report.answer == "From the pages [1][2].")
+        #expect(report.stoppedRepeatedSearches)
+        #expect(!report.budgetExhausted)
+        #expect(report.modelTurns == 5)
+        #expect(services.modelRequests.count == 5)
+        #expect(log.events.filter { $0 == .stoppingRepeatedSearches }.count == 1)
+        #expect(report.markdown.contains("stopped early because the model kept repeating"))
+        // Fewer pages than asked for were read, so more top results are opened
+        // before the answer, and the answer is asked for without tools.
+        #expect(report.sources.map(\.url) == ["https://one.example/1", "https://one.example/2"])
+        let final = messages(services.modelRequests[4]).last?["content"]?.stringValue ?? ""
+        #expect(final.hasPrefix(ResearchAgent.repeatedSearchesStopRequest + "\n\n"
+            + ResearchAgent.topUpNote + "\n\nSource [2]: "))
+        #expect(services.modelRequests[4]["tools"] == nil)
+    }
+
+    @Test func aStepWithANewSearchOrPageStartsTheCountAgain() async throws {
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"one"}"#)]),
+            FakeServices.calls([("b", "open_page", #"{"url":"https://one.example/1"}"#)]),
+            FakeServices.calls([("c", "web_search", #"{"query":"one"}"#)]),
+            // A new search next to a repeat: not a step of only repeats.
+            FakeServices.calls([("d", "web_search", #"{"query":"one"}"#),
+                                ("e", "web_search", #"{"query":"two"}"#)]),
+            FakeServices.calls([("f", "web_search", #"{"query":"two"}"#)]),
+            FakeServices.calls([("g", "open_page", #"{"url":"https://two.example/1"}"#)]),
+            FakeServices.calls([("h", "web_search", #"{"query":"two"}"#)]),
+            FakeServices.calls([("i", "web_search", #"{"query":"one"}"#)]),
+            FakeServices.answer("Done [1][2][3]."),
+        ], sandbox: Self.twoHitsPerSearch)
+        var options = ResearchOptions()
+        options.maxSteps = 12
+        let log = EventLog()
+        let report = try await agent(services, options: options, events: log).run(question: "q")
+        #expect(report.stoppedRepeatedSearches)
+        #expect(report.modelTurns == 9)
+        #expect(log.events.filter { $0 == .stoppingRepeatedSearches }.count == 1)
+        #expect(log.events.filter { $0 == .repeatedSearchRefused("one") }.count == 3)
+    }
+
+    @Test func refusedSearchesOnTheLastStepsRunOutTheBudgetAsBefore() async throws {
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"one"}"#)]),
+            FakeServices.calls([("b", "open_page", #"{"url":"https://one.example/1"}"#)]),
+            FakeServices.calls([("c", "web_search", #"{"query":"one"}"#)]),
+            FakeServices.calls([("d", "web_search", #"{"query":"one"}"#)]),
+            FakeServices.answer("Done [1][2]."),
+        ], sandbox: Self.twoHitsPerSearch)
+        var options = ResearchOptions()
+        options.maxSteps = 4
+        let log = EventLog()
+        let report = try await agent(services, options: options, events: log).run(question: "q")
+        #expect(report.budgetExhausted)
+        #expect(!report.stoppedRepeatedSearches)
+        #expect(!log.events.contains(.stoppingRepeatedSearches))
+        let final = messages(services.modelRequests[4]).last?["content"]?.stringValue ?? ""
+        #expect(final.hasPrefix(ResearchAgent.budgetUsedUpRequest))
+    }
+
     @Test func aFailedSearchMayBeTriedAgain() async throws {
         let attempts = SearchAttempts()
         let services = FakeServices(modelReplies: [
