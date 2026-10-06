@@ -163,6 +163,31 @@ private final class TimingOutTransport: ResearchHTTPTransport, @unchecked Sendab
     }
 }
 
+/// Stops the run on one model call, counted from 1, as the app's Stop does:
+/// the task is cancelled and URLSession fails the request.
+private final class StoppingTransport: ResearchHTTPTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private let services: FakeServices
+    private let stopOnModelCall: Int
+    private var modelCalls = 0
+
+    init(_ services: FakeServices, stopOnModelCall: Int) {
+        self.services = services
+        self.stopOnModelCall = stopOnModelCall
+    }
+
+    func send(method: String, url: URL, body: Data?) async throws -> ResearchHTTPResponse {
+        if url.path.hasSuffix("/chat/completions") {
+            let call = lock.withLock { modelCalls += 1; return modelCalls }
+            if call == stopOnModelCall {
+                withUnsafeCurrentTask { $0?.cancel() }
+                throw URLError(.cancelled)
+            }
+        }
+        return try await services.send(method: method, url: url, body: body)
+    }
+}
+
 /// Records the time limit each model request was sent with.
 private final class TimeLimitRecorder: ResearchHTTPTransport, @unchecked Sendable {
     private let lock = NSLock()
@@ -921,8 +946,13 @@ struct ResearchAgentTests {
             FakeServices.cutOff(),
             FakeServices.cutOff(),
         ])
-        await #expect(throws: ResearchError.noAnswer(tokenLimit: true)) {
-            try await agent(silent, options: options).run(question: "q")
+        // A page was read, so the error comes with what was read.
+        do {
+            _ = try await agent(silent, options: options).run(question: "q")
+            Issue.record("expected the run to end early")
+        } catch let ended as ResearchRunEndedEarly {
+            #expect(ended.underlying as? ResearchError == .noAnswer(tokenLimit: true))
+            #expect(ended.partial.sources.count == 1)
         }
     }
 
@@ -1847,12 +1877,14 @@ struct ResearchAgentTests {
         #expect(services.modelRequests.dropFirst().allSatisfy {
             $0["enable_thinking"] == .bool(false) })
 
-        // Without reasoning, or for an error a retry cannot fix, the run stops.
+        // Without reasoning, the step is asked once more, and a second
+        // failure ends the run. Nothing was read, so there is no partial report.
         let plain = FakeServices(modelReplies: [failure])
         await #expect(throws: ResearchError.self) {
             _ = try await agent(plain).run(question: "q")
         }
-        #expect(plain.modelRequests.count == 1)
+        #expect(plain.modelRequests.count == 2)
+        // For an error a retry cannot fix, the run stops at once.
         let refused = FakeServices(modelReplies: [
             FakeServices.json(400, .object(["error": .object([
                 "message": .string("bad value"), "code": .string("invalid_value"),
@@ -1868,6 +1900,141 @@ struct ResearchAgentTests {
             onEvent: { refusedLog.append($0) }).run(question: "q")
         #expect(!refusedLog.events.contains(.retryingAfterModelError))
         #expect(refused.modelRequests.count == 1)
+    }
+
+    private static let structuredOutputFailure = FakeServices.json(500, .object(["error": .object([
+        "message": .string("structured_output_failure: malformed tool call"),
+        "code": .string("structured_output_failure"),
+        "type": .string("server_error"),
+    ])]))
+
+    @Test func aServerErrorWithThinkingOffIsAskedOnceMore() async throws {
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "open_page", #"{"url":"https://a.example/"}"#)]),
+            Self.structuredOutputFailure,
+            FakeServices.answer("Answer [1]."),
+            FakeServices.answer("Answer [1]."),
+        ])
+        let log = EventLog()
+        let report = try await agent(services, events: log).run(question: "q")
+        #expect(report.answer == "Answer [1].")
+        #expect(log.events.filter { $0 == .retryingAfterModelErrorAgain }.count == 1)
+        #expect(!log.events.contains(.retryingAfterModelError))
+        // The same step is sent again, as it was.
+        #expect(services.modelRequests[2] == services.modelRequests[1])
+
+        // A second failure in a row ends the run, with what was read.
+        let failing = FakeServices(modelReplies: [
+            FakeServices.calls([
+                ("s", "web_search", #"{"query":"apple container"}"#),
+                ("a", "open_page", #"{"url":"https://a.example/"}"#),
+            ]),
+            Self.structuredOutputFailure,
+            Self.structuredOutputFailure,
+        ])
+        let failingLog = EventLog()
+        do {
+            _ = try await agent(failing, events: failingLog).run(question: "q")
+            Issue.record("expected the run to end early")
+        } catch let ended as ResearchRunEndedEarly {
+            #expect(ended.underlying as? ResearchError != nil)
+            #expect(ended.partial.sources.map(\.url) == ["https://a.example/"])
+            #expect(ended.partial.searchQueries == ["apple container"])
+            #expect(ended.partial.answer.isEmpty)
+            #expect(!ended.stopped)
+        }
+        // One retry, not more.
+        #expect(failing.modelRequests.count == 3)
+        #expect(failingLog.events.filter { $0 == .retryingAfterModelErrorAgain }.count == 1)
+    }
+
+    @Test func aThinkingStepGetsNoThirdAttempt() async {
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "open_page", #"{"url":"https://a.example/"}"#)]),
+            Self.structuredOutputFailure,
+            Self.structuredOutputFailure,
+            FakeServices.answer("never asked for"),
+        ])
+        let log = EventLog()
+        let thinking = ResearchAgent(
+            chat: ResearchChatClient(
+                serverURL: URL(string: "http://127.0.0.1:8080")!, model: "default",
+                maxTokens: 8_192, enableThinking: true, transport: services),
+            sandbox: ResearchSandboxClient(
+                baseURL: URL(string: "http://127.0.0.1:9000")!, transport: services),
+            onEvent: { log.append($0) })
+        await #expect(throws: ResearchRunEndedEarly.self) {
+            _ = try await thinking.run(question: "q")
+        }
+        // The page step, the failed thinking step and its one retry.
+        #expect(services.modelRequests.count == 3)
+        #expect(log.events.filter { $0 == .retryingAfterModelError }.count == 1)
+        #expect(!log.events.contains(.retryingAfterModelErrorAgain))
+    }
+
+    @Test func aRunThatEndsEarlyKeepsWhatItRead() async throws {
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([
+                ("s", "web_search", #"{"query":"apple container"}"#),
+                ("a", "open_page", #"{"url":"https://a.example/"}"#),
+            ]),
+            Self.structuredOutputFailure,
+            Self.structuredOutputFailure,
+        ])
+        do {
+            _ = try await agent(services).run(question: "How are containers isolated?")
+            Issue.record("expected the run to end early")
+        } catch let ended as ResearchRunEndedEarly {
+            let markdown = ended.partial.markdown
+            #expect(ended.partial.endedEarly == ended.reason)
+            #expect(markdown.hasPrefix("# How are containers isolated?"))
+            #expect(markdown.contains("This research ended early: "))
+            #expect(markdown.contains("It has no answer; the pages read so far are listed below."))
+            #expect(markdown.contains("## Sources"))
+            #expect(markdown.contains("[apple/container](https://a.example/)"))
+            #expect(markdown.contains("## Searches"))
+            #expect(markdown.contains("- apple container"))
+            // A report without an answer is not also called one without sources.
+            #expect(!markdown.contains("No web page was read"))
+            #expect(!markdown.contains("Only one search"))
+        }
+
+        // A finished report has no such note.
+        let finished = ResearchReport(
+            question: "q", answer: "A.", sources: [], modelTurns: 1, budgetExhausted: false)
+        #expect(!finished.markdown.contains("ended early"))
+    }
+
+    @Test func aRunThatEndsBeforeReadingAnythingHasNoPartialReport() async {
+        let services = FakeServices(modelReplies: [
+            Self.structuredOutputFailure, Self.structuredOutputFailure,
+        ])
+        do {
+            _ = try await agent(services).run(question: "q")
+            Issue.record("expected an error")
+        } catch {
+            #expect(error is ResearchError)
+            #expect(!(error is ResearchRunEndedEarly))
+        }
+    }
+
+    @Test func aStoppedRunKeepsWhatItRead() async {
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "open_page", #"{"url":"https://a.example/"}"#)]),
+            FakeServices.answer("never"),
+        ])
+        let transport = StoppingTransport(services, stopOnModelCall: 2)
+        let task = Task { try await agent(services, transport: transport).run(question: "q") }
+        do {
+            _ = try await task.value
+            Issue.record("expected the run to end early")
+        } catch let ended as ResearchRunEndedEarly {
+            #expect(ended.stopped)
+            #expect(ended.partial.sources.map(\.url) == ["https://a.example/"])
+            #expect(ended.reason == "it was stopped")
+        } catch {
+            Issue.record("unexpected error \(error)")
+        }
     }
 
     @Test func theContextWindowIsReadFromTheModelList() async {

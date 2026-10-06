@@ -76,6 +76,11 @@ public struct SavedResearchReport: Codable, Equatable, Identifiable, Sendable {
     /// True when the research stopped early because the model kept
     /// repeating searches it had already run.
     public var stoppedRepeatedSearches: Bool { stoppedOnRepeats ?? false }
+    /// Optional so reports saved before it existed still load.
+    private let endedEarlyReason: String?
+    /// Why the research ended before it had an answer; nil for a finished
+    /// report. Such a report holds the pages and searches so far.
+    public var endedEarly: String? { endedEarlyReason }
     public let unknownCitations: [Int]
     public let steps: [ResearchStep]
     /// The report as `tuff research` prints it, made inert for viewers.
@@ -102,6 +107,7 @@ public struct SavedResearchReport: Codable, Equatable, Identifiable, Sendable {
         answerWasCutOff = report.answerCutOff
         savedSearchQueries = report.searchQueries.map(ResearchText.terminalSafe)
         stoppedOnRepeats = report.stoppedRepeatedSearches
+        endedEarlyReason = report.endedEarly.map(ResearchText.terminalSafe)
         unknownCitations = report.unknownCitations
         self.steps = steps
         markdown = report.markdown

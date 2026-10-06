@@ -72,21 +72,53 @@ let agent = ResearchAgent(
         case .continuingAfterCutOff: writeProgress("    step ran out of room while thinking; continuing the research")
         case .revisingUnreadCitations: writeProgress("    answer cites pages it never read; asking for a rewrite")
         case .retryingAfterModelError: writeProgress("    model error while thinking; asking again without thinking")
+        case .retryingAfterModelErrorAgain: writeProgress("    model error; asking once more")
         case .stoppingRepeatedSearches: writeProgress("    only repeated searches or pages; stopping and asking for the answer")
         }
     })
 
-do {
-    let report = try await agent.run(question: arguments.question)
+/// Prints the report, and writes it to `--output` when that was given.
+func deliver(_ report: ResearchReport, outputPath: String?) throws {
     // The answer and source titles come from the model and the web.
     let markdown = ResearchText.terminalSafe(report.markdown)
     print(markdown)
-    if let path = arguments.outputPath {
+    if let path = outputPath {
         try Data(markdown.utf8).write(
             to: URL(fileURLWithPath: path), options: .withoutOverwriting)
         writeError("report written to \(path)")
     }
+}
+
+// The Mac stays awake for the run: a Mac that sleeps mid-run slows the model
+// to a crawl or drops its connection. The display may still sleep.
+let activity = ProcessInfo.processInfo.beginActivity(
+    options: [.userInitiated, .idleSystemSleepDisabled], reason: "Web research run")
+let outcome: Result<ResearchReport, any Error>
+do {
+    outcome = .success(try await agent.run(question: arguments.question))
 } catch {
+    outcome = .failure(error)
+}
+ProcessInfo.processInfo.endActivity(activity)
+
+switch outcome {
+case .success(let report):
+    do {
+        try deliver(report, outputPath: arguments.outputPath)
+    } catch {
+        writeProgress("error: \(error)")
+        exit(1)
+    }
+case .failure(let error):
     writeProgress("error: \(error)")
+    // What was read before the error is kept, in the same form as a report.
+    if let ended = error as? ResearchRunEndedEarly {
+        do {
+            try deliver(ended.partial, outputPath: arguments.outputPath)
+            writeError("the research ended early; the report has no answer, only what was read")
+        } catch {
+            writeProgress("error: \(error)")
+        }
+    }
     exit(1)
 }

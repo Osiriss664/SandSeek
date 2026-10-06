@@ -156,6 +156,33 @@ import TUFFAppServer
         #expect(reloaded.reports.first?.markdown.contains("stopped early") == true)
     }
 
+    @Test func aReportThatEndedEarlyKeepsItsReasonAndOldReportsStillLoad() throws {
+        let directory = temporaryDirectory()
+        let store = ResearchReportStore(directory: directory)
+        var partial = ResearchReport(
+            question: "q", answer: "",
+            sources: [ResearchSource(number: 1, title: "t", url: "https://example.com")],
+            modelTurns: 3, budgetExhausted: false, searchQueries: ["q"])
+        partial.endedEarly = "the TUFF server refused the request (HTTP 500)"
+        let saved = SavedResearchReport(
+            report: partial, model: "m", createdAt: Date(timeIntervalSince1970: 1_790_000_000),
+            durationSeconds: 1, steps: [])
+        try store.save(saved)
+        let reloaded = ResearchReportStore(directory: directory)
+        #expect(reloaded.reports.first?.endedEarly == "the TUFF server refused the request (HTTP 500)")
+        #expect(reloaded.reports.first?.markdown.contains("ended early") == true)
+
+        // A report saved before the field existed has none.
+        let url = store.jsonURL(for: saved)
+        var object = try #require(
+            try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        #expect(object.removeValue(forKey: "endedEarlyReason") != nil)
+        try JSONSerialization.data(withJSONObject: object).write(to: url)
+        let older = ResearchReportStore(directory: directory)
+        #expect(older.reports.map(\.id) == [saved.id])
+        #expect(older.reports.first?.endedEarly == nil)
+    }
+
     @Test func neverWritesOverAnExistingReport() throws {
         let store = ResearchReportStore(directory: temporaryDirectory())
         let saved = report()
@@ -172,6 +199,49 @@ import TUFFAppServer
         #expect(source("file:///etc/passwd").webURL == nil)
         #expect(source("javascript:alert(1)").webURL == nil)
         #expect(source("x-apple.systempreferences:com.apple.preference").webURL == nil)
+    }
+}
+
+/// Records when a run holds the Mac awake.
+private final class RecordingWake: ResearchWakeAssertion, @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [String] = []
+
+    var events: [String] { lock.withLock { recorded } }
+
+    func begin(reason: String) -> UUID {
+        lock.withLock { recorded.append("begin") }
+        return UUID()
+    }
+
+    func end(_ token: UUID) {
+        lock.withLock { recorded.append("end") }
+    }
+}
+
+/// Answers the first model call from the script and then waits, as a slow
+/// model does, until the run is stopped; the request then fails as
+/// URLSession's does when its task is cancelled.
+private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private let services: FakeResearchServices
+    private var modelCalls = 0
+
+    init(_ services: FakeResearchServices) {
+        self.services = services
+    }
+
+    var chatCalls: Int { lock.withLock { modelCalls } }
+
+    func send(method: String, url: URL, body: Data?) async throws -> ResearchHTTPResponse {
+        if url.path == "/v1/chat/completions" {
+            let call = lock.withLock { modelCalls += 1; return modelCalls }
+            if call >= 2 {
+                while !Task.isCancelled { try? await Task.sleep(for: .milliseconds(10)) }
+                throw URLError(.cancelled)
+            }
+        }
+        return try await services.send(method: method, url: url, body: body)
     }
 }
 
@@ -280,6 +350,100 @@ import TUFFAppServer
         #expect(run.phase == .stopped)
         #expect(run.report == nil)
         #expect(store.reports.isEmpty)
+    }
+
+    @Test func theMacStaysAwakeForTheWholeRun() async {
+        let wake = RecordingWake()
+        let services = FakeResearchServices(modelReplies: [
+            FakeResearchServices.call("open_page", #"{"url": "https://github.com/apple/container"}"#),
+            FakeResearchServices.answer("From the page [1]."),
+            FakeResearchServices.answer("From the page [1]."),
+        ])
+        let run = ResearchRunController(
+            store: ResearchReportStore(directory: temporaryDirectory()),
+            transport: services, wake: wake)
+        run.start(question: "Anything", settings: ResearchRunSettings(model: "m"),
+                  serverURL: server, sandboxURL: sandbox)
+        #expect(wake.events == ["begin"])
+        await waitUntil { !run.isRunning }
+        #expect(run.phase == .finished)
+        #expect(wake.events == ["begin", "end"])
+
+        // A run that fails ends it as well.
+        let failedWake = RecordingWake()
+        let failing = ResearchRunController(
+            store: ResearchReportStore(directory: temporaryDirectory()),
+            transport: FakeResearchServices(sandboxHealthy: false), wake: failedWake)
+        failing.start(question: "Anything", settings: ResearchRunSettings(model: "m"),
+                      serverURL: server, sandboxURL: sandbox)
+        await waitUntil { !failing.isRunning }
+        #expect(failedWake.events == ["begin", "end"])
+
+        // And so does Stop, once the run has wound down.
+        let stoppedWake = RecordingWake()
+        let stopping = ResearchRunController(
+            store: ResearchReportStore(directory: temporaryDirectory()),
+            transport: FakeResearchServices(modelReplies: [
+                FakeResearchServices.answer("Too late."),
+            ]), wake: stoppedWake)
+        stopping.start(question: "Anything", settings: ResearchRunSettings(model: "m"),
+                       serverURL: server, sandboxURL: sandbox)
+        stopping.stop()
+        await waitUntil { stoppedWake.events.count == 2 }
+        #expect(stoppedWake.events == ["begin", "end"])
+    }
+
+    @Test func aRunThatFailsAfterReadingSavesWhatItRead() async throws {
+        let failure = ResearchHTTPResponse(status: 500, body: Data(
+            #"{"error": {"message": "bad tool call", "code": "structured_output_failure"}}"#.utf8))
+        let services = FakeResearchServices(modelReplies: [
+            FakeResearchServices.call("web_search", #"{"query": "apple container isolation"}"#),
+            FakeResearchServices.call("open_page", #"{"url": "https://github.com/apple/container"}"#),
+            failure, failure,
+        ])
+        let store = ResearchReportStore(directory: temporaryDirectory())
+        let run = ResearchRunController(store: store, transport: services)
+        run.start(question: "How are containers isolated?",
+                  settings: ResearchRunSettings(model: "m", thinking: false),
+                  serverURL: server, sandboxURL: sandbox)
+        await waitUntil { !run.isRunning }
+
+        guard case .failed(let message) = run.phase else {
+            Issue.record("expected a failure, got \(run.phase)")
+            return
+        }
+        #expect(message.contains("HTTP 500"))
+        let saved = try #require(run.report)
+        #expect(store.reports.map(\.id) == [saved.id])
+        #expect(saved.endedEarly?.contains("HTTP 500") == true)
+        #expect(saved.answer.isEmpty)
+        #expect(saved.sources.map(\.url) == ["https://github.com/apple/container"])
+        #expect(saved.searchQueries == ["apple container isolation"])
+        #expect(saved.markdown.contains("This research ended early: "))
+        #expect(run.steps.contains { $0.text == "Model error; asking once more" })
+        #expect(run.steps.last?.text == "Failed: \(saved.endedEarly ?? ""). Saved what was read so far.")
+        #expect(run.saveError == nil)
+    }
+
+    @Test func stoppingAfterAPageWasReadSavesWhatWasRead() async throws {
+        let hanging = HangingServices(FakeResearchServices(modelReplies: [
+            FakeResearchServices.call("open_page", #"{"url": "https://github.com/apple/container"}"#),
+        ]))
+        let store = ResearchReportStore(directory: temporaryDirectory())
+        let run = ResearchRunController(store: store, transport: hanging)
+        run.start(question: "Anything", settings: ResearchRunSettings(model: "m"),
+                  serverURL: server, sandboxURL: sandbox)
+        await waitUntil { hanging.chatCalls >= 2 }
+        run.stop()
+        #expect(run.phase == .stopped)
+        await waitUntil { run.report != nil }
+
+        #expect(run.phase == .stopped)
+        let saved = try #require(run.report)
+        #expect(store.reports.map(\.id) == [saved.id])
+        #expect(saved.endedEarly != nil)
+        #expect(saved.sources.map(\.url) == ["https://github.com/apple/container"])
+        #expect(run.steps.last?.text == "Stopped. Saved what was read so far.")
     }
 
     @Test func emptyQuestionsDoNotStart() {

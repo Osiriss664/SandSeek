@@ -397,7 +397,19 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
   own default, reasoning gets no such limit. Any server error (HTTP 5xx) on a
   step with reasoning on is retried the same way instead of ending the run;
   Gemma 4 26B once wrote a tool call the server could not read, which TUFF
-  reports as HTTP 500.
+  reports as HTTP 500. A step that already had reasoning off and gets a 5xx
+  is sent once more as it was (Gemma 4 failed that way too); a second failure
+  ends the run, and a step gets at most one retry.
+- The Mac stays awake while a research run is going (`tuff research` and the
+  app both hold off idle system sleep until the run ends, however it ends),
+  because a Mac that sleeps mid-run slowed a Gemma run about 50 times. The
+  display may still sleep, and closing the lid still sleeps the Mac.
+- A run that ends with an error, or is stopped, after it searched or read a
+  page still keeps what it gathered: the report has no answer, starts with a
+  note that the research ended early and why, and lists the pages read and
+  the searches. The app saves it like any report (Stop does too); `tuff
+  research` prints it, writes it to `--output`, and still exits with status 1.
+  Nothing is kept when the run ended before any search or page.
 - Stopping a question with **Stop Research** cancels its model request, and
   ending `tuff research` with Control-C closes its connection. Either way
   TUFF stops generating that reply, so the next question does not wait

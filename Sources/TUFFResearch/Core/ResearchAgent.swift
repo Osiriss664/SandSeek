@@ -82,6 +82,9 @@ public struct ResearchReport: Equatable, Sendable {
     /// The searches that reached the search engine, in order, without
     /// repeats, each on one line and shortened.
     public var searchQueries: [String] = []
+    /// Why the research ended before it had an answer, set on the partial
+    /// report of `ResearchRunEndedEarly`. Such a report has no answer.
+    public var endedEarly: String? = nil
     /// True when no web page was read, so the answer rests on the model's
     /// memory or on search previews only.
     public var noPagesRead: Bool { sources.isEmpty }
@@ -91,7 +94,15 @@ public struct ResearchReport: Equatable, Sendable {
     public var markdown: String {
         let answer = ResearchText.inertMarkdown(
             self.answer.trimmingCharacters(in: .whitespacesAndNewlines))
-        var text = "# \(question)\n\n\(answer)\n"
+        var text = "# \(question)\n\n"
+        if let reason = endedEarly {
+            // A run that failed has no answer, only what it read before that.
+            text += "**This research ended early: "
+                + "\(ResearchText.inertMarkdown(ResearchText.oneLine(reason, limit: 300))). "
+                + "It has no answer; the pages read so far are listed below.**\n"
+        } else {
+            text += "\(answer)\n"
+        }
         if !sources.isEmpty {
             text += "\n## Sources\n\n"
             for source in sources {
@@ -122,14 +133,14 @@ public struct ResearchReport: Equatable, Sendable {
             text += "\n_The research stopped early because the model kept repeating searches "
                 + "it had already run; this answer may be incomplete._\n"
         }
-        if noPagesRead {
+        if noPagesRead, endedEarly == nil {
             text += "\n_No web page was read for this answer, so it comes from the model's "
                 + "memory or search previews and has no sources to check._\n"
         }
         if answerCutOff {
             text += "\n_The answer reached the model's token limit and may be cut off._\n"
         }
-        if searchQueries.count == 1 {
+        if searchQueries.count == 1, endedEarly == nil {
             text += "\n_Only one search was run, so other sources may have been missed._\n"
         }
         return ResearchText.terminalSafe(text)
@@ -159,6 +170,20 @@ public struct ResearchReport: Equatable, Sendable {
         }
         return found
     }
+}
+
+/// Thrown by `ResearchAgent.run` when the run ends with an error after it
+/// searched or read pages, so what was read is not lost.
+public struct ResearchRunEndedEarly: Error, CustomStringConvertible, Sendable {
+    /// The searches and pages so far, with no answer.
+    public let partial: ResearchReport
+    /// One line for people: the error, or that the run was stopped.
+    public let reason: String
+    public let underlying: any Error
+    /// True when the run was cancelled, as Stop does.
+    public let stopped: Bool
+
+    public var description: String { reason }
 }
 
 public enum ResearchEvent: Equatable, Sendable {
@@ -205,6 +230,9 @@ public enum ResearchEvent: Equatable, Sendable {
     /// The server failed a step with reasoning on (Gemma 4 wrote a broken
     /// tool call), and the step is asked again with reasoning off.
     case retryingAfterModelError
+    /// The server failed a step that was sent with reasoning off; it was
+    /// asked once more.
+    case retryingAfterModelErrorAgain
     /// The model spent steps in a row only repeating searches it already
     /// ran, so the research stops and asks for the answer now.
     case stoppingRepeatedSearches
@@ -324,8 +352,27 @@ public struct ResearchAgent: Sendable {
     }
 
     public func run(question: String) async throws -> ResearchReport {
-        try await sandbox.checkHealth()
         var state = State(question: question)
+        do {
+            return try await research(&state)
+        } catch {
+            // Any error after the run began keeps what was read, unless
+            // nothing was: then it is thrown as it is.
+            guard !state.queries.isEmpty || !state.sources.isEmpty else { throw error }
+            // The transport reports a cancelled request as an unavailable model.
+            let stopped = Task.isCancelled || error is CancellationError
+            let reason = ResearchText.oneLine(
+                stopped ? "it was stopped" : String(describing: error), limit: 300)
+            var partial = state.report(answer: "", turns: state.modelTurns, exhausted: false)
+            partial.endedEarly = reason
+            throw ResearchRunEndedEarly(
+                partial: partial, reason: reason, underlying: error, stopped: stopped)
+        }
+    }
+
+    private func research(_ state: inout State) async throws -> ResearchReport {
+        try await sandbox.checkHealth()
+        let question = state.question
         if options.contextBudgetCharacters == nil {
             state.contextWindows = await chat.contextWindows()
             state.contextTokens = ResearchChatClient.window(
@@ -350,6 +397,7 @@ public struct ResearchAgent: Sendable {
         var stoppedAtStep: Int?
         for step in 1...max(1, options.maxSteps) {
             onEvent(.modelTurn(step))
+            state.modelTurns = step
             let turn = try await complete(&state, allowTools: true)
             // A turn cut off while thinking has not chosen to answer; with
             // steps left, the research goes on rather than ending here, with
@@ -783,12 +831,16 @@ public struct ResearchAgent: Sendable {
     /// server generating it. A server error on a turn with reasoning on
     /// (Gemma 4 wrote a tool call the server could not read) is asked again
     /// the same way. Reasoning then stays off for the rest of the run, as the
-    /// next turns would most likely go the same way.
+    /// next turns would most likely go the same way. A server error on a step
+    /// with reasoning already off is sent once more as it was.
     private func complete(_ state: inout State,
                           allowTools: Bool,
                           thinking: Bool? = nil) async throws -> ResearchAssistantTurn {
         let thinking = state.reasoningOff ? false : thinking
         let thinks = (thinking ?? chat.enableThinking) == true
+        // What the one retry sends: reasoning off, which is also what a step
+        // that never reasoned already sent.
+        var retryThinking: Bool? = false
         do {
             return try await sendTurningThinkingOff(&state, allowTools: allowTools,
                                                     thinking: thinking)
@@ -796,11 +848,20 @@ public struct ResearchAgent: Sendable {
             state.thinkingTimedOut = true
             onEvent(.retryingAfterTimeout)
         } catch ResearchError.modelRequestFailed(let status, _, let code)
-                    where thinks && status >= 500 && !Self.answeredErrors.contains(code ?? "") {
-            state.thinkingFailed = true
-            onEvent(.retryingAfterModelError)
+                    where status >= 500 && !Self.answeredErrors.contains(code ?? "") {
+            if thinks {
+                state.thinkingFailed = true
+                onEvent(.retryingAfterModelError)
+            } else {
+                // Gemma 4 failed a step with reasoning already off (a broken
+                // tool call); the same step usually goes through once more.
+                retryThinking = thinking
+                onEvent(.retryingAfterModelErrorAgain)
+            }
         }
-        return try await sendTurningThinkingOff(&state, allowTools: allowTools, thinking: false)
+        // The only retry of this call: a second failure is thrown.
+        return try await sendTurningThinkingOff(&state, allowTools: allowTools,
+                                                thinking: retryThinking)
     }
 
     /// Server errors that retrying without reasoning would not help.
@@ -1046,6 +1107,8 @@ public struct ResearchAgent: Sendable {
         var resultURLs: [[String]] = []
         /// Searches and page opens refused because they repeated an earlier one.
         var refusedRepeats = 0
+        /// Model turns started so far, for a partial report.
+        var modelTurns = 0
         /// Times `compact` shortened results, to tell when an earlier read
         /// may be worth repeating.
         var compactions = 0

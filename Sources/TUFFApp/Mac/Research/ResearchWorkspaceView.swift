@@ -367,7 +367,7 @@ struct ResearchWorkspaceView: View {
         } else if research.run.phase == .stopped {
             Text("Stopped").appFont(.caption).foregroundStyle(.secondary)
         } else if let report = research.shownReport {
-            Text("Finished in \(ResearchText.duration(report.durationSeconds))")
+            Text("\(report.endedEarly == nil ? "Finished" : "Ended early") in \(ResearchText.duration(report.durationSeconds))")
                 .appFont(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
         }
@@ -389,23 +389,35 @@ struct ResearchWorkspaceView: View {
                 } icon: {
                     Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)
                 }
+                // What was read before the error is saved and shown.
+                if let report = research.run.report {
+                    reportView(report, proxy: proxy)
+                }
             case .stopped where research.selectedReportID == nil:
-                Text("Stopped before an answer. Nothing was saved.")
-                    .appFont(.callout)
-                    .foregroundStyle(.secondary)
+                if let report = research.run.report {
+                    reportView(report, proxy: proxy)
+                } else {
+                    Text("Stopped before an answer. Nothing was saved.")
+                        .appFont(.callout)
+                        .foregroundStyle(.secondary)
+                }
             default:
                 if let report = research.shownReport {
-                    ResearchReportView(
-                        report: report,
-                        markdownURL: research.reports.markdownURL(for: report),
-                        saveError: report.id == research.run.report?.id ? research.run.saveError : nil,
-                        proxy: proxy)
+                    reportView(report, proxy: proxy)
                 }
             }
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(cardBackground, in: RoundedRectangle(cornerRadius: 16))
+    }
+
+    private func reportView(_ report: SavedResearchReport, proxy: ScrollViewProxy) -> some View {
+        ResearchReportView(
+            report: report,
+            markdownURL: research.reports.markdownURL(for: report),
+            saveError: report.id == research.run.report?.id ? research.run.saveError : nil,
+            proxy: proxy)
     }
 
     private var cardBackground: AnyShapeStyle {
@@ -802,7 +814,15 @@ private struct ResearchReportView: View {
             Text(report.question)
                 .appFont(.title3.weight(.semibold))
                 .textSelection(.enabled)
-            if report.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if let reason = report.endedEarly {
+                Label {
+                    Text("This research ended early: \(reason). It has no answer; the pages read so far are listed below.")
+                        .appFont(.callout)
+                        .fixedSize(horizontal: false, vertical: true)
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)
+                }
+            } else if report.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Label {
                     Text("The model stopped without writing an answer. This usually means it used up its token budget while thinking. Try again, or use a faster model such as Qwen3.6 35B-A3B.")
                         .appFont(.callout)

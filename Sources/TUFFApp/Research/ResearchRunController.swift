@@ -102,6 +102,41 @@ extension Comparable {
     }
 }
 
+/// Holds the Mac awake while a run is going. The engine lets the Mac sleep
+/// when idle, and a run that sleeps mid-way slows down or loses its
+/// connection. Only idle system sleep is prevented; the display may sleep.
+public protocol ResearchWakeAssertion: Sendable {
+    /// Starts holding the Mac awake. Give the token back to `end`.
+    func begin(reason: String) -> UUID
+    func end(_ token: UUID)
+}
+
+/// `ProcessInfo` activities, one per token.
+public final class ProcessInfoWakeAssertion: ResearchWakeAssertion, @unchecked Sendable {
+    private let lock = NSLock()
+    private var activities: [UUID: any NSObjectProtocol] = [:]
+
+    public init() {}
+
+    public func begin(reason: String) -> UUID {
+        let token = UUID()
+        let activity = ProcessInfo.processInfo.beginActivity(
+            options: [.userInitiated, .idleSystemSleepDisabled], reason: reason)
+        lock.lock()
+        activities[token] = activity
+        lock.unlock()
+        return token
+    }
+
+    public func end(_ token: UUID) {
+        lock.lock()
+        let activity = activities.removeValue(forKey: token)
+        lock.unlock()
+        guard let activity else { return }
+        ProcessInfo.processInfo.endActivity(activity)
+    }
+}
+
 /// Runs one research question at a time with the same loop as `tuff
 /// research`, and turns its events into a progress list.
 @MainActor @Observable
@@ -127,15 +162,21 @@ public final class ResearchRunController {
     /// Nil makes a transport per run with that run's step timeout.
     private let transport: (any ResearchHTTPTransport)?
     private let now: @Sendable () -> Date
+    private let wake: any ResearchWakeAssertion
     private var task: Task<Void, Never>?
     private var runID = UUID()
+    /// The step that says the run was stopped, until the run has wound down
+    /// and it is known whether anything was saved.
+    private var stoppedStep: Int?
 
     public init(store: ResearchReportStore,
                 transport: (any ResearchHTTPTransport)? = nil,
-                now: @escaping @Sendable () -> Date = { Date() }) {
+                now: @escaping @Sendable () -> Date = { Date() },
+                wake: any ResearchWakeAssertion = ProcessInfoWakeAssertion()) {
         self.store = store
         self.transport = transport
         self.now = now
+        self.wake = wake
     }
 
     public var isRunning: Bool { phase == .running }
@@ -153,6 +194,7 @@ public final class ResearchRunController {
         steps = []
         report = nil
         saveError = nil
+        stoppedStep = nil
         startedAt = started
         phase = .running
 
@@ -180,6 +222,10 @@ public final class ResearchRunController {
                 self?.record(event, runID: id, started: started, maxSteps: maxSteps)
             }
         }
+        // Held from here to the end of the run, however it ends: the run
+        // below catches every error, so the end is always reached.
+        let wake = self.wake
+        let wakeToken = wake.begin(reason: "Web research run")
         task = Task { [weak self] in
             let outcome: Result<ResearchReport, any Error>
             do {
@@ -187,6 +233,7 @@ public final class ResearchRunController {
             } catch {
                 outcome = .failure(error)
             }
+            wake.end(wakeToken)
             continuation.finish()
             await listener.value
             self?.finish(outcome, runID: id, started: started, model: settings.model)
@@ -194,13 +241,13 @@ public final class ResearchRunController {
     }
 
     /// Stops the run. Its model request is cancelled, which closes the
-    /// connection, and TUFF stops generating the reply.
+    /// connection, and TUFF stops generating the reply. The run then winds
+    /// down, and `finish` saves what it had read, if anything.
     public func stop() {
         guard isRunning else { return }
         task?.cancel()
-        task = nil
-        runID = UUID()
-        append(.failed, "Stopped. Nothing was saved.", started: startedAt ?? now())
+        append(.failed, "Stopped.", started: startedAt ?? now())
+        stoppedStep = steps.count - 1
         phase = .stopped
     }
 
@@ -212,6 +259,7 @@ public final class ResearchRunController {
         steps = []
         report = nil
         saveError = nil
+        stoppedStep = nil
         startedAt = nil
     }
 
@@ -254,6 +302,8 @@ public final class ResearchRunController {
         case .retryingAfterModelError:
             append(.turn, "Model error while thinking; asking again without thinking",
                    started: started)
+        case .retryingAfterModelErrorAgain:
+            append(.turn, "Model error; asking once more", started: started)
         case .stoppingRepeatedSearches:
             append(.turn, "Only repeated searches or pages; stopping and asking for the answer",
                    started: started)
@@ -272,25 +322,60 @@ public final class ResearchRunController {
                         runID: UUID,
                         started: Date,
                         model: String) {
-        guard runID == self.runID, isRunning else { return }
+        // A stopped run still ends here, so what it read can be saved.
+        guard runID == self.runID, isRunning || phase == .stopped else { return }
         task = nil
+        let stopped = phase == .stopped
         switch outcome {
         case .success(let result):
-            let saved = SavedResearchReport(
-                report: result,
-                model: model,
-                createdAt: started,
-                durationSeconds: max(0, now().timeIntervalSince(started)),
-                steps: steps)
-            report = saved
-            do {
-                try store.save(saved)
-            } catch {
-                saveError = "The report could not be saved: \(error.localizedDescription)"
+            // A run that finished while Stop was cancelling it stays stopped.
+            guard !stopped else {
+                replaceStoppedStep("Stopped. Nothing was saved.")
+                return
             }
+            save(result, started: started, model: model)
             phase = .finished
         case .failure(let error):
-            phase = .failed(ResearchText.terminalSafe(String(describing: error)))
+            guard let ended = error as? ResearchRunEndedEarly,
+                  !ended.partial.sources.isEmpty || !ended.partial.searchQueries.isEmpty else {
+                if stopped {
+                    replaceStoppedStep("Stopped. Nothing was saved.")
+                } else {
+                    phase = .failed(ResearchText.terminalSafe(String(describing: error)))
+                }
+                return
+            }
+            // The pages and searches so far are kept, with the reason and no answer.
+            save(ended.partial, started: started, model: model)
+            if stopped {
+                replaceStoppedStep("Stopped. Saved what was read so far.")
+            } else {
+                append(.failed, "Failed: \(ended.reason). Saved what was read so far.",
+                       started: started)
+                phase = .failed(ResearchText.terminalSafe(ended.reason))
+            }
         }
+    }
+
+    private func save(_ result: ResearchReport, started: Date, model: String) {
+        let saved = SavedResearchReport(
+            report: result,
+            model: model,
+            createdAt: started,
+            durationSeconds: max(0, now().timeIntervalSince(started)),
+            steps: steps)
+        report = saved
+        do {
+            try store.save(saved)
+        } catch {
+            saveError = "The report could not be saved: \(error.localizedDescription)"
+        }
+    }
+
+    private func replaceStoppedStep(_ text: String) {
+        guard let index = stoppedStep, steps.indices.contains(index) else { return }
+        let old = steps[index]
+        steps[index] = ResearchStep(
+            id: old.id, kind: old.kind, text: ResearchText.terminalSafe(text), elapsed: old.elapsed)
     }
 }
