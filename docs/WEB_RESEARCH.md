@@ -378,15 +378,20 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
   answer that stops at the token limit is kept, with a note that it may be cut
   off.
 - Reasoning can make a step very slow: on a 16 GB Mac, Qwen3.6 reasoned for
-  2.5 to 14 minutes before its first search. A step with reasoning on that
-  takes longer than `--thinking-limit` (3 minutes) is cancelled and asked
-  again without reasoning, and reasoning stays off for the rest of the
-  question. A server error on a step with reasoning on (Gemma 4 26B once
-  wrote a tool call the server could not read, which TUFF reports as HTTP 500)
-  is retried the same way instead of ending the run.
-- Stopping a question (**Stop Research**, or Control-C in Terminal) cancels
-  its model request, and TUFF stops generating that reply, so the next
-  question does not wait behind it.
+  2.5 to 14 minutes before its first search. When reasoning is turned on
+  (`--thinking on`, `--show-thinking`, or the app's Show thinking), a step
+  that takes longer than `--thinking-limit` (3 minutes, including any wait
+  behind another request) is cancelled and asked again without reasoning,
+  and reasoning stays off for the rest of the question. Left to the model's
+  own default, reasoning gets no such limit. Any server error (HTTP 5xx) on a
+  step with reasoning on is retried the same way instead of ending the run;
+  Gemma 4 26B once wrote a tool call the server could not read, which TUFF
+  reports as HTTP 500.
+- Stopping a question with **Stop Research** cancels its model request, and
+  ending `tuff research` with Control-C closes its connection. Either way
+  TUFF stops generating that reply, so the next question does not wait
+  behind it. TUFF now ends a request whose client closes its side of the
+  connection, so a client must keep it open until the reply arrives.
 - Pages are fetched without running JavaScript, so sites that build their
   content in the browser return little text.
 - DuckDuckGo's HTML results can change shape or rate-limit. Set `SEARXNG_URL`
