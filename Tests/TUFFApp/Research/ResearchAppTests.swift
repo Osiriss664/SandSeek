@@ -331,39 +331,23 @@ import TUFFAppServer
     }
 }
 
-/// Removes the throwaway defaults domains a test made once the test is
-/// done, so test runs leave no preference files behind.
-private final class DefaultsDomains: @unchecked Sendable {
+/// Settings kept in memory, so tests never touch real preferences.
+private final class MemorySettings: ResearchSettingsStore {
     private let lock = NSLock()
-    private var names: [String] = []
+    private var values: [String: String] = [:]
 
-    func make() -> UserDefaults {
-        let name = "TUFFResearchTests-\(UUID().uuidString)"
-        lock.withLock { names.append(name) }
-        let defaults = UserDefaults(suiteName: name)!
-        defaults.removePersistentDomain(forName: name)
-        return defaults
+    func savedString(forKey key: String) -> String? {
+        lock.withLock { values[key] }
     }
 
-    deinit {
-        // Emptying a domain leaves its file behind, so the file goes too,
-        // after the emptied domain is written out.
-        let preferences = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Preferences", isDirectory: true)
-        for name in names {
-            UserDefaults.standard.removePersistentDomain(forName: name)
-            CFPreferencesAppSynchronize(name as CFString)
-            try? FileManager.default.removeItem(
-                at: preferences.appendingPathComponent("\(name).plist"))
-        }
+    func save(_ value: String, forKey key: String) {
+        lock.withLock { values[key] = value }
     }
 }
 
 @Suite @MainActor struct ResearchSandboxControllerTests {
-    private let domains = DefaultsDomains()
-
-    private func defaults() -> UserDefaults {
-        domains.make()
+    private func defaults() -> MemorySettings {
+        MemorySettings()
     }
 
     private func controller(runner: FakeProcessRunner = FakeProcessRunner(),

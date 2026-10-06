@@ -3,6 +3,23 @@ import Foundation
 import Observation
 import TUFFResearchCore
 
+/// The two string settings the sandbox controller remembers. Tests pass an
+/// in-memory store so a run never writes real preferences.
+public protocol ResearchSettingsStore {
+    func savedString(forKey key: String) -> String?
+    func save(_ value: String, forKey key: String)
+}
+
+extension UserDefaults: ResearchSettingsStore {
+    public func savedString(forKey key: String) -> String? {
+        string(forKey: key)
+    }
+
+    public func save(_ value: String, forKey key: String) {
+        set(value, forKey: key)
+    }
+}
+
 /// One line of `Scripts/research_sandbox.sh selftest`.
 public struct ResearchSelfTestCheck: Equatable, Identifiable, Sendable {
     public enum Outcome: Equatable, Sendable { case passed, failed, warning }
@@ -120,13 +137,13 @@ public final class ResearchSandboxController {
 
     private let runner: any ResearchProcessRunning
     private let transport: any ResearchHTTPTransport
-    private let defaults: UserDefaults
+    private let defaults: any ResearchSettingsStore
     private let environment: [String: String]
 
     public init(baseURL: URL = ResearchSandboxController.defaultURL,
                 runner: any ResearchProcessRunning = FoundationProcessRunner(),
                 transport: any ResearchHTTPTransport = URLSessionResearchTransport(timeout: 3),
-                defaults: UserDefaults = .standard,
+                defaults: any ResearchSettingsStore = UserDefaults.standard,
                 environment: [String: String] = ResearchCommandEnvironment.environment(),
                 searchStart: [URL] = ResearchSandboxController.defaultSearchStart(),
                 stateDirectory: URL = ResearchSandboxController.defaultStateDirectory()) {
@@ -137,7 +154,7 @@ public final class ResearchSandboxController {
         self.defaults = defaults
         self.environment = environment
         var candidates = searchStart
-        if let saved = defaults.string(forKey: Self.repositoryKey) {
+        if let saved = defaults.savedString(forKey: Self.repositoryKey) {
             candidates.insert(URL(fileURLWithPath: saved, isDirectory: true), at: 0)
         }
         repository = candidates.lazy.compactMap {
@@ -204,7 +221,7 @@ public final class ResearchSandboxController {
             return false
         }
         repository = found
-        defaults.set(found.path, forKey: Self.repositoryKey)
+        defaults.save(found.path, forKey: Self.repositoryKey)
         if case .failed = state { state = .off }
         return true
     }
@@ -440,7 +457,7 @@ public final class ResearchSandboxController {
                 state = .failed(Self.message(for: built, doing: "build the sandbox image"))
                 return
             }
-            defaults.set(fingerprint, forKey: Self.fingerprintKey)
+            defaults.save(fingerprint, forKey: Self.fingerprintKey)
         }
         state = .starting
         guard let started = await runScript(script, "start") else { return }
@@ -590,7 +607,7 @@ public final class ResearchSandboxController {
     }
 
     private func needsBuild(fingerprint: String) async -> Bool {
-        guard defaults.string(forKey: Self.fingerprintKey) == fingerprint else { return true }
+        guard defaults.savedString(forKey: Self.fingerprintKey) == fingerprint else { return true }
         let inspected = try? await runner.run(
             executable: URL(fileURLWithPath: "/usr/bin/env"),
             arguments: ["container", "image", "inspect", Self.imageName],
