@@ -850,6 +850,11 @@ private struct ResearchReportView: View {
                     .appFont(.caption)
                     .foregroundStyle(.orange)
             }
+            if report.unverifiedFigureCount > 0 {
+                Text("\(report.unverifiedFigureCount) \(report.unverifiedFigureCount == 1 ? "figure was" : "figures were") not found on the pages they cite. The saved report lists them under Figure check.")
+                    .appFont(.caption)
+                    .foregroundStyle(.orange)
+            }
             if report.budgetExhausted {
                 Text("The research ran out of steps, so this answer may be incomplete.")
                     .appFont(.caption)

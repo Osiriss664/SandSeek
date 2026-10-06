@@ -81,6 +81,10 @@ public struct SavedResearchReport: Codable, Equatable, Identifiable, Sendable {
     /// Why the research ended before it had an answer; nil for a finished
     /// report. Such a report holds the pages and searches so far.
     public var endedEarly: String? { endedEarlyReason }
+    /// Optional so reports saved before it existed still load.
+    private let unverifiedFigureTotal: Int?
+    /// How many figures in the answer were not found on the pages cited.
+    public var unverifiedFigureCount: Int { unverifiedFigureTotal ?? 0 }
     public let unknownCitations: [Int]
     public let steps: [ResearchStep]
     /// The report as `tuff research` prints it, made inert for viewers.
@@ -108,6 +112,7 @@ public struct SavedResearchReport: Codable, Equatable, Identifiable, Sendable {
         savedSearchQueries = report.searchQueries.map(ResearchText.terminalSafe)
         stoppedOnRepeats = report.stoppedRepeatedSearches
         endedEarlyReason = report.endedEarly.map(ResearchText.terminalSafe)
+        unverifiedFigureTotal = report.unverifiedFigures.count
         unknownCitations = report.unknownCitations
         self.steps = steps
         markdown = report.markdown

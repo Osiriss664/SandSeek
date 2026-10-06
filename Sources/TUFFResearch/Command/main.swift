@@ -74,6 +74,7 @@ let agent = ResearchAgent(
         case .retryingAfterModelError: writeProgress("    model error while thinking; asking again without thinking")
         case .retryingAfterModelErrorAgain: writeProgress("    model error; asking once more")
         case .stoppingRepeatedSearches: writeProgress("    only repeated searches or pages; stopping and asking for the answer")
+        case .unverifiedFigures(let count): writeProgress("    \(count) figures not found on the pages they cite")
         }
     })
 

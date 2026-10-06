@@ -307,6 +307,8 @@ public final class ResearchRunController {
         case .stoppingRepeatedSearches:
             append(.turn, "Only repeated searches or pages; stopping and asking for the answer",
                    started: started)
+        case .unverifiedFigures(let count):
+            append(.turn, "\(count) figures not found on the pages they cite", started: started)
         }
     }
 

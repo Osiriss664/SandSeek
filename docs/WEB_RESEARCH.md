@@ -372,6 +372,14 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
   third as long as the first answer; otherwise the first answer stays, and
   the report still flags its unread citations. This costs one more model
   turn, and only when it happens.
+- The report flags figures in the answer that are not on the pages the same
+  sentence cites. The run keeps the full text of each page it read (up to
+  200,000 characters per page and a million in all, so compaction does not
+  affect it) and compares numbers by their digits, so `5,82` and `5.82`
+  match. Years, dates and single digits are skipped. The answer is not
+  changed and the model is not asked again; the "Figure check" section is a
+  hint, not proof, since a page can state a figure in words or in a
+  different unit.
 - The model is told today's date and that pages dated up to today are real.
   Without that, Qwen called 2026 news "simulated" because it is newer than
   its training data. It is also told that a real page is not automatically a

@@ -2172,3 +2172,98 @@ struct ResearchArgumentsTests {
         #expect((try? ResearchArguments.parse(["--help"]))?.showHelp == true)
     }
 }
+
+@Suite("Web research figure check")
+struct ResearchFigureCheckTests {
+    private func check(_ answer: String, _ texts: [Int: String]) -> [ResearchUnverifiedFigure] {
+        ResearchFigureCheck.unverified(answer: answer, sourceTexts: texts)
+    }
+
+    private func figures(_ text: String) -> [String] {
+        ResearchFigureCheck.tokens(in: ResearchFigureCheck.withoutNoise(text)).filter { !$0.ignored }.map(\.text)
+    }
+
+    @Test func aFigureOnTheCitedPageIsFoundAndOneMissingIsFlagged() {
+        let answer = "Arbeitslosigkeit 4,74 % [4]"
+        #expect(check(answer, [4: "unemployment fell to 4.74 percent"]).isEmpty)
+        #expect(check(answer, [4: "unemployment fell sharply"])
+            == [ResearchUnverifiedFigure(figure: "4,74", sources: [4])])
+    }
+
+    @Test func aFigureIsCheckedOnlyAgainstThePagesItCites() {
+        let texts = [6: "Minimum wage Rp 3,207,459 per month", 8: "Rp 3,207,459 in Bali",
+                     4: "Rp 3,167,370"]
+        #expect(check("Mindestlohn 3.167.370 Rp [6], [8]", texts)
+            == [ResearchUnverifiedFigure(figure: "3.167.370", sources: [6, 8])])
+        #expect(check("Mindestlohn 3.207.459 Rp [6][8]", texts).isEmpty)
+        #expect(check("Mindestlohn 3.167.370 Rp [4]", texts).isEmpty)
+    }
+
+    @Test func germanAndEnglishSeparatorsMatch() {
+        #expect(check("Wachstum 5,82 % [1]", [1: "growth of 5.82%"]).isEmpty)
+        #expect(check("7,1 Mio Menschen [1]", [1: "about 7.1 million people"]).isEmpty)
+        #expect(check("1'234 Einwohner [1]", [1: "1,234 residents"]).isEmpty)
+        #expect(check("1 234 Einwohner [1]", [1: "1.234 residents"]).isEmpty)
+    }
+
+    @Test func yearsDatesCitationsAndSingleDigitsAreIgnored() {
+        #expect(figures("Im Jahr 2025 am 5.2.2026 und 5.2. waren 3 Orte [12], [34]").isEmpty)
+        #expect(figures("Am 15. Februar um 12:30 Uhr, siehe https://example.com/a/4567 und H2O").isEmpty)
+        let answer = "Im Jahr 2025 am 5.2.2026 waren 3 Orte [1]"
+        #expect(check(answer, [1: "nothing numeric here"]).isEmpty)
+        #expect(figures("Wert 5,8 und 150 und 1.234,56") == ["5,8", "150", "1.234,56"])
+    }
+
+    @Test func eachEndOfARangeIsChecked() {
+        let answer = "Die Rate lag bei 5,4–6,2 % [3]"
+        #expect(check(answer, [3: "between 5.4 and 6.2 percent"]).isEmpty)
+        #expect(check(answer, [3: "between 5.4 and 6.0 percent"])
+            == [ResearchUnverifiedFigure(figure: "6,2", sources: [3])])
+    }
+
+    @Test func aSentenceWithoutCitationsOrWithoutPageTextIsNotChecked() {
+        #expect(check("Es sind 4,74 % gewesen.", [1: "nothing"]).isEmpty)
+        #expect(check("Es sind 4,74 % gewesen [2].", [1: "nothing"]).isEmpty)
+        // The citation after the full stop belongs to the sentence before it.
+        #expect(check("Es sind 4,74 % gewesen. [1]", [1: "nothing"])
+            == [ResearchUnverifiedFigure(figure: "4,74", sources: [1])])
+        // Another sentence and list items are checked on their own.
+        let answer = "Es sind 4,74 % [1]. Dazu kommen 88 Orte.\n- 12,5 Punkte [1]"
+        #expect(check(answer, [1: "4.74 and 12.5"]).isEmpty)
+    }
+
+    @Test func aRunWithAFigureNotOnItsPageIsFlaggedInTheReport() async throws {
+        var options = ResearchOptions()
+        options.nudges = false
+        func run(page: String) async throws -> (ResearchReport, EventLog) {
+            let services = FakeServices(modelReplies: [
+                FakeServices.calls([("a", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
+                FakeServices.answer("Es läuft 4,74 % schneller [1]."),
+            ], sandbox: { path, body in
+                guard path == "/v1/fetch" else { return FakeServices.webPages(path, body) }
+                return FakeServices.json(200, .object([
+                    "url": .string(body?["url"]?.stringValue ?? ""),
+                    "title": .string("apple/container"),
+                    "text": .string(page),
+                    "offset": .integer(0),
+                    "next_offset": .null,
+                    "total_chars": .integer(page.count),
+                ]))
+            })
+            let log = EventLog()
+            return (try await agent(services, options: options, events: log).run(question: "q"), log)
+        }
+
+        let (flagged, flaggedLog) = try await run(page: "It is 3.12 percent faster.")
+        #expect(flagged.unverifiedFigures == [ResearchUnverifiedFigure(figure: "4,74", sources: [1])])
+        #expect(flagged.markdown.contains("## Figure check"))
+        #expect(flagged.markdown.contains("- 4,74 — not on [1]"))
+        #expect(flagged.answer == "Es läuft 4,74 % schneller [1].")
+        #expect(flaggedLog.events.filter { $0 == .unverifiedFigures(1) }.count == 1)
+
+        let (found, foundLog) = try await run(page: "It is 4.74 percent faster.")
+        #expect(found.unverifiedFigures.isEmpty)
+        #expect(!found.markdown.contains("Figure check"))
+        #expect(!foundLog.events.contains(.unverifiedFigures(1)))
+    }
+}

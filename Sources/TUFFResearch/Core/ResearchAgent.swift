@@ -88,6 +88,10 @@ public struct ResearchReport: Equatable, Sendable {
     /// True when no web page was read, so the answer rests on the model's
     /// memory or on search previews only.
     public var noPagesRead: Bool { sources.isEmpty }
+    /// Figures in the answer that the pages cited for them do not contain,
+    /// worked out from the page text the run read. A hint, not proof: a page
+    /// can state a figure in words or in another unit.
+    public var unverifiedFigures: [ResearchUnverifiedFigure] = []
 
     /// The report as Markdown that is safe to print and to open in a viewer:
     /// no control or invisible characters, no images, no loading HTML tags.
@@ -111,6 +115,18 @@ public struct ResearchReport: Equatable, Sendable {
                     source.title.replacingOccurrences(of: "[", with: "(")
                         .replacingOccurrences(of: "]", with: ")"))
                 text += "\(source.number). [\(title)](\(url))\n"
+            }
+        }
+        if !unverifiedFigures.isEmpty {
+            text += "\n## Figure check\n\n_These figures were not found on the pages they cite; "
+                + "check them before relying on them:_\n\n"
+            for item in unverifiedFigures.prefix(Self.figureCheckLimit) {
+                let cited = item.sources.map { "[\($0)]" }.joined(separator: ", ")
+                let figure = ResearchText.inertMarkdown(ResearchText.oneLine(item.figure, limit: 40))
+                text += "- \(figure) — not on \(cited)\n"
+            }
+            if unverifiedFigures.count > Self.figureCheckLimit {
+                text += "- and \(unverifiedFigures.count - Self.figureCheckLimit) more\n"
             }
         }
         if !searchQueries.isEmpty {
@@ -145,6 +161,9 @@ public struct ResearchReport: Equatable, Sendable {
         }
         return ResearchText.terminalSafe(text)
     }
+
+    /// Figures the report lists under "Figure check"; the rest are counted.
+    static let figureCheckLimit = 20
 
     /// Citation numbers in the answer that match no source, such as a model
     /// numbering a page it read twice as two sources. Reads `[2]`, `[1, 2]`
@@ -236,6 +255,9 @@ public enum ResearchEvent: Equatable, Sendable {
     /// The model spent steps in a row only repeating searches it already
     /// ran, so the research stops and asks for the answer now.
     case stoppingRepeatedSearches
+    /// The final answer has this many figures that are not on the pages cited
+    /// for them. Emitted once, with the report carrying the list.
+    case unverifiedFigures(Int)
 }
 
 /// The research loop. The model can only search the web and read pages, and
@@ -460,11 +482,14 @@ public struct ResearchAgent: Sendable {
                     continue
                 }
                 if let earlier = answerBeforeSearchingMore, Self.isIncomplete(turn) {
-                    return state.report(answer: earlier, turns: step, exhausted: false)
+                    return checkingFigures(
+                        state.report(answer: earlier, turns: step, exhausted: false), state: state)
                 }
                 let first = try await answer(from: turn, state: &state)
                 let (text, cutOff) = try await reviseUnreadCitations(first, state: &state)
-                return state.report(answer: text, turns: step, exhausted: false, cutOff: cutOff)
+                return checkingFigures(
+                    state.report(answer: text, turns: step, exhausted: false, cutOff: cutOff),
+                    state: state)
             }
             calledTools = true
             state.messages.append(assistantMessage(turn))
@@ -560,12 +585,14 @@ public struct ResearchAgent: Sendable {
         let exhausted = stoppedAtStep == nil
         var report: ResearchReport
         if let earlier = answerBeforeSearchingMore, Self.isIncomplete(final) {
-            report = state.report(answer: earlier, turns: turns, exhausted: exhausted)
+            report = checkingFigures(
+                state.report(answer: earlier, turns: turns, exhausted: exhausted), state: state)
         } else {
             let first = try await answer(from: final, state: &state)
             let (text, cutOff) = try await reviseUnreadCitations(first, state: &state)
-            report = state.report(
-                answer: text, turns: turns, exhausted: exhausted, cutOff: cutOff)
+            report = checkingFigures(
+                state.report(answer: text, turns: turns, exhausted: exhausted, cutOff: cutOff),
+                state: state)
         }
         report.stoppedRepeatedSearches = stoppedAtStep != nil
         return report
@@ -599,6 +626,18 @@ public struct ResearchAgent: Sendable {
         }
         throw ResearchError.noAnswer(
             tokenLimit: turn.finishReason == "length" || retry.finishReason == "length")
+    }
+
+    /// Adds the figures of the final answer that are not on the pages cited
+    /// for them. The answer is not changed and the model is not asked again.
+    private func checkingFigures(_ report: ResearchReport, state: State) -> ResearchReport {
+        var checked = report
+        checked.unverifiedFigures = ResearchFigureCheck.unverified(
+            answer: report.answer, sourceTexts: state.pageTexts)
+        if !checked.unverifiedFigures.isEmpty {
+            onEvent(.unverifiedFigures(checked.unverifiedFigures.count))
+        }
+        return checked
     }
 
     /// An answer that cites source numbers no page was read for (Qwen cited
@@ -1016,6 +1055,7 @@ public struct ResearchAgent: Sendable {
                 maxCharacters: maxCharacters ?? options.pageSliceCharacters)
             let alreadyNumbered = state.sources.contains { $0.url == page.url }
             let source = state.source(for: page)
+            state.recordText(page.text, for: source)
             state.recordRead(requested: url, page: page, offset: offset)
             return Self.formatPage(page, source: source, alreadyNumbered: alreadyNumbered)
         } catch let failure as ResearchToolFailure {
@@ -1112,6 +1152,23 @@ public struct ResearchAgent: Sendable {
         /// Times `compact` shortened results, to tell when an earlier read
         /// may be worth repeating.
         var compactions = 0
+        /// The page text read per source number, every slice in turn, kept
+        /// whole because compaction shortens the copies in the messages.
+        var pageTexts: [Int: String] = [:]
+        private var pageTextTotal = 0
+        static let pageTextPerSource = 200_000
+        static let pageTextTotalLimit = 1_000_000
+
+        /// Keeps the text of a slice for the figure check, within the limits.
+        mutating func recordText(_ text: String, for source: ResearchSource) {
+            let room = min(Self.pageTextPerSource - (pageTexts[source.number]?.count ?? 0),
+                           Self.pageTextTotalLimit - pageTextTotal)
+            guard room > 0, !text.isEmpty else { return }
+            let kept = text.count <= room ? text : String(text.prefix(room))
+            pageTexts[source.number, default: ""] += kept
+            pageTextTotal += kept.count
+        }
+
         /// Page parts read, by `pageKey`.
         var pageReads: [String: PageRead] = [:]
 
