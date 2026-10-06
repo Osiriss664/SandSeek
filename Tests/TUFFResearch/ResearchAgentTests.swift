@@ -147,17 +147,21 @@ private final class TimingOutTransport: ResearchHTTPTransport, @unchecked Sendab
     private let lock = NSLock()
     private let services: FakeServices
     private let timeOutOnModelCall: Int
+    private let alsoTimeOutOnModelCall: Int?
     private var modelCalls = 0
 
-    init(_ services: FakeServices, timeOutOnModelCall: Int) {
+    init(_ services: FakeServices, timeOutOnModelCall: Int, alsoOn alsoTimeOutOnModelCall: Int? = nil) {
         self.services = services
         self.timeOutOnModelCall = timeOutOnModelCall
+        self.alsoTimeOutOnModelCall = alsoTimeOutOnModelCall
     }
 
     func send(method: String, url: URL, body: Data?) async throws -> ResearchHTTPResponse {
         if url.path.hasSuffix("/chat/completions") {
             let call = lock.withLock { modelCalls += 1; return modelCalls }
-            if call == timeOutOnModelCall { throw URLError(.timedOut) }
+            if call == timeOutOnModelCall || call == alsoTimeOutOnModelCall {
+                throw URLError(.timedOut)
+            }
         }
         return try await services.send(method: method, url: url, body: body)
     }
@@ -1795,13 +1799,45 @@ struct ResearchAgentTests {
         // Reasoning stays off for the rest of the run.
         #expect(services.modelRequests[2]["enable_thinking"] == .bool(false))
         #expect(services.modelRequests[0]["enable_thinking"] == .bool(true))
+    }
 
-        // Without reasoning there is nothing to turn off, so the run stops.
-        let plain = FakeServices(modelReplies: [FakeServices.answer("never")])
-        await #expect(throws: ResearchError.modelTimedOut) {
-            _ = try await agent(plain, events: nil, transport: TimingOutTransport(
-                plain, timeOutOnModelCall: 1)).run(question: "q")
+    @Test func aTimedOutStepWithoutThinkingIsShortenedAndAskedOnce() async throws {
+        func replies(_ final: [ResearchHTTPResponse]) -> FakeServices {
+            FakeServices(modelReplies: [
+                FakeServices.calls([("a", "open_page", #"{"url":"https://a.example/"}"#)]),
+            ] + final)
         }
+        var options = ResearchOptions()
+        options.nudges = false
+
+        // The step after the page times out once; the retry goes through.
+        let services = replies([FakeServices.answer("Answer [1]."), FakeServices.answer("Answer [1].")])
+        let log = EventLog()
+        let report = try await agent(
+            services, options: options, events: log,
+            transport: TimingOutTransport(services, timeOutOnModelCall: 2)).run(question: "q")
+        #expect(report.answer == "Answer [1].")
+        #expect(log.events.filter { $0 == .retryingAfterTimeoutShorter }.count == 1)
+        #expect(!log.events.contains(.retryingAfterTimeout))
+        // The timed-out request never reached the server; the retry did, with
+        // the same thinking setting (none here).
+        #expect(services.modelRequests.count >= 2)
+        #expect(services.modelRequests[1]["enable_thinking"] == nil)
+
+        // A second timeout in a row ends the run, which keeps the page it read.
+        let failing = replies([FakeServices.answer("never")])
+        let failingLog = EventLog()
+        do {
+            _ = try await agent(
+                failing, options: options, events: failingLog,
+                transport: TimingOutTransport(failing, timeOutOnModelCall: 2, alsoOn: 3))
+                .run(question: "q")
+            Issue.record("expected the run to end early")
+        } catch let ended as ResearchRunEndedEarly {
+            #expect(ended.underlying as? ResearchError == .modelTimedOut)
+            #expect(ended.partial.sources.map(\.url) == ["https://a.example/"])
+        }
+        #expect(failingLog.events.filter { $0 == .retryingAfterTimeoutShorter }.count == 1)
     }
 
     @Test func stepsWithThinkingGetTheThinkingLimit() async throws {
@@ -2209,8 +2245,9 @@ struct ResearchFigureCheckTests {
     @Test func yearsDatesCitationsAndSingleDigitsAreIgnored() {
         #expect(figures("Im Jahr 2025 am 5.2.2026 und 5.2. waren 3 Orte [12], [34]").isEmpty)
         #expect(figures("Am 15. Februar um 12:30 Uhr, siehe https://example.com/a/4567 und H2O").isEmpty)
+        // Years and dates are not figures; they are checked as years and dates.
         let answer = "Im Jahr 2025 am 5.2.2026 waren 3 Orte [1]"
-        #expect(check(answer, [1: "nothing numeric here"]).isEmpty)
+        #expect(check(answer, [1: "Im Jahr 2025 am 5.2.2026"]).isEmpty)
         #expect(figures("Wert 5,8 und 150 und 1.234,56") == ["5,8", "150", "1.234,56"])
     }
 
@@ -2230,6 +2267,62 @@ struct ResearchFigureCheckTests {
         // Another sentence and list items are checked on their own.
         let answer = "Es sind 4,74 % [1]. Dazu kommen 88 Orte.\n- 12,5 Punkte [1]"
         #expect(check(answer, [1: "4.74 and 12.5"]).isEmpty)
+    }
+
+    @Test func aDateNotOnTheCitedPageIsFlagged() {
+        let answer = "Es gab Neuwahlen vom 29. November 2024 [3]."
+        #expect(check(answer, [3: "Die Regierung zerbrach im Herbst."])
+            == [ResearchUnverifiedFigure(figure: "29. November 2024", sources: [3])])
+        // Another day in the same month is not the same date.
+        #expect(check(answer, [3: "Wahl am 30. November 2024"])
+            == [ResearchUnverifiedFigure(figure: "29. November 2024", sources: [3])])
+        // The date's parts are not checked as separate figures.
+        #expect(check(answer, [3: "Wahl am 29. November 2024"]).isEmpty)
+    }
+
+    @Test func aDateMatchesTheSameDateInAnotherFormat() {
+        let page = "Published November 29, 2024 by the paper."
+        #expect(check("Am 29.11.2024 [1]", [1: page]).isEmpty)
+        #expect(check("Am 29. November 2024 [1]", [1: page]).isEmpty)
+        #expect(check("On 29 Nov. 2024 [1]", [1: page]).isEmpty)
+        #expect(check("Am 2024-11-29 [1]", [1: page]).isEmpty)
+        #expect(check("Am 29. März 2024 [1]", [1: "Stand 29.03.2024"]).isEmpty)
+        #expect(check("Am 29. Maerz 2024 [1]", [1: "Mar 29, 2024"]).isEmpty)
+        #expect(check("Am 3. Okt 2024 [1]", [1: "October 3, 2024"]).isEmpty)
+        #expect(check("Am 4.12.2024 [1]", [1: page])
+            == [ResearchUnverifiedFigure(figure: "4.12.2024", sources: [1])])
+    }
+
+    @Test func aYearIsFoundOnThePageOrFlagged() {
+        let answer = "Im Jahr 2023 stieg der Wert [2]."
+        #expect(check(answer, [2: "Der Wert stieg im Jahr 2023."]).isEmpty)
+        #expect(check(answer, [2: "Der Wert stieg stark."])
+            == [ResearchUnverifiedFigure(figure: "2023", sources: [2])])
+        // A year inside a date on the page counts.
+        #expect(check(answer, [2: "Stand: 5.2.2023"]).isEmpty)
+        #expect(check(answer, [2: "Stand: März 2023"]).isEmpty)
+    }
+
+    @Test func eachYearOfARangeIsChecked() {
+        let answer = "Saison 2025/2026 [1]"
+        #expect(check(answer, [1: "season 2025 and 2026"]).isEmpty)
+        #expect(check(answer, [1: "season 2025 only"])
+            == [ResearchUnverifiedFigure(figure: "2026", sources: [1])])
+        #expect(check("Saison 2025–2026 [1]", [1: "nothing"])
+            == [ResearchUnverifiedFigure(figure: "2025", sources: [1]),
+                ResearchUnverifiedFigure(figure: "2026", sources: [1])])
+    }
+
+    @Test func aMonthAndYearNeedsTheSameMonthOnThePage() {
+        let answer = "Seit November 2024 [1]"
+        #expect(check(answer, [1: "Stand November 2024"]).isEmpty)
+        #expect(check(answer, [1: "Am 29.11.2024 beschlossen"]).isEmpty)
+        #expect(check(answer, [1: "Am 5. Dezember 2024 beschlossen"])
+            == [ResearchUnverifiedFigure(figure: "November 2024", sources: [1])])
+    }
+
+    @Test func anOrdinalDayAloneIsStillIgnored() {
+        #expect(check("Am 15. Februar um 12:30 Uhr [1]", [1: "nothing"]).isEmpty)
     }
 
     @Test func aRunWithAFigureNotOnItsPageIsFlaggedInTheReport() async throws {

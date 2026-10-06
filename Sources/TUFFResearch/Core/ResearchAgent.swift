@@ -118,7 +118,7 @@ public struct ResearchReport: Equatable, Sendable {
             }
         }
         if !unverifiedFigures.isEmpty {
-            text += "\n## Figure check\n\n_These figures were not found on the pages they cite; "
+            text += "\n## Figure check\n\n_These figures or dates were not found on the pages they cite; "
                 + "check them before relying on them:_\n\n"
             for item in unverifiedFigures.prefix(Self.figureCheckLimit) {
                 let cited = item.sources.map { "[\($0)]" }.joined(separator: ", ")
@@ -239,6 +239,9 @@ public enum ResearchEvent: Equatable, Sendable {
     /// A turn ran past the request timeout, and is asked again with
     /// reasoning off.
     case retryingAfterTimeout
+    /// A step with reasoning off took too long; older results were shortened
+    /// and it was asked once more.
+    case retryingAfterTimeoutShorter
     /// A turn ran out of tokens while thinking, before it called a tool or
     /// answered, with steps left. The research goes on with reasoning off,
     /// instead of the run ending there.
@@ -886,6 +889,14 @@ public struct ResearchAgent: Sendable {
         } catch ResearchError.modelTimedOut where thinks {
             state.thinkingTimedOut = true
             onEvent(.retryingAfterTimeout)
+        } catch ResearchError.modelTimedOut {
+            // A step with reasoning already off is slow because its prompt is
+            // long: shorten older results to half the budget and ask once more.
+            retryThinking = thinking
+            onEvent(.retryingAfterTimeoutShorter)
+            if state.compact(toFit: promptBudget(state) / 2, overhead: Self.toolCharacters) {
+                onEvent(.shortenedOlderResults)
+            }
         } catch ResearchError.modelRequestFailed(let status, _, let code)
                     where status >= 500 && !Self.answeredErrors.contains(code ?? "") {
             if thinks {

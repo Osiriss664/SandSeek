@@ -45,7 +45,7 @@ launches; **Restore Defaults** resets them.
 | `--auto-open on\|off` | Open top results when too few pages are read | on | The research opens top results itself (see [Limits](#limits)). |
 | `--nudges on\|off` | Ask the model to search, read and look wider | on | The requests to search first, open pages and look wider (see [Limits](#limits)). |
 | `--rewrite on\|off` | Rewrite answers that cite unread pages | on | One rewrite when the answer cites pages that were never read. |
-| `--step-timeout <1...60>` | Step time limit | 30 minutes | A step that takes longer is asked again without reasoning, then given up. |
+| `--step-timeout <1...60>` | Step time limit | 30 minutes | A step with reasoning on that takes longer is asked again without reasoning; a step with reasoning already off is asked once more with older results shortened. A second failure ends the question (the pages read are kept). |
 | `--thinking-limit <1...60>` | Thinking time limit | 3 minutes | A step with reasoning on that takes longer is asked again without reasoning, which stays off for the rest of the question. |
 
 The model is chosen with `--model` or the app's model menu. Limits that
@@ -373,11 +373,16 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
   third as long as the first answer; otherwise the first answer stays, and
   the report still flags its unread citations. This costs one more model
   turn, and only when it happens.
-- The report flags figures in the answer that are not on the pages the same
-  sentence cites. The run keeps the full text of each page it read (up to
+- The report flags figures and dates in the answer that are not on the pages
+  the same sentence cites. The run keeps the full text of each page it read (up to
   200,000 characters per page and a million in all, so compaction does not
   affect it) and compares numbers by their digits, so `5,82` and `5.82`
-  match. Years, dates and single digits are skipped. The answer is not
+  match. Single digits, times and ordinal days such as `15. Februar` are
+  skipped. Full dates (`29.11.2024`, `29. November 2024`, `November 29, 2024`,
+  `2024-11-29`, German or English month names) match the same day, month and
+  year in any of these forms; `November 2024` needs that month on a cited page;
+  a year (also each of `2025/2026`) must be on a cited page as a year, in a
+  date or as a number. The answer is not
   changed and the model is not asked again; the "Figure check" section is a
   hint, not proof, since a page can state a figure in words or in a
   different unit.

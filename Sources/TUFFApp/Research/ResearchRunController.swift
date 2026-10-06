@@ -294,6 +294,9 @@ public final class ResearchRunController {
             append(.turn, "Shortened older results to fit the model's context", started: started)
         case .retryingAfterTimeout:
             append(.turn, "Step took too long; asking again without thinking", started: started)
+        case .retryingAfterTimeoutShorter:
+            append(.turn, "Step took too long; shortening older results and asking once more",
+                   started: started)
         case .continuingAfterCutOff:
             append(.turn, "Step ran out of room while thinking; continuing the research",
                    started: started)
