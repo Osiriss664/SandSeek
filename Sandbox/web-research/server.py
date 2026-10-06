@@ -62,7 +62,9 @@ SEARXNG_URL = os.environ.get("SEARXNG_URL", "").rstrip("/")
 USER_AGENT = os.environ.get(
     "USER_AGENT",
     "Mozilla/5.0 (compatible; TUFF-web-research/1.0; +https://github.com/rexmhall09/TUFF)")
-FETCH_TIMEOUT = float(os.environ.get("FETCH_TIMEOUT", "15"))
+# Each wait for a connection or data. Some official sites (Bank Indonesia)
+# take over 20 s to answer, so 15 s cut them off.
+FETCH_TIMEOUT = float(os.environ.get("FETCH_TIMEOUT", "30"))
 # The whole request, so a server that drips one byte at a time cannot hold a
 # fetch open; FETCH_TIMEOUT alone only limits each wait.
 FETCH_DEADLINE = float(os.environ.get("FETCH_DEADLINE", "45"))

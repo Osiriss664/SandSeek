@@ -220,7 +220,8 @@ what it downloads. The design limits what either can reach:
   the VM's gateway, which is the Mac. Every DNS answer must be public, the
   connection goes to the address that was checked, and every redirect is
   checked again. Only http on port 80 and https on port 443 are allowed.
-  Responses are capped at 5 MB and 45 seconds per request, and only HTML and
+  Responses are capped at 5 MB and 45 seconds per request (30 seconds for
+  any single wait, as slow official sites need more than 20), and only HTML and
   plain text are read. IPv6 addresses must be global unicast; forms that
   embed an IPv4 address, such as NAT64, 6to4 and Teredo, are refused.
 - **Both local services stay on loopback.** `tuff research` refuses a
