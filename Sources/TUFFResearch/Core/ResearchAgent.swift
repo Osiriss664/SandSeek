@@ -19,6 +19,10 @@ public struct ResearchOptions: Equatable, Sendable {
     /// Whether an answer citing pages the research never read is sent back
     /// once to be rewritten.
     public var reviseUnreadCitations = true
+    /// Minutes a step with reasoning on may take before it is asked again
+    /// with reasoning off, which then stays off for the rest of the run.
+    /// Qwen3.6 reasoned for up to 14 minutes on one step on a 16 GB Mac.
+    public var thinkingMinutes: Int = ResearchOptions.defaultThinkingMinutes
     /// Characters of page text one `open_page` call returns.
     public var pageSliceCharacters: Int = 3_000
     /// Prompt budget in characters before older results are shortened. Nil
@@ -44,6 +48,8 @@ public struct ResearchOptions: Equatable, Sendable {
     /// reasoning, and then given up.
     public static let stepTimeoutMinutesRange = 1...60
     public static let defaultStepTimeoutMinutes = 30
+    public static let thinkingMinutesRange = 1...60
+    public static let defaultThinkingMinutes = 3
 
     public init() {}
 
@@ -193,6 +199,9 @@ public enum ResearchEvent: Equatable, Sendable {
     /// The answer cited pages the research never read, and the model is
     /// asked once to rewrite it from the pages it did read.
     case revisingUnreadCitations
+    /// The server failed a step with reasoning on (Gemma 4 wrote a broken
+    /// tool call), and the step is asked again with reasoning off.
+    case retryingAfterModelError
     /// The model spent steps in a row only repeating searches it already
     /// ran, so the research stops and asks for the answer now.
     case stoppingRepeatedSearches
@@ -753,27 +762,35 @@ public struct ResearchAgent: Sendable {
         return Int(min(characters, Double(Self.largestBudgetCharacters)))
     }
 
-    /// Sends the conversation. A turn that runs past the request timeout,
-    /// usually because the model reasoned for its whole token limit on a
-    /// slow Mac, is asked once more with reasoning off, so a long run is not
-    /// lost to one slow step. Reasoning then stays off for the rest of the
-    /// run, as the next turns would most likely be as slow. TUFF may finish
-    /// the abandoned reply before it starts the retry; that reply is bounded
-    /// by the same token limit.
+    /// Sends the conversation. A turn with reasoning on that runs past the
+    /// thinking limit (`thinkingMinutes`) or the request timeout is asked
+    /// once more with reasoning off, so a run is not held up, or lost, by
+    /// one long think; the abandoned request is cancelled, which stops the
+    /// server generating it. A server error on a turn with reasoning on
+    /// (Gemma 4 wrote a tool call the server could not read) is asked again
+    /// the same way. Reasoning then stays off for the rest of the run, as the
+    /// next turns would most likely go the same way.
     private func complete(_ state: inout State,
                           allowTools: Bool,
                           thinking: Bool? = nil) async throws -> ResearchAssistantTurn {
         let thinking = state.reasoningOff ? false : thinking
+        let thinks = (thinking ?? chat.enableThinking) == true
         do {
             return try await sendTurningThinkingOff(&state, allowTools: allowTools,
                                                     thinking: thinking)
-        } catch ResearchError.modelTimedOut where (thinking ?? chat.enableThinking) == true {
+        } catch ResearchError.modelTimedOut where thinks {
             state.thinkingTimedOut = true
             onEvent(.retryingAfterTimeout)
-            return try await sendTurningThinkingOff(&state, allowTools: allowTools,
-                                                    thinking: false)
+        } catch ResearchError.modelRequestFailed(let status, _, let code)
+                    where thinks && status >= 500 && !Self.answeredErrors.contains(code ?? "") {
+            state.thinkingFailed = true
+            onEvent(.retryingAfterModelError)
         }
+        return try await sendTurningThinkingOff(&state, allowTools: allowTools, thinking: false)
     }
+
+    /// Server errors that retrying without reasoning would not help.
+    static let answeredErrors: Set<String> = ["context_length_exceeded", "unsupported_parameter"]
 
     /// GPT-OSS takes reasoning_effort and refuses enable_thinking; a turn
     /// that asked for reasoning off is then sent with the client's own
@@ -802,11 +819,15 @@ public struct ResearchAgent: Sendable {
             onEvent(.shortenedOlderResults)
         }
         var sent = state.size(overhead: Self.toolCharacters)
+        // A turn with reasoning on gets the thinking limit; others only the
+        // transport's own step timeout.
+        let limit = (thinking ?? chat.enableThinking) == true
+            ? TimeInterval(options.thinkingMinutes * 60) : nil
         let turn: ResearchAssistantTurn
         do {
             turn = try await chat.complete(
                 messages: state.messages, tools: Self.tools, allowTools: allowTools,
-                thinking: thinking)
+                thinking: thinking, timeout: limit)
         } catch ResearchError.modelRequestFailed(_, _, "context_length_exceeded"?) {
             // The server's tokens hold fewer characters than estimated.
             state.charactersPerToken = max(
@@ -818,7 +839,7 @@ public struct ResearchAgent: Sendable {
             do {
                 turn = try await chat.complete(
                     messages: state.messages, tools: Self.tools, allowTools: allowTools,
-                    thinking: thinking)
+                    thinking: thinking, timeout: limit)
             } catch ResearchError.modelRequestFailed(let status, let message,
                                                      "context_length_exceeded"?) {
                 guard state.compact(toFit: promptBudget(state) / 2,
@@ -830,7 +851,7 @@ public struct ResearchAgent: Sendable {
                 sent = state.size(overhead: Self.toolCharacters)
                 turn = try await chat.complete(
                     messages: state.messages, tools: Self.tools, allowTools: allowTools,
-                    thinking: thinking)
+                    thinking: thinking, timeout: limit)
             }
         }
         state.calibrate(sentCharacters: sent, promptTokens: turn.promptTokens)
@@ -1081,10 +1102,13 @@ public struct ResearchAgent: Sendable {
         /// A turn ran out of tokens while thinking, so the rest of the run
         /// asks without reasoning.
         var thinkingCutOff = false
+        /// The server failed a turn with reasoning on, so the rest of the run
+        /// asks without it.
+        var thinkingFailed = false
         /// The server refused enable_thinking (GPT-OSS).
         var enableThinkingRefused = false
         /// Reasoning is off for the rest of the run.
-        var reasoningOff: Bool { thinkingTimedOut || thinkingCutOff }
+        var reasoningOff: Bool { thinkingTimedOut || thinkingCutOff || thinkingFailed }
         /// How many characters one prompt token holds. It starts low, as web
         /// text in German with links and numbers needs many tokens, and is
         /// measured from the prompt tokens the server reports.

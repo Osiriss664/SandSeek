@@ -72,12 +72,14 @@ public struct ResearchChatClient: Sendable {
     public func complete(messages: [ResearchJSON],
                          tools: [ResearchJSON],
                          allowTools: Bool = true,
-                         thinking: Bool? = nil) async throws -> ResearchAssistantTurn {
+                         thinking: Bool? = nil,
+                         timeout: TimeInterval? = nil) async throws -> ResearchAssistantTurn {
         let body = try requestBody(messages: messages, tools: tools, allowTools: allowTools,
                                    thinking: thinking).encoded()
         let response: ResearchHTTPResponse
         do {
-            response = try await transport.send(method: "POST", url: endpoint, body: body)
+            response = try await transport.send(
+                method: "POST", url: endpoint, body: body, timeout: timeout)
         } catch let error as URLError where error.code == .timedOut {
             throw ResearchError.modelTimedOut
         } catch {

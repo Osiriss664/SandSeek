@@ -53,6 +53,10 @@ public struct ResearchArguments: Equatable, Sendable {
                                pages that were never read (default on).
       --step-timeout <1...60>  Minutes one model step may take before it is
                                retried without reasoning (default 30).
+      --thinking-limit <1...60>
+                               Minutes a step with reasoning on may take before
+                               it is asked again with reasoning off, which then
+                               stays off for the run (default 3).
       --thinking on|off        Gemma and Qwen reasoning (default: model's own).
       --show-thinking          Turn reasoning on and print it with the
                                progress. It is not added to the report.
@@ -129,6 +133,9 @@ public struct ResearchArguments: Equatable, Sendable {
             case "--step-timeout":
                 parsed.stepTimeoutMinutes = try integer(
                     argument, ResearchOptions.stepTimeoutMinutesRange)
+            case "--thinking-limit":
+                parsed.options.thinkingMinutes = try integer(
+                    argument, ResearchOptions.thinkingMinutesRange)
             case "--thinking":
                 parsed.enableThinking = try onOff(argument)
             case "--show-thinking":

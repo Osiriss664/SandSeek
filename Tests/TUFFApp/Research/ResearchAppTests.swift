@@ -316,7 +316,7 @@ import TUFFAppServer
             model: "m", maxSteps: 500, pageCharacters: 10, contextCharacters: 5,
             searchResults: 50, toolCallsPerTurn: 0, minimumPages: 9,
             autoOpenPages: false, nudges: false, reviseUnreadCitations: false,
-            stepTimeoutMinutes: 500)
+            stepTimeoutMinutes: 500, thinkingMinutes: 500)
         let options = wild.options
         #expect(options.maxSteps == 100)
         #expect(options.pageSliceCharacters == 500)
@@ -326,6 +326,8 @@ import TUFFAppServer
         #expect(options.minimumPagesRead == 6)
         #expect(!options.autoOpenPages && !options.nudges && !options.reviseUnreadCitations)
         #expect(wild.stepTimeout == 3_600)
+        #expect(options.thinkingMinutes == 60)
+        #expect(ResearchRunSettings(model: "m", thinkingMinutes: 0).options.thinkingMinutes == 1)
     }
 }
 

@@ -163,6 +163,31 @@ private final class TimingOutTransport: ResearchHTTPTransport, @unchecked Sendab
     }
 }
 
+/// Records the time limit each model request was sent with.
+private final class TimeLimitRecorder: ResearchHTTPTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private let services: FakeServices
+    private var recorded: [TimeInterval?] = []
+
+    init(_ services: FakeServices) {
+        self.services = services
+    }
+
+    var modelLimits: [TimeInterval?] { lock.withLock { recorded } }
+
+    func send(method: String, url: URL, body: Data?) async throws -> ResearchHTTPResponse {
+        try await send(method: method, url: url, body: body, timeout: nil)
+    }
+
+    func send(method: String, url: URL, body: Data?,
+              timeout: TimeInterval?) async throws -> ResearchHTTPResponse {
+        if url.path.hasSuffix("/chat/completions") {
+            lock.withLock { recorded.append(timeout) }
+        }
+        return try await services.send(method: method, url: url, body: body)
+    }
+}
+
 private final class EventLog: @unchecked Sendable {
     private let lock = NSLock()
     private var stored: [ResearchEvent] = []
@@ -1566,6 +1591,102 @@ struct ResearchAgentTests {
         }
     }
 
+    @Test func stepsWithThinkingGetTheThinkingLimit() async throws {
+        func limits(thinking: Bool?, options: ResearchOptions = ResearchOptions(),
+                    replies: [ResearchHTTPResponse]) async throws -> [TimeInterval?] {
+            let services = FakeServices(modelReplies: replies)
+            let recorder = TimeLimitRecorder(services)
+            _ = try await ResearchAgent(
+                chat: ResearchChatClient(
+                    serverURL: URL(string: "http://127.0.0.1:8080")!, model: "default",
+                    maxTokens: 8_192, enableThinking: thinking, transport: recorder),
+                sandbox: ResearchSandboxClient(
+                    baseURL: URL(string: "http://127.0.0.1:9000")!, transport: services),
+                options: options).run(question: "q")
+            return recorder.modelLimits
+        }
+        let replies = [
+            FakeServices.calls([("a", "open_page", #"{"url":"https://a.example/"}"#)]),
+            FakeServices.answer("Answer [1]."), FakeServices.answer("Answer [1]."),
+        ]
+        // Three minutes by default, for every step of the run.
+        let thinking = try await limits(thinking: true, replies: replies)
+        #expect(!thinking.isEmpty)
+        #expect(thinking.allSatisfy { $0 == 180 })
+        var short = ResearchOptions()
+        short.thinkingMinutes = 1
+        #expect(try await limits(thinking: true, options: short, replies: replies)
+            .allSatisfy { $0 == 60 })
+        // Without reasoning, only the transport's own step timeout applies.
+        #expect(try await limits(thinking: nil, replies: replies).allSatisfy { $0 == nil })
+        #expect(try await limits(thinking: false, replies: replies).allSatisfy { $0 == nil })
+
+        // After a step ran past the limit, reasoning is off, and so is the limit.
+        let services = FakeServices(modelReplies: replies)
+        let slow = TimingOutTransport(services, timeOutOnModelCall: 1)
+        let log = EventLog()
+        let report = try await ResearchAgent(
+            chat: ResearchChatClient(
+                serverURL: URL(string: "http://127.0.0.1:8080")!, model: "default",
+                maxTokens: 8_192, enableThinking: true, transport: slow),
+            sandbox: ResearchSandboxClient(
+                baseURL: URL(string: "http://127.0.0.1:9000")!, transport: services),
+            onEvent: { log.append($0) }).run(question: "q")
+        #expect(report.answer == "Answer [1].")
+        #expect(log.events.filter { $0 == .retryingAfterTimeout }.count == 1)
+        #expect(services.modelRequests.allSatisfy { $0["enable_thinking"] == .bool(false) })
+    }
+
+    @Test func aServerErrorWhileThinkingIsAskedAgainWithoutThinking() async throws {
+        let failure = FakeServices.json(500, .object(["error": .object([
+            "message": .string("generation failed; see TUFFServer stderr"),
+            "code": .string("internal_error"),
+            "type": .string("server_error"),
+        ])]))
+        let services = FakeServices(modelReplies: [
+            failure,
+            FakeServices.calls([("a", "open_page", #"{"url":"https://a.example/"}"#)]),
+            FakeServices.answer("Answer [1]."),
+            FakeServices.answer("Answer [1]."),
+        ])
+        let log = EventLog()
+        let report = try await ResearchAgent(
+            chat: ResearchChatClient(
+                serverURL: URL(string: "http://127.0.0.1:8080")!, model: "default",
+                maxTokens: 8_192, enableThinking: true, transport: services),
+            sandbox: ResearchSandboxClient(
+                baseURL: URL(string: "http://127.0.0.1:9000")!, transport: services),
+            onEvent: { log.append($0) }).run(question: "q")
+        #expect(report.answer == "Answer [1].")
+        #expect(log.events.filter { $0 == .retryingAfterModelError }.count == 1)
+        #expect(services.modelRequests[0]["enable_thinking"] == .bool(true))
+        // The retry, and every step after it, asks without reasoning.
+        #expect(services.modelRequests.dropFirst().allSatisfy {
+            $0["enable_thinking"] == .bool(false) })
+
+        // Without reasoning, or for an error a retry cannot fix, the run stops.
+        let plain = FakeServices(modelReplies: [failure])
+        await #expect(throws: ResearchError.self) {
+            _ = try await agent(plain).run(question: "q")
+        }
+        #expect(plain.modelRequests.count == 1)
+        let refused = FakeServices(modelReplies: [
+            FakeServices.json(400, .object(["error": .object([
+                "message": .string("bad value"), "code": .string("invalid_value"),
+            ])])),
+        ])
+        let refusedLog = EventLog()
+        _ = try? await ResearchAgent(
+            chat: ResearchChatClient(
+                serverURL: URL(string: "http://127.0.0.1:8080")!, model: "default",
+                maxTokens: 8_192, enableThinking: true, transport: refused),
+            sandbox: ResearchSandboxClient(
+                baseURL: URL(string: "http://127.0.0.1:9000")!, transport: refused),
+            onEvent: { refusedLog.append($0) }).run(question: "q")
+        #expect(!refusedLog.events.contains(.retryingAfterModelError))
+        #expect(refused.modelRequests.count == 1)
+    }
+
     @Test func theContextWindowIsReadFromTheModelList() async {
         let models = FakeServices(modelReplies: []) { path, _ in
             guard path == "/v1/models" else { return FakeServices.json(404, .object([:])) }
@@ -1679,8 +1800,11 @@ struct ResearchArgumentsTests {
         #expect(parsed.options.contextBudgetCharacters == 32_000)
         #expect(parsed.maxTokens == 4_096)
         #expect(try ResearchArguments.parse(["q", "--max-steps", "100"]).options.maxSteps == 100)
+        #expect(defaults.options.thinkingMinutes == 3)
+        #expect(try ResearchArguments.parse(["q", "--thinking-limit", "5"])
+            .options.thinkingMinutes == 5)
         for flag in ["--search-results", "--tool-calls", "--min-pages", "--auto-open",
-                     "--nudges", "--rewrite", "--step-timeout"] {
+                     "--nudges", "--rewrite", "--step-timeout", "--thinking-limit"] {
             #expect(ResearchArguments.usage.contains(flag), "\(flag)")
         }
     }
@@ -1691,7 +1815,8 @@ struct ResearchArgumentsTests {
                           ["q", "--search-results", "11"], ["q", "--tool-calls", "0"],
                           ["q", "--min-pages", "7"], ["q", "--step-timeout", "61"],
                           ["q", "--auto-open", "yes"], ["q", "--nudges"],
-                          ["q", "--rewrite", "maybe"], ["q", "--max-steps", "101"]] {
+                          ["q", "--rewrite", "maybe"], ["q", "--max-steps", "101"],
+                          ["q", "--thinking-limit", "0"], ["q", "--thinking-limit", "61"]] {
             #expect(throws: (any Error).self) { _ = try ResearchArguments.parse(arguments) }
         }
         #expect((try? ResearchArguments.parse(["--help"]))?.showHelp == true)

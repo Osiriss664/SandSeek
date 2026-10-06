@@ -43,6 +43,7 @@ launches; **Restore Defaults** resets them.
 | `--nudges on\|off` | Ask the model to search, read and look wider | on | The requests to search first, open pages and look wider (see [Limits](#limits)). |
 | `--rewrite on\|off` | Rewrite answers that cite unread pages | on | One rewrite when the answer cites pages that were never read. |
 | `--step-timeout <1...60>` | Step time limit | 30 minutes | A step that takes longer is asked again without reasoning, then given up. |
+| `--thinking-limit <1...60>` | Thinking time limit | 3 minutes | A step with reasoning on that takes longer is asked again without reasoning, which stays off for the rest of the question. |
 
 The model is chosen with `--model` or the app's model menu. Limits that
 protect the Mac are not settings: the sandbox, its firewall, the loopback-only
@@ -376,6 +377,16 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
   is empty too, the run stops with an error instead of an empty report. An
   answer that stops at the token limit is kept, with a note that it may be cut
   off.
+- Reasoning can make a step very slow: on a 16 GB Mac, Qwen3.6 reasoned for
+  2.5 to 14 minutes before its first search. A step with reasoning on that
+  takes longer than `--thinking-limit` (3 minutes) is cancelled and asked
+  again without reasoning, and reasoning stays off for the rest of the
+  question. A server error on a step with reasoning on (Gemma 4 26B once
+  wrote a tool call the server could not read, which TUFF reports as HTTP 500)
+  is retried the same way instead of ending the run.
+- Stopping a question (**Stop Research**, or Control-C in Terminal) cancels
+  its model request, and TUFF stops generating that reply, so the next
+  question does not wait behind it.
 - Pages are fetched without running JavaScript, so sites that build their
   content in the browser return little text.
 - DuckDuckGo's HTML results can change shape or rate-limit. Set `SEARXNG_URL`

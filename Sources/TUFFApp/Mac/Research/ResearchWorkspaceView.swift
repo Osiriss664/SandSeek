@@ -29,6 +29,7 @@ struct ResearchWorkspaceView: View {
     @AppStorage("ResearchNudges") private var nudges = true
     @AppStorage("ResearchRewrite") private var rewrite = true
     @AppStorage("ResearchStepTimeout") private var stepTimeout = ResearchOptions.defaultStepTimeoutMinutes
+    @AppStorage("ResearchThinkingLimit") private var thinkingLimit = ResearchOptions.defaultThinkingMinutes
     @State private var showsOptions = false
     @State private var showsProgress = true
 
@@ -202,6 +203,13 @@ struct ResearchWorkspaceView: View {
                 .help("A step that takes longer is asked again without reasoning, as --step-timeout.")
             }
             GridRow {
+                Stepper(value: $thinkingLimit, in: ResearchOptions.thinkingMinutesRange) {
+                    Text("Thinking time limit: \(thinkingLimit) min").appFont(.body.monospacedDigit())
+                }
+                .fixedSize()
+                .help("A step with reasoning on that takes longer is asked again without reasoning, which stays off for the rest of the question, as --thinking-limit.")
+            }
+            GridRow {
                 Toggle("Open top results when too few pages are read", isOn: $autoOpenPages)
                     .help("As --auto-open.")
                 Toggle("Ask the model to search, read and look wider", isOn: $nudges)
@@ -231,6 +239,7 @@ struct ResearchWorkspaceView: View {
         nudges = defaults.nudges
         rewrite = defaults.reviseUnreadCitations
         stepTimeout = ResearchOptions.defaultStepTimeoutMinutes
+        thinkingLimit = ResearchOptions.defaultThinkingMinutes
     }
 
     private var canAsk: Bool {
@@ -255,7 +264,8 @@ struct ResearchWorkspaceView: View {
             autoOpenPages: autoOpenPages,
             nudges: nudges,
             reviseUnreadCitations: rewrite,
-            stepTimeoutMinutes: stepTimeout)
+            stepTimeoutMinutes: stepTimeout,
+            thinkingMinutes: thinkingLimit)
         let question = question
         showsProgress = true
         Task { await research.ask(question, settings: settings) }

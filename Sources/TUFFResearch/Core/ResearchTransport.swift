@@ -17,6 +17,17 @@ public struct ResearchHTTPResponse: Equatable, Sendable {
 /// the command uses `URLSessionResearchTransport`.
 public protocol ResearchHTTPTransport: Sendable {
     func send(method: String, url: URL, body: Data?) async throws -> ResearchHTTPResponse
+    /// The same, given up with `URLError(.timedOut)` after `timeout` seconds
+    /// when that is sooner than the transport's own timeout.
+    func send(method: String, url: URL, body: Data?,
+              timeout: TimeInterval?) async throws -> ResearchHTTPResponse
+}
+
+public extension ResearchHTTPTransport {
+    func send(method: String, url: URL, body: Data?,
+              timeout: TimeInterval?) async throws -> ResearchHTTPResponse {
+        try await send(method: method, url: url, body: body)
+    }
 }
 
 public struct URLSessionResearchTransport: ResearchHTTPTransport {
@@ -36,6 +47,28 @@ public struct URLSessionResearchTransport: ResearchHTTPTransport {
     }
 
     public func send(method: String, url: URL, body: Data?) async throws -> ResearchHTTPResponse {
+        try await send(method: method, url: url, body: body, timeout: nil)
+    }
+
+    /// A request given up at `timeout` is cancelled, which closes its
+    /// connection; TUFF then stops generating the abandoned reply instead of
+    /// making the next request wait for it.
+    public func send(method: String, url: URL, body: Data?,
+                     timeout: TimeInterval?) async throws -> ResearchHTTPResponse {
+        guard let timeout else { return try await fetch(method: method, url: url, body: body) }
+        return try await withThrowingTaskGroup(of: ResearchHTTPResponse.self) { group in
+            group.addTask { try await fetch(method: method, url: url, body: body) }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(max(0, timeout) * 1_000_000_000))
+                throw URLError(.timedOut)
+            }
+            defer { group.cancelAll() }
+            guard let first = try await group.next() else { throw URLError(.timedOut) }
+            return first
+        }
+    }
+
+    private func fetch(method: String, url: URL, body: Data?) async throws -> ResearchHTTPResponse {
         var request = URLRequest(url: url)
         request.httpMethod = method
         if let body {

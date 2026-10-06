@@ -25,6 +25,8 @@ public struct ResearchRunSettings: Equatable, Sendable {
     public var nudges: Bool
     public var reviseUnreadCitations: Bool
     public var stepTimeoutMinutes: Int
+    /// Minutes a step with reasoning on may take, as `--thinking-limit`.
+    public var thinkingMinutes: Int
 
     public init(model: String,
                 showThinking: Bool = true,
@@ -39,7 +41,8 @@ public struct ResearchRunSettings: Equatable, Sendable {
                 autoOpenPages: Bool = true,
                 nudges: Bool = true,
                 reviseUnreadCitations: Bool = true,
-                stepTimeoutMinutes: Int = ResearchOptions.defaultStepTimeoutMinutes) {
+                stepTimeoutMinutes: Int = ResearchOptions.defaultStepTimeoutMinutes,
+                thinkingMinutes: Int = ResearchOptions.defaultThinkingMinutes) {
         self.model = model
         self.showThinking = showThinking
         self.maxSteps = maxSteps
@@ -54,6 +57,7 @@ public struct ResearchRunSettings: Equatable, Sendable {
         self.nudges = nudges
         self.reviseUnreadCitations = reviseUnreadCitations
         self.stepTimeoutMinutes = stepTimeoutMinutes
+        self.thinkingMinutes = thinkingMinutes
     }
 
     /// Reasoning as sent to the server: Show thinking turns it on unless it
@@ -83,6 +87,7 @@ public struct ResearchRunSettings: Equatable, Sendable {
         options.autoOpenPages = autoOpenPages
         options.nudges = nudges
         options.reviseUnreadCitations = reviseUnreadCitations
+        options.thinkingMinutes = thinkingMinutes.clamped(to: ResearchOptions.thinkingMinutesRange)
         return options
     }
 
@@ -188,8 +193,8 @@ public final class ResearchRunController {
         }
     }
 
-    /// Stops waiting for the run. A model reply already being written still
-    /// finishes on the server, but nothing more is asked of it.
+    /// Stops the run. Its model request is cancelled, which closes the
+    /// connection, and TUFF stops generating the reply.
     public func stop() {
         guard isRunning else { return }
         task?.cancel()
@@ -244,6 +249,9 @@ public final class ResearchRunController {
                    started: started)
         case .revisingUnreadCitations:
             append(.turn, "Answer cites pages it never read; asking for a rewrite", started: started)
+        case .retryingAfterModelError:
+            append(.turn, "Model error while thinking; asking again without thinking",
+                   started: started)
         case .stoppingRepeatedSearches:
             append(.turn, "Only repeated searches; stopping and asking for the answer",
                    started: started)
