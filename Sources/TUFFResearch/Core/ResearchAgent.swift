@@ -163,8 +163,9 @@ public struct ResearchReport: Equatable, Sendable {
 
 public enum ResearchEvent: Equatable, Sendable {
     case modelTurn(Int)
-    /// What the model thought before answering, for display only. It is
-    /// never sent back to the model.
+    /// What the model thought before answering, for display. A tool-calling
+    /// turn's reasoning is also sent back with it, so the server's prompt
+    /// cache still matches what it generated.
     case reasoning(String)
     case searching(String)
     case reading(String)
@@ -186,6 +187,8 @@ public enum ResearchEvent: Equatable, Sendable {
     case openingTopResults
     /// The model ran a search it already ran, and was told so instead.
     case repeatedSearchRefused(String)
+    /// The model opened a page part it already read, and was told so instead.
+    case repeatedPageRefused(String)
     /// Older results were shortened so the conversation fits the model's
     /// context window.
     case shortenedOlderResults
@@ -401,10 +404,7 @@ public struct ResearchAgent: Sendable {
                     }
                 }
                 if let request {
-                    state.messages.append(.object([
-                        "role": .string("assistant"),
-                        "content": .string(turn.content ?? ""),
-                    ]))
+                    state.messages.append(Self.textMessage(turn))
                     state.messages.append(.object([
                         "role": .string("user"),
                         "content": .string(request),
@@ -532,10 +532,7 @@ public struct ResearchAgent: Sendable {
         if let content = turn.content, !Self.isBlank(content) {
             return (content, turn.finishReason == "length")
         }
-        state.messages.append(.object([
-            "role": .string("assistant"),
-            "content": .string(turn.content ?? ""),
-        ]))
+        state.messages.append(Self.textMessage(turn))
         state.messages.append(.object([
             "role": .string("user"),
             "content": .string(Self.answerNowRequest),
@@ -717,6 +714,19 @@ public struct ResearchAgent: Sendable {
         + "different words, or in another language, open at least one more independent page "
         + "with open_page, then answer, citing the source numbers open_page gives."
 
+    /// A turn without tool calls, sent back before a request for more. Its
+    /// reasoning goes with it, like `assistantMessage`, for the prompt cache.
+    static func textMessage(_ turn: ResearchAssistantTurn) -> ResearchJSON {
+        var message: [String: ResearchJSON] = [
+            "role": .string("assistant"),
+            "content": .string(turn.content ?? ""),
+        ]
+        if let reasoning = turn.reasoning, !reasoning.isEmpty {
+            message["reasoning_content"] = .string(reasoning)
+        }
+        return .object(message)
+    }
+
     private func assistantMessage(_ turn: ResearchAssistantTurn) -> ResearchJSON {
         var message: [String: ResearchJSON] = [
             "role": .string("assistant"),
@@ -736,6 +746,10 @@ public struct ResearchAgent: Sendable {
         ]
         if let content = turn.content, !content.isEmpty {
             message["content"] = .string(content)
+        }
+        // As received: the server's KV cache holds exactly these tokens.
+        if let reasoning = turn.reasoning, !reasoning.isEmpty {
+            message["reasoning_content"] = .string(reasoning)
         }
         return .object(message)
     }
@@ -907,6 +921,18 @@ public struct ResearchAgent: Sendable {
                     return "Tool error: open_page needs an http or https url."
                 }
                 let offset = max(0, arguments["offset"]?.intValue ?? 0)
+                // The same part of a page would only fill the context again.
+                // After older results were shortened, one more read is fair.
+                if let read = state.pageRead(url: url, offset: offset), !read.mayReadAgain {
+                    state.refusedRepeats += 1
+                    onEvent(.repeatedPageRefused(ResearchText.oneLine(url, limit: 200)))
+                    let shown = Self.sanitized(ResearchText.url(url))
+                    let number = state.sources.first { $0.url == read.sourceURL }
+                        .map { " as source [\($0.number)]" } ?? ""
+                    return "You already read this part of \(shown)\(number). Use what it "
+                        + "said, open it with a different offset for more of it, open a "
+                        + "different page, or answer."
+                }
                 return await openPage(url: url, offset: offset, state: &state)
             default:
                 return "Tool error: unknown tool \(call.name). Use web_search or open_page."
@@ -929,6 +955,7 @@ public struct ResearchAgent: Sendable {
                 maxCharacters: maxCharacters ?? options.pageSliceCharacters)
             let alreadyNumbered = state.sources.contains { $0.url == page.url }
             let source = state.source(for: page)
+            state.recordRead(requested: url, page: page, offset: offset)
             return Self.formatPage(page, source: source, alreadyNumbered: alreadyNumbered)
         } catch let failure as ResearchToolFailure {
             onEvent(.toolFailed(failure.message))
@@ -1017,8 +1044,61 @@ public struct ResearchAgent: Sendable {
         var shownQueries: [String] = []
         /// The result links of each search, in order.
         var resultURLs: [[String]] = []
-        /// Searches refused because they repeated an earlier query.
+        /// Searches and page opens refused because they repeated an earlier one.
         var refusedRepeats = 0
+        /// Times `compact` shortened results, to tell when an earlier read
+        /// may be worth repeating.
+        var compactions = 0
+        /// Page parts read, by `pageKey`.
+        var pageReads: [String: PageRead] = [:]
+
+        struct PageRead {
+            var count: Int
+            /// `compactions` when the part was last read.
+            var compactions: Int
+            /// The URL the sandbox returned, which names the source.
+            var sourceURL: String
+            /// A second read is allowed once, and only after older results
+            /// were shortened since this one.
+            var mayReadAgain = false
+        }
+
+        /// A URL and offset as one key: scheme and host in lower case, no
+        /// fragment, no trailing slash on the path.
+        static func pageKey(_ url: String, offset: Int) -> String {
+            var text = url.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let hash = text.firstIndex(of: "#") { text = String(text[..<hash]) }
+            if let separator = text.range(of: "://") {
+                let rest = text[separator.upperBound...]
+                let hostEnd = rest.firstIndex { "/?".contains($0) } ?? rest.endIndex
+                let tail = rest[hostEnd...]
+                let queryStart = tail.firstIndex(of: "?") ?? tail.endIndex
+                var path = String(tail[..<queryStart])
+                if path.hasSuffix("/") { path.removeLast() }
+                let scheme = text[..<separator.lowerBound].lowercased()
+                let host = rest[..<hostEnd].lowercased()
+                text = "\(scheme)://\(host)\(path)\(tail[queryStart...])"
+            }
+            return "\(text)\n\(offset)"
+        }
+
+        /// What was read of this URL part, with whether it may be read again.
+        func pageRead(url: String, offset: Int) -> PageRead? {
+            guard var read = pageReads[Self.pageKey(url, offset: offset)] else { return nil }
+            read.mayReadAgain = read.count == 1 && compactions > read.compactions
+            return read
+        }
+
+        /// Counts a read under the URL asked for and the one the sandbox
+        /// returned, which differ after a redirect.
+        mutating func recordRead(requested: String, page: ResearchPageSlice, offset: Int) {
+            let keys = Set([Self.pageKey(requested, offset: offset),
+                            Self.pageKey(page.url, offset: offset)])
+            for key in keys {
+                pageReads[key] = PageRead(count: (pageReads[key]?.count ?? 0) + 1,
+                                          compactions: compactions, sourceURL: page.url)
+            }
+        }
 
         init(question: String) {
             self.question = question
@@ -1132,7 +1212,8 @@ public struct ResearchAgent: Sendable {
                     sum + (call["function"]?["name"]?.stringValue?.count ?? 0)
                         + (call["function"]?["arguments"]?.stringValue?.count ?? 0) + 32
                 }
-                return total + (message["content"]?.stringValue?.count ?? 0) + calls + 64
+                return total + (message["content"]?.stringValue?.count ?? 0)
+                    + (message["reasoning_content"]?.stringValue?.count ?? 0) + calls + 64
             }
         }
 
@@ -1153,11 +1234,16 @@ public struct ResearchAgent: Sendable {
         /// the question, the newest result and the last message stay whole,
         /// unless `emergency` is set: when the prompt cannot fit otherwise,
         /// those results are shortened too, rather than the run ending.
+        /// Before any of that, reasoning is dropped from every assistant
+        /// message but the newest, which stays so the latest step still
+        /// matches the server's prompt cache.
         /// Returns whether anything changed.
         @discardableResult
         mutating func compact(toFit budget: Int, overhead: Int = 0,
                               emergency: Bool = false) -> Bool {
             guard size(overhead: overhead) > budget else { return false }
+            let droppedReasoning = dropOlderReasoning()
+            guard size(overhead: overhead) > budget else { return droppedReasoning }
             let firstUser = messages.firstIndex { $0["role"]?.stringValue == "user" }
             let newestTool = messages.lastIndex { $0["role"]?.stringValue == "tool" }
             let candidates = messages.indices.filter { index in
@@ -1199,7 +1285,23 @@ public struct ResearchAgent: Sendable {
                     changed = true
                 }
             }
-            return changed
+            if changed { compactions += 1 }
+            return changed || droppedReasoning
+        }
+
+        /// Removes `reasoning_content` from every assistant message except the
+        /// newest. Returns whether any was removed.
+        private mutating func dropOlderReasoning() -> Bool {
+            let newest = messages.lastIndex { $0["role"]?.stringValue == "assistant" }
+            var removed = false
+            for index in messages.indices where index != newest {
+                guard case .object(var message) = messages[index],
+                      message["role"]?.stringValue == "assistant",
+                      message.removeValue(forKey: "reasoning_content") != nil else { continue }
+                messages[index] = .object(message)
+                removed = true
+            }
+            return removed
         }
 
         /// Whether a later message holds the same page text, read again.

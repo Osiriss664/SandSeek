@@ -240,6 +240,8 @@ public final class ResearchRunController {
             append(.turn, "Few or no pages read; opening top search results", started: started)
         case .repeatedSearchRefused(let query):
             append(.searching, "Repeated search refused: \(query)", started: started)
+        case .repeatedPageRefused(let url):
+            append(.reading, "Repeated page refused: \(url)", started: started)
         case .shortenedOlderResults:
             append(.turn, "Shortened older results to fit the model's context", started: started)
         case .retryingAfterTimeout:
@@ -253,7 +255,7 @@ public final class ResearchRunController {
             append(.turn, "Model error while thinking; asking again without thinking",
                    started: started)
         case .stoppingRepeatedSearches:
-            append(.turn, "Only repeated searches; stopping and asking for the answer",
+            append(.turn, "Only repeated searches or pages; stopping and asking for the answer",
                    started: started)
         }
     }

@@ -66,6 +66,11 @@ public struct ResearchChatClient: Sendable {
         if let thinking = thinking ?? enableThinking {
             body["enable_thinking"] = .bool(thinking)
         }
+        // Keyed to the setting, not the per-step override, so a step run with
+        // thinking off renders earlier reasoning the way the cached prompt did.
+        if enableThinking == true {
+            body["preserve_thinking"] = .bool(true)
+        }
         return .object(body)
     }
 

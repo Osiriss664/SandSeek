@@ -360,14 +360,14 @@ struct ResearchWorkspaceView: View {
     private var progressClock: some View {
         if research.run.isRunning, let started = research.run.startedAt {
             TimelineView(.periodic(from: started, by: 1)) { context in
-                Text("\(Int(context.date.timeIntervalSince(started))) s")
+                Text(ResearchText.duration(context.date.timeIntervalSince(started)))
                     .appFont(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
         } else if research.run.phase == .stopped {
             Text("Stopped").appFont(.caption).foregroundStyle(.secondary)
         } else if let report = research.shownReport {
-            Text("Finished in \(Int(report.durationSeconds.rounded())) s")
+            Text("Finished in \(ResearchText.duration(report.durationSeconds))")
                 .appFont(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
         }
@@ -720,10 +720,10 @@ private struct ResearchStepRow: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text("\(Int(step.elapsed)) s")
+            Text(ResearchText.duration(step.elapsed))
                 .appFont(.caption2.monospacedDigit())
                 .foregroundStyle(.tertiary)
-                .frame(width: 38, alignment: .trailing)
+                .frame(width: 64, alignment: .trailing)
             Image(systemName: symbol)
                 .foregroundStyle(color)
                 .frame(width: 16)

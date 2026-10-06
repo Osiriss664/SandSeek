@@ -18,7 +18,10 @@ The answer is printed as Markdown with numbered sources. `--output notes.md`
 also writes it to a new file. `--show-thinking` turns on the model's reasoning
 and prints it under each `[n] thinking…` line; it is not added to the report.
 The server returns that reasoning as `reasoning_content` on non-streaming
-replies; streams leave it out.
+replies; streams leave it out. With reasoning on, the research sends each
+step's reasoning back with its tool calls (and `preserve_thinking`), so a
+Qwen server renders the same prompt it already holds and its prompt cache
+is reused; older reasoning is dropped first when the prompt gets too long.
 `--max-steps <1...100>` sets how many search and read rounds the model may take
 before it has to answer (default 8). Run `tuff research --help` for every
 option.
@@ -55,7 +58,8 @@ The **Research** screen (Command-2) does the same without Terminal. **Start
 Both** starts the model server and a fresh sandbox VM, **Run Safety Check**
 runs the `selftest` below, **Steps** sets the same limit as `--max-steps`
 (default 8), and each question shows its searches, page reads
-and, with **Show thinking**, the model's reasoning as it works. Finished
+and, with **Show thinking**, the model's reasoning as it works. Elapsed times
+show as seconds, or minutes and seconds ("14 min 5 s"). Finished
 reports are listed in the sidebar and saved as Markdown and JSON in
 `~/Library/Application Support/TUFF/Research Reports`.
 
@@ -334,12 +338,19 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
   budget. The same happens when a model keeps repeating searches it
   already ran (Qwen did in a long run): after two refused repeats with no page
   read, the research opens the top results for it. A refused repeat shows as
-  "repeated search refused" in the progress. That model is then not asked to
+  "repeated search refused" in the progress. Opening the same page at the
+  same offset again is refused the same way ("repeated page refused"), except
+  once after older results were shortened, since the model may no longer
+  have the text; Qwen opened one Wikipedia page four times after that. The
+  page address is compared without its `#fragment`, a trailing `/` and the
+  case of the host, and a redirect counts under both addresses. A different
+  offset is a new read. That model is then not asked to
   look wider (below). A model that spends two steps in a row doing nothing but
   repeating searches it already ran (Qwen did from step 25
   of a 40-step run, wasting the rest) is stopped there and asked for its final
-  answer, as if the step budget had run out. The progress shows "only repeated
-  searches; stopping and asking for the answer", and the report notes the
+  answer, as if the step budget had run out. Refused page opens count as
+  repeats here too. The progress shows "only repeated
+  searches or pages; stopping and asking for the answer", and the report notes the
   early stop. A step with any new search or page read starts the count again,
   and so do the top results opened for a model that had read no page.
   This stop is always on; on the last step the run ends anyway, as before. When the step budget runs out, or the research stops
@@ -407,7 +418,8 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
   only the passages that contain words from the question and the searches,
   and older searches lose their snippets. Only when that is not enough does
   an older result shrink to its first line. Models with small catalog
-  contexts get fewer pages per answer. Shortening never ends the research:
+  contexts get fewer pages per answer. Reasoning from earlier steps is dropped before any result is shortened, and
+  the newest step keeps its own. Shortening never ends the research:
   the model is told it is normal, a turn that runs out of tokens while
   thinking is followed by one without reasoning, and a context that still
   overflows has even the newest results shortened. A run ends when the

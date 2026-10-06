@@ -267,7 +267,7 @@ struct ResearchAgentTests {
         #expect(!firstSearch.contains("Research so far"))
     }
 
-    @Test func reasoningIsShownButNeverSentBack() async throws {
+    @Test func reasoningIsShownAndSentBackWithItsTurn() async throws {
         let thought = FakeServices.json(200, .object(["choices": .array([.object([
             "message": .object([
                 "role": .string("assistant"),
@@ -296,8 +296,11 @@ struct ResearchAgentTests {
             .modelTurn(2), .askingToReadPages, .modelTurn(3),
             .openingTopResults, .reading("https://github.com/apple/container"), .modelTurn(4),
         ])
+        // As received, so the server's prompt cache still matches the turn.
         let history = messages(services.modelRequests.last!)
-        #expect(history.allSatisfy { $0["reasoning_content"] == nil })
+        let turn = try #require(history.first { $0["role"] == .string("assistant") })
+        #expect(turn["reasoning_content"] == .string("  I should search first.\n"))
+        #expect(history.filter { $0["reasoning_content"] != nil }.count == 1)
     }
 
     @Test func pagesCannotRebuildTheMarkers() {
@@ -408,6 +411,17 @@ struct ResearchAgentTests {
         #expect(markdown.contains("\\<img"))
     }
 
+    @Test func durationsShowMinutesAndSeconds() {
+        #expect(ResearchText.duration(0) == "0 s")
+        #expect(ResearchText.duration(19.4) == "19 s")
+        #expect(ResearchText.duration(59.6) == "1 min")
+        #expect(ResearchText.duration(60) == "1 min")
+        #expect(ResearchText.duration(180) == "3 min")
+        #expect(ResearchText.duration(845) == "14 min 5 s")
+        #expect(ResearchText.duration(3_600) == "60 min")
+        #expect(ResearchText.duration(-3) == "0 s")
+    }
+
     @Test func remainingInvisibleCharactersAreRemoved() {
         let hidden = String(String.UnicodeScalarView((0..<5).map { Unicode.Scalar(0xE0100 + $0)! }))
             + String(String.UnicodeScalarView((0..<15).map { Unicode.Scalar(0xFE00 + $0)! }))
@@ -482,6 +496,22 @@ struct ResearchAgentTests {
         #expect(body["enable_thinking"] == .bool(false))
         #expect(body["tools"] == nil)
         #expect(body["tool_choice"] == nil)
+    }
+
+    @Test func preserveThinkingFollowsTheSettingNotTheStepOverride() {
+        func body(_ enableThinking: Bool?, thinking: Bool? = nil) -> ResearchJSON {
+            ResearchChatClient(
+                serverURL: URL(string: "http://127.0.0.1:8080")!, model: "qwen36",
+                maxTokens: 100, enableThinking: enableThinking,
+                transport: FakeServices(modelReplies: []))
+                .requestBody(messages: [], tools: [], allowTools: true, thinking: thinking)
+        }
+        #expect(body(true)["preserve_thinking"] == .bool(true))
+        // A step run with thinking off still renders earlier reasoning alike.
+        #expect(body(true, thinking: false)["preserve_thinking"] == .bool(true))
+        #expect(body(false)["preserve_thinking"] == nil)
+        #expect(body(nil)["preserve_thinking"] == nil)
+        #expect(body(nil, thinking: true)["preserve_thinking"] == nil)
     }
 
     @Test func answersFromSnippetsAloneAreSentBackOnce() async throws {
@@ -1207,6 +1237,116 @@ struct ResearchAgentTests {
         #expect(final.hasPrefix(ResearchAgent.budgetUsedUpRequest))
     }
 
+    private static func fetches(_ services: FakeServices) -> Int {
+        services.requests.filter { $0.url.path == "/v1/fetch" }.count
+    }
+
+    @Test func aPartOfAPageAlreadyReadIsNotFetchedAgain() async throws {
+        let url = "https://github.com/apple/container"
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "open_page", #"{"url":"\#(url)"}"#)]),
+            FakeServices.calls([("b", "open_page", #"{"url":"\#(url)"}"#),
+                                ("c", "open_page", #"{"url":"\#(url)","offset":120}"#)]),
+            FakeServices.answer("Done [1]."), FakeServices.answer("Done [1]."),
+        ])
+        let log = EventLog()
+        let report = try await agent(services, events: log).run(question: "q")
+        #expect(report.sources.count == 1)
+        // The first read and the other offset are fetched; the repeat is not.
+        #expect(Self.fetches(services) == 2)
+        #expect(log.events.filter { $0 == .repeatedPageRefused(url) }.count == 1)
+        let refused = messages(services.modelRequests[2])
+            .first { $0["tool_call_id"] == .string("b") }?["content"]?.stringValue
+        #expect(refused == "You already read this part of \(url) as source [1]. Use what it "
+            + "said, open it with a different offset for more of it, open a different page, "
+            + "or answer.")
+    }
+
+    @Test func pageAddressesDifferingOnlyInFormAreTheSamePart() async throws {
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([
+                ("a", "open_page", #"{"url":"https://example.org/Page/"}"#),
+                ("b", "open_page", #"{"url":"https://EXAMPLE.org/Page#section"}"#),
+                ("c", "open_page", #"{"url":"HTTPS://example.org/Page"}"#),
+            ]),
+            FakeServices.answer("Done [1]."), FakeServices.answer("Done [1]."),
+        ])
+        let log = EventLog()
+        _ = try await agent(services, events: log).run(question: "q")
+        #expect(Self.fetches(services) == 1)
+        #expect(log.events.filter {
+            if case .repeatedPageRefused = $0 { true } else { false } }.count == 2)
+
+        // A redirect is remembered under both addresses.
+        let redirected = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "open_page", #"{"url":"https://short.example/x"}"#)]),
+            FakeServices.calls([("b", "open_page", #"{"url":"https://long.example/article"}"#)]),
+            FakeServices.answer("Done [1]."), FakeServices.answer("Done [1]."),
+        ]) { path, body in
+            guard path == "/v1/fetch" else { return FakeServices.webPages(path, body) }
+            return FakeServices.json(200, .object([
+                "url": .string("https://long.example/article"), "title": .string("Article"),
+                "text": .string("Text."), "offset": .integer(0), "total_chars": .integer(5),
+            ]))
+        }
+        _ = try await agent(redirected).run(question: "q")
+        #expect(Self.fetches(redirected) == 1)
+    }
+
+    @Test func aPageMayBeReadOnceMoreAfterOlderResultsWereShortened() async {
+        let services = FakeServices(modelReplies: [])
+        let research = agent(services)
+        var state = ResearchAgent.State(question: "q")
+        let call = ResearchToolCall(
+            id: "a", name: "open_page", arguments: #"{"url":"https://a.example/page"}"#)
+
+        let first = await research.execute(call, state: &state)
+        #expect(first.hasPrefix("Source [1]:"))
+        let repeated = await research.execute(call, state: &state)
+        #expect(repeated.hasPrefix("You already read"))
+        #expect(Self.fetches(services) == 1)
+
+        // Shortening results makes a second read fair, once.
+        state.messages = [
+            .object(["role": .string("system"), "content": .string("s")]),
+            .object(["role": .string("user"), "content": .string("q")]),
+            Self.toolMessage("a", Self.pageResult(1, url: "https://a.example/page")),
+            Self.toolMessage("b", Self.pageResult(2, url: "https://b.example/")),
+        ]
+        let shortened = state.compact(toFit: 200)
+        #expect(shortened)
+        let again = await research.execute(call, state: &state)
+        #expect(again.contains("same page as source [1]"))
+        #expect(Self.fetches(services) == 2)
+        let third = await research.execute(call, state: &state)
+        #expect(third.hasPrefix("You already read"))
+        #expect(Self.fetches(services) == 2)
+        #expect(state.refusedRepeats == 2)
+
+        // Shortening again does not allow a third read.
+        state.compactions += 1
+        let fourth = await research.execute(call, state: &state)
+        #expect(fourth.hasPrefix("You already read"))
+        #expect(Self.fetches(services) == 2)
+    }
+
+    @Test func stepsOfOnlyRefusedPageOpensEndTheResearch() async throws {
+        let open = ("a", "open_page", #"{"url":"https://one.example/1"}"#)
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([open]),
+            FakeServices.calls([("b", open.1, open.2)]),
+            FakeServices.calls([("c", open.1, open.2)]),
+            FakeServices.answer("From the page [1]."),
+        ])
+        let log = EventLog()
+        let report = try await agent(services, events: log).run(question: "q")
+        #expect(report.stoppedRepeatedSearches)
+        #expect(report.modelTurns == 4)
+        #expect(Self.fetches(services) == 1)
+        #expect(log.events.filter { $0 == .stoppingRepeatedSearches }.count == 1)
+        #expect(services.modelRequests[3]["tool_choice"] == .string("none"))
+    }
+
     @Test func aFailedSearchMayBeTriedAgain() async throws {
         let attempts = SearchAttempts()
         let services = FakeServices(modelReplies: [
@@ -1310,6 +1450,49 @@ struct ResearchAgentTests {
 
     private static func toolMessage(_ id: String, _ content: String) -> ResearchJSON {
         .object(["role": .string("tool"), "tool_call_id": .string(id), "content": .string(content)])
+    }
+
+    @Test func compactionDropsOlderReasoningBeforeShorteningResults() {
+        func assistant(_ reasoning: String) -> ResearchJSON {
+            .object(["role": .string("assistant"), "content": .string("x"),
+                     "reasoning_content": .string(reasoning)])
+        }
+        let page = Self.pageResult(1, url: "https://a.example/")
+        let thought = String(repeating: "think ", count: 400)
+        var state = ResearchAgent.State(question: "q")
+        state.messages = [
+            .object(["role": .string("system"), "content": .string("s")]),
+            .object(["role": .string("user"), "content": .string(state.question)]),
+            assistant(thought),
+            Self.toolMessage("a", page),
+            assistant(thought),
+            Self.toolMessage("b", page),
+        ]
+        let enough = state
+        // Reasoning alone makes room: no result is touched.
+        let made = state.compact(toFit: state.size() - 1_000)
+        #expect(made)
+        #expect(state.messages[2]["reasoning_content"] == nil)
+        #expect(state.messages[2]["content"] == .string("x"))
+        #expect(state.messages[4]["reasoning_content"] == .string(thought))
+        #expect(state.messages[3]["content"] == .string(page))
+        #expect(state.compactions == 0)
+
+        // Still over budget: results are shortened as well, and the newest
+        // assistant message keeps its reasoning.
+        state = enough
+        let shortened = state.compact(toFit: 300)
+        #expect(shortened)
+        #expect(state.messages[2]["reasoning_content"] == nil)
+        #expect(state.messages[4]["reasoning_content"] == .string(thought))
+        #expect((state.messages[3]["content"]?.stringValue ?? "").count < page.count)
+        #expect(state.compactions == 1)
+
+        // Under budget, nothing is removed.
+        state = enough
+        let untouched = state.compact(toFit: state.size() + 1)
+        #expect(!untouched)
+        #expect(state.messages[2]["reasoning_content"] == .string(thought))
     }
 
     @Test func compactionKeepsThePassagesThatMatchTheQuestion() {

@@ -119,6 +119,15 @@ public enum ResearchText {
         return String(scalars)
     }
 
+    /// Elapsed time for people: "19 s", "3 min", "14 min 5 s". Whole seconds,
+    /// never negative, and no hours.
+    public static func duration(_ seconds: Double) -> String {
+        let total = Int(max(0, seconds).rounded())
+        guard total >= 60 else { return "\(total) s" }
+        let rest = total % 60
+        return rest == 0 ? "\(total / 60) min" : "\(total / 60) min \(rest) s"
+    }
+
     static func isUnsafe(_ scalar: Unicode.Scalar) -> Bool {
         switch scalar.value {
         case 0x09, 0x0A: return false

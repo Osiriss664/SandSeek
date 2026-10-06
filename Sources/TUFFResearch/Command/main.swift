@@ -66,12 +66,13 @@ let agent = ResearchAgent(
         case .askingToSearchMore: writeProgress("    answered from one search or page; asking it to look wider")
         case .openingTopResults: writeProgress("    few or no pages read; opening top search results")
         case .repeatedSearchRefused(let query): writeProgress("    repeated search refused: \(query)")
+        case .repeatedPageRefused(let url): writeProgress("    repeated page refused: \(url)")
         case .shortenedOlderResults: writeProgress("    shortened older results to fit the model's context")
         case .retryingAfterTimeout: writeProgress("    step took too long; asking again without thinking")
         case .continuingAfterCutOff: writeProgress("    step ran out of room while thinking; continuing the research")
         case .revisingUnreadCitations: writeProgress("    answer cites pages it never read; asking for a rewrite")
         case .retryingAfterModelError: writeProgress("    model error while thinking; asking again without thinking")
-        case .stoppingRepeatedSearches: writeProgress("    only repeated searches; stopping and asking for the answer")
+        case .stoppingRepeatedSearches: writeProgress("    only repeated searches or pages; stopping and asking for the answer")
         }
     })
 
