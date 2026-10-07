@@ -299,7 +299,8 @@ enum ResearchFigureCheck {
                 }
                 var next = index + 1
                 while next < characters.count, characters[next].isWhitespace { next += 1 }
-                if next < characters.count, characters[next] != "[" {
+                if next < characters.count, characters[next] != "[",
+                   !isDayBeforeMonth(characters, dot: index, next: next) {
                     result.append(current)
                     current = ""
                 }
@@ -307,6 +308,18 @@ enum ResearchFigureCheck {
             result.append(current)
         }
         return result
+    }
+
+    /// The dot of a German day before a month name (`29. November`), which
+    /// does not end the sentence.
+    private static func isDayBeforeMonth(_ characters: [Character], dot: Int, next: Int) -> Bool {
+        var start = dot
+        while start > 0, isDigit(characters[start - 1]) { start -= 1 }
+        guard (1...2).contains(dot - start),
+              start == 0 || !isDigit(characters[start - 1]) else { return false }
+        var end = next
+        while end < characters.count, characters[end].isLetter { end += 1 }
+        return months[String(characters[next..<end]).lowercased()] != nil
     }
 
     /// Source numbers cited in the text: `[4]`, `[6], [8]`, `[6][8]` and
