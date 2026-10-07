@@ -1201,6 +1201,86 @@ struct ResearchAgentTests {
             })]))
     }
 
+    @Test func aModelThatOnlySearchesIsAskedToReadThenGetsPagesOpened() async throws {
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"one"}"#)]),
+            FakeServices.calls([("b", "web_search", #"{"query":"two"}"#)]),
+            FakeServices.calls([("c", "web_search", #"{"query":"three"}"#)]),
+            FakeServices.calls([("d", "web_search", #"{"query":"four"}"#)]),
+            FakeServices.calls([("e", "web_search", #"{"query":"five"}"#)]),
+            FakeServices.answer("From the pages [1][2][3]."),
+        ], sandbox: Self.twoHitsPerSearch)
+        let log = EventLog()
+        let report = try await agent(services, events: log).run(question: "q")
+        #expect(report.answer == "From the pages [1][2][3].")
+        #expect(services.modelRequests.count == 6)
+        // Nothing happens in the first two steps.
+        #expect(messages(services.modelRequests[2]).last?["role"] == .string("tool"))
+        // After the third step the model is asked to open pages, after the
+        // tool results.
+        let asked = messages(services.modelRequests[3]).last
+        #expect(asked?["role"] == .string("user"))
+        #expect(asked?["content"] == .string(ResearchAgent.searchedWithoutReadingRequest))
+        #expect(messages(services.modelRequests[3]).dropLast().last?["role"] == .string("tool"))
+        #expect(messages(services.modelRequests[4]).last?["role"] == .string("tool"))
+        // Two more search-only steps later the loop opens the top results.
+        let pages = messages(services.modelRequests[5]).last?["content"]?.stringValue ?? ""
+        #expect(pages.hasPrefix(ResearchAgent.searchedWithoutOpeningRequest + "\n\nSource [1]: "))
+        #expect(pages.contains("Source [3]: "))
+        #expect(log.events.filter { $0 == .askingToReadPages }.count == 1)
+        #expect(log.events.filter { $0 == .openingTopResults }.count == 1)
+        #expect(report.sources.count == 3)
+        #expect(Self.fetches(services) == 3)
+    }
+
+    @Test func withoutNudgesTheTopResultsAreOpenedAfterThreeSearchOnlySteps() async throws {
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"one"}"#)]),
+            FakeServices.calls([("b", "web_search", #"{"query":"two"}"#)]),
+            FakeServices.calls([("c", "web_search", #"{"query":"three"}"#)]),
+            FakeServices.answer("From the pages [1][2][3]."),
+        ], sandbox: Self.twoHitsPerSearch)
+        var options = ResearchOptions()
+        options.nudges = false
+        let log = EventLog()
+        let report = try await agent(services, options: options, events: log).run(question: "q")
+        #expect(services.modelRequests.count == 4)
+        let pages = messages(services.modelRequests[3]).last?["content"]?.stringValue ?? ""
+        #expect(pages.hasPrefix(ResearchAgent.searchedWithoutOpeningRequest + "\n\nSource [1]: "))
+        #expect(!log.events.contains(.askingToReadPages))
+        #expect(log.events.filter { $0 == .openingTopResults }.count == 1)
+        #expect(report.sources.count == 3)
+
+        // With auto-open off as well, nothing is opened mid-run.
+        var neither = options
+        neither.autoOpenPages = false
+        let quiet = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"one"}"#)]),
+            FakeServices.calls([("b", "web_search", #"{"query":"two"}"#)]),
+            FakeServices.calls([("c", "web_search", #"{"query":"three"}"#)]),
+            FakeServices.answer("Memory."),
+        ], sandbox: Self.twoHitsPerSearch)
+        let quietLog = EventLog()
+        _ = try await agent(quiet, options: neither, events: quietLog).run(question: "q")
+        #expect(!quietLog.events.contains(.openingTopResults))
+        #expect(Self.fetches(quiet) == 0)
+    }
+
+    @Test func searchStepsAfterAPageWasReadChangeNothing() async throws {
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"one"}"#)]),
+            FakeServices.calls([("b", "open_page", #"{"url":"https://one.example/1"}"#)]),
+            FakeServices.calls([("c", "web_search", #"{"query":"two"}"#)]),
+            FakeServices.calls([("d", "web_search", #"{"query":"three"}"#)]),
+            FakeServices.calls([("e", "web_search", #"{"query":"four"}"#)]),
+            FakeServices.answer("Done [1]."), FakeServices.answer("Done [1]."),
+        ], sandbox: Self.twoHitsPerSearch)
+        let log = EventLog()
+        _ = try await agent(services, events: log).run(question: "q")
+        #expect(!log.events.contains(.askingToReadPages))
+        #expect(!log.events.contains(.openingTopResults))
+    }
+
     @Test func stepsOfOnlyRefusedSearchesEndTheResearch() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "web_search", #"{"query":"one"}"#)]),
@@ -2211,9 +2291,14 @@ struct ResearchArgumentsTests {
 
 @Suite("Web research figure check")
 struct ResearchFigureCheckTests {
-    private func check(_ answer: String, _ texts: [Int: String]) -> [ResearchUnverifiedFigure] {
-        ResearchFigureCheck.unverified(answer: answer, sourceTexts: texts)
+    private func check(_ answer: String, _ texts: [Int: String],
+                       question: String = "") -> [ResearchUnverifiedFigure] {
+        ResearchFigureCheck.unverified(answer: answer, sourceTexts: texts, question: question)
     }
+
+    /// About 1,100 characters with no figure and no name, to put between two
+    /// parts of a page.
+    private let filler = String(repeating: "lorem ipsum dolor sit amet. ", count: 40)
 
     private func figures(_ text: String) -> [String] {
         ResearchFigureCheck.tokens(in: ResearchFigureCheck.withoutNoise(text)).filter { !$0.ignored }.map(\.text)
@@ -2358,5 +2443,210 @@ struct ResearchFigureCheckTests {
         #expect(found.unverifiedFigures.isEmpty)
         #expect(!found.markdown.contains("Figure check"))
         #expect(!foundLog.events.contains(.unverifiedFigures(1)))
+    }
+
+    @Test func aDateNextToSomethingElseOnThePageIsFlagged() {
+        let answer = "Die Bibliotheca Albertina ist seit dem 11.09.2026 dauerhaft geschlossen [4]"
+        let page = "Bibliotheca Albertina, täglich geöffnet. " + filler
+            + "Bibliothek Musik: geschlossen ab 11.09.2026."
+        let found = check(answer, [4: page])
+        #expect(found.count == 1)
+        #expect(found.first?.kind == .elsewhereOnPage)
+        #expect(found.first?.figure == "11.09.2026")
+        #expect(found.first?.sources == [4])
+        #expect(found.first?.names == ["Bibliotheca", "Albertina"])
+
+        // With another cited page that has the date next to the name, it is fine.
+        #expect(check(answer + "[5]", [4: page, 5: "Bibliotheca Albertina schließt am 11.09.2026."])
+            .isEmpty)
+    }
+
+    @Test func aDateNextToTheRightNameIsNotFlagged() {
+        let answer = "Die Bibliotheca Albertina ist seit dem 11.09.2026 dauerhaft geschlossen [4]"
+        // Any format of the date counts, before or after the name.
+        #expect(check(answer, [4: "Bibliotheca Albertina schließt am 11.09.2026 dauerhaft."]).isEmpty)
+        #expect(check(answer, [4: filler + "Ab 11. September 2026 ist die Albertina zu. " + filler
+            + "Bibliotheca"]).isEmpty)
+    }
+
+    @Test func namesThatAreNotOnThePageAreNotUsedForTheContextCheck() {
+        let answer = "Die Bibliotheca Albertina ist seit dem 11.09.2026 dauerhaft geschlossen "
+            + "und nicht mit der Stadt verbunden [4]"
+        let found = check(answer, [4: "Die Bibliothek Musik ist nicht für alle da, mit Hinweis "
+            + "von der Leitung und ab 11.09.2026 geschlossen. " + filler])
+        // Neither name is on the page, so the date is not flagged for its
+        // surroundings; the name is flagged for being missing.
+        #expect(found.map(\.kind) == [.name])
+        #expect(found.first?.figure == "Bibliotheca Albertina")
+        #expect(found.first?.sources == [4])
+    }
+
+    @Test func aTableStyleNumberNearItsNameIsNotFlagged() {
+        let answer = "Der Typ PP 136 wiegt viel [2]."
+        let page = "Typ | Gewicht\n" + filler + "PP 136 | 4500 | kg"
+        #expect(check(answer, [2: page]).isEmpty)
+    }
+
+    @Test func aNumberFarFromEveryNameOnThePageIsFlagged() {
+        let answer = "Linz hat 205.000 Einwohner [1]."
+        let page = "Einwohner: Daten. " + filler + "Fläche 205.000 Quadratmeter."
+        let found = check(answer, [1: page])
+        #expect(found.map(\.kind) == [.elsewhereOnPage])
+        #expect(found.first?.figure == "205.000")
+    }
+
+    @Test func aNameInAnAnswerWithoutCitationsIsLookedUpOnAllPagesRead() {
+        let answer = "macOS 26 (macOS Sequoia 26, released 2025) ist neu."
+        let pages = [1: "macOS Tahoe 26 was released in September 2025.",
+                     2: "Apple announced macOS Tahoe."]
+        let found = check(answer, pages, question: "Was ist neu?")
+        #expect(found == [ResearchUnverifiedFigure(
+            figure: "macOS Sequoia 26", sources: [], kind: .name)])
+        // Its figures are not checked without a citation.
+        #expect(check("Es kostet 4,74 Euro.", [1: "nothing"]).isEmpty)
+        // A name on one of the pages is fine, and so is one from the question.
+        #expect(check(answer, pages.merging([3: "Sequoia was the name of macOS 15."]) { $1 }).isEmpty)
+        #expect(check(answer, pages, question: "Was bringt macOS Sequoia?").isEmpty)
+        // Nothing read, nothing to look names up in.
+        #expect(check(answer, [:]).isEmpty)
+    }
+
+    @Test func aNameMissingFromTheCitedPageIsFlagged() {
+        let answer = "Der Bund der Kommunist:innen wurde 1847 gegründet und ist nicht mehr aktiv [2]."
+        let second = "Der Bund wurde 1847 in London gegründet und ist nicht mehr aktiv, "
+            + "mit Sitz von Marx und Engels für die Mitglieder."
+        let third = "Die Kommunisten gab es früh und sind nicht vergessen, mit Spuren von Marx "
+            + "für die Nachwelt."
+        let found = check(answer, [2: second, 3: third])
+        #expect(found == [ResearchUnverifiedFigure(
+            figure: "Bund der Kommunist:innen", sources: [2], kind: .name)])
+        // On the other page it is there, so a sentence citing both is fine.
+        #expect(check(answer.replacingOccurrences(of: "[2]", with: "[2][3]"),
+                      [2: second, 3: third]).isEmpty)
+        // A German compound that contains the name counts as the name.
+        let compound = "Der Kommunistenbund wurde 1847 in London gegründet und ist nicht mehr "
+            + "aktiv, mit Sitz von Marx und Engels für die Mitglieder."
+        #expect(check(answer, [2: compound]).isEmpty)
+    }
+
+    @Test func ordinaryGermanSentencesWithNounsOnThePageAreNotFlagged() {
+        let answer = "Die Stadt Wien hat rund 2.000.000 Einwohner [1]. "
+            + "Wohnungen in Wien kosten mehr als früher [1]. "
+            + "Mieten steigen in der Region Wien [1]."
+        let page = "Die Stadt Wien meldete 2.000.000 Einwohner. Wohnungen kosten mehr. "
+            + "Mieten steigen, besonders in der Region Wien."
+        #expect(check(answer, [1: page]).isEmpty)
+    }
+
+    @Test func aSentenceStartingWithACapitalizedNounIsNotFlagged() {
+        // The first word is capitalized whatever it is, and a single
+        // capitalized word is no name.
+        #expect(check("Kündigungsfristen Wien sind kurz [1].", [1: "Wien ist groß."]).isEmpty)
+        #expect(check("Kündigungsfristen sind kurz. [1]", [1: "Wien ist groß."]).isEmpty)
+    }
+
+    @Test func theReportListsFiguresContextAndNamesSeparately() async throws {
+        var options = ResearchOptions()
+        options.nudges = false
+        let page = "Bibliotheca Albertina: " + filler + "Die Bibliothek Musik ist nicht für alle "
+            + "da, mit Hinweis von der Leitung am 12.12.2026; 3.12 percent."
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
+            FakeServices.answer("Die Bibliotheca Albertina schließt am 12.12.2026 [1]. "
+                + "Sie wächst um 4,74 % [1]. Das Haus Rosenhof ist nicht mit der Bibliothek "
+                + "verbunden und hilft [1]."),
+        ], sandbox: { path, body in
+            guard path == "/v1/fetch" else { return FakeServices.webPages(path, body) }
+            return FakeServices.json(200, .object([
+                "url": .string(body?["url"]?.stringValue ?? ""),
+                "title": .string("apple/container"),
+                "text": .string(page),
+                "offset": .integer(0),
+                "next_offset": .null,
+                "total_chars": .integer(page.count),
+            ]))
+        })
+        let report = try await agent(services, options: options).run(question: "q")
+        #expect(report.unverifiedFigures.map(\.kind) == [.elsewhereOnPage, .notOnPage, .name])
+        let markdown = report.markdown
+        #expect(markdown.contains("- 4,74 — not on [1]"))
+        #expect(markdown.contains("- 12.12.2026 — found on [1], but not near "))
+        #expect(markdown.contains("- Haus Rosenhof — not on [1]"))
+        #expect(markdown.contains("were not found on the pages they cite"))
+        #expect(markdown.contains("but not next to what the sentence names"))
+        #expect(markdown.contains("These names were not found"))
+    }
+
+    private let german = "Die Stadt ist nicht groß und hat ein Haus für die Leute, mit Garten "
+        + "und von Bäumen. Stand 2026."
+    private let english = "The house is open and the staff are there for the people that live "
+        + "on it, and it was built with care."
+
+    @Test func theLanguageIsGuessedFromFunctionWords() {
+        #expect(ResearchFigureCheck.language("Der Hund ist nicht mit der Katze und das ist gut"[...]) == 1)
+        #expect(ResearchFigureCheck.language("The dog is with the cat and that is good"[...]) == -1)
+        #expect(ResearchFigureCheck.language("Hallo Welt"[...]) == 0)
+    }
+
+    @Test func twoNounsAreOnlyCheckedAgainstPagesInTheAnswersLanguage() {
+        let answer = "Das Haus Rosenhof ist nicht mit der Stadt verbunden und hilft [1]."
+        #expect(check(answer, [1: english]).isEmpty)
+        #expect(check(answer, [1: german]).map(\.figure) == ["Haus Rosenhof"])
+        // Without a citation they are not checked at all.
+        #expect(check("Das Haus Rosenhof ist nicht mit der Stadt verbunden und hilft.",
+                      [1: german]).isEmpty)
+        // An answer whose language is unclear is not checked either.
+        #expect(check("Das Haus Rosenhof hilft [1].", [1: german]).isEmpty)
+        // A strong name is checked against a page in any language.
+        let strong = check("Das neue iPhone 15 ist nicht mit der Stadt verbunden [1].", [1: english])
+        #expect(strong.filter { $0.kind == .name }.map(\.figure) == ["iPhone 15"])
+    }
+
+    @Test func aWordBeforeAYearIsNoNameAndAWordBeforeANumberIsWeak() {
+        let before = "Seit Anfang 2026 ist das Projekt nicht mit der Stadt verbunden und hilft [1]."
+        #expect(check(before, [1: german]).isEmpty)
+        let season = "Die Staffel 3 ist nicht mit der Stadt verbunden und hilft [1]."
+        #expect(check(season, [1: german]).map(\.figure) == ["Staffel 3"])
+        #expect(check(season, [1: english]).isEmpty)
+    }
+
+    @Test func unitsWithCapitalsAreNoNames() {
+        #expect(check("Es verbraucht 3 kWh und 5 mAh bei 20 EUR und 9 GmbH.", [1: "nothing"]).isEmpty)
+    }
+
+    @Test func aShortNumberIsNotCheckedForItsSurroundings() {
+        let page = "Einwohner: Daten. " + filler + "Seite 45 von 100."
+        #expect(check("Linz hat 45 Einwohner [1].", [1: page]).isEmpty)
+    }
+
+    @Test func aPageWordMustBeCloseToTheNameInLengthForTheContextCheck() {
+        let page = "Einwohnerverzeichnis: Daten. " + filler + "Fläche 205.000 Quadratmeter."
+        #expect(check("Linz hat 205.000 Einwohner [1].", [1: page]).isEmpty)
+    }
+
+    @Test func aCapitalAfterAColonOrBarStartsAClause() {
+        let page = [1: german]
+        #expect(check("Zusammenfassung: Mieten Wien ist nicht mit der Stadt verbunden und hilft [1].",
+                      page).isEmpty)
+        #expect(check("Das | Mieten Wien | ist nicht mit der Stadt verbunden und hilft [1].",
+                      page).isEmpty)
+        // Bold marks are not a break.
+        #expect(check("Das **Bibliotheca Albertina** ist nicht mit der Stadt verbunden und hilft [1].",
+                      page).map(\.figure) == ["Bibliotheca Albertina"])
+    }
+
+    @Test func headingsSourceListsAndLinkLabelsAreNotCheckedForNames() {
+        let page = [1: german]
+        #expect(check("## Haus Rosenhof ist nicht mit der Stadt verbunden und hilft [1]", page).isEmpty)
+        #expect(check("1. [Haus Rosenhof Wien](https://example.com/x) ist nicht mit der Stadt "
+            + "verbunden und hilft", page).isEmpty)
+        #expect(check("- [1] Haus Rosenhof ist nicht mit der Stadt verbunden und hilft", page).isEmpty)
+        #expect(check("Das [Haus Rosenhof](https://example.com/a) ist nicht mit der Stadt "
+            + "verbunden und hilft [1].", page).isEmpty)
+    }
+
+    @Test func aPageWithDecomposedLettersMatchesPrecomposedOnes() {
+        let page = "Die Stadt ist nicht groß, mit Haus Ko\u{308}ln und von Bäumen für die Leute."
+        #expect(check("Das Haus Köln ist nicht mit der Stadt verbunden und hilft [1].", [1: page]).isEmpty)
     }
 }

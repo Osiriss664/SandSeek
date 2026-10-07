@@ -88,9 +88,9 @@ public struct ResearchReport: Equatable, Sendable {
     /// True when no web page was read, so the answer rests on the model's
     /// memory or on search previews only.
     public var noPagesRead: Bool { sources.isEmpty }
-    /// Figures in the answer that the pages cited for them do not contain,
-    /// worked out from the page text the run read. A hint, not proof: a page
-    /// can state a figure in words or in another unit.
+    /// Figures, dates and names in the answer that the pages cited for them
+    /// do not back up, worked out from the page text the run read. A hint,
+    /// not proof: a page can state a figure in words or in another unit.
     public var unverifiedFigures: [ResearchUnverifiedFigure] = []
 
     /// The report as Markdown that is safe to print and to open in a viewer:
@@ -118,15 +118,20 @@ public struct ResearchReport: Equatable, Sendable {
             }
         }
         if !unverifiedFigures.isEmpty {
-            text += "\n## Figure check\n\n_These figures or dates were not found on the pages they cite; "
-                + "check them before relying on them:_\n\n"
-            for item in unverifiedFigures.prefix(Self.figureCheckLimit) {
-                let cited = item.sources.map { "[\($0)]" }.joined(separator: ", ")
-                let figure = ResearchText.inertMarkdown(ResearchText.oneLine(item.figure, limit: 40))
-                text += "- \(figure) — not on \(cited)\n"
+            text += "\n## Figure check\n"
+            // The limit counts the points over all three lists.
+            var shown = 0
+            for (kind, intro) in Self.figureCheckLists {
+                let items = unverifiedFigures.filter { $0.kind == kind }
+                guard !items.isEmpty, shown < Self.figureCheckLimit else { continue }
+                text += "\n_\(intro)_\n\n"
+                for item in items.prefix(Self.figureCheckLimit - shown) {
+                    text += "- \(Self.figureCheckLine(item))\n"
+                    shown += 1
+                }
             }
-            if unverifiedFigures.count > Self.figureCheckLimit {
-                text += "- and \(unverifiedFigures.count - Self.figureCheckLimit) more\n"
+            if unverifiedFigures.count > shown {
+                text += "- and \(unverifiedFigures.count - shown) more\n"
             }
         }
         if !searchQueries.isEmpty {
@@ -162,8 +167,36 @@ public struct ResearchReport: Equatable, Sendable {
         return ResearchText.terminalSafe(text)
     }
 
-    /// Figures the report lists under "Figure check"; the rest are counted.
+    /// Points the report lists under "Figure check"; the rest are counted.
     static let figureCheckLimit = 20
+
+    /// The lists of the "Figure check" section, each with its one-line intro.
+    static let figureCheckLists: [(ResearchUnverifiedFigure.Kind, String)] = [
+        (.notOnPage, "These figures or dates were not found on the pages they cite; "
+            + "check them before relying on them:"),
+        (.elsewhereOnPage, "These figures or dates are on a cited page, but not next to "
+            + "what the sentence names; check that they belong to it:"),
+        (.name, "These names were not found on the pages they cite, or for a sentence "
+            + "without citation, on any page read; check them before relying on them:"),
+    ]
+
+    /// One point of the "Figure check" section as a line of text.
+    static func figureCheckLine(_ item: ResearchUnverifiedFigure) -> String {
+        let figure = ResearchText.inertMarkdown(ResearchText.oneLine(item.figure, limit: 40))
+        let cited = item.sources.map { "[\($0)]" }.joined(separator: ", ")
+        switch item.kind {
+        case .notOnPage:
+            return "\(figure) — not on \(cited)"
+        case .elsewhereOnPage:
+            let near = item.names.map {
+                ResearchText.inertMarkdown(ResearchText.oneLine($0, limit: 40))
+            }.joined(separator: ", ")
+            return "\(figure) — found on \(cited), but not near \(near)"
+        case .name:
+            return cited.isEmpty
+                ? "\(figure) — not on any page read" : "\(figure) — not on \(cited)"
+        }
+    }
 
     /// Citation numbers in the answer that match no source, such as a model
     /// numbering a page it read twice as two sources. Reads `[2]`, `[1, 2]`
@@ -218,13 +251,16 @@ public enum ResearchEvent: Equatable, Sendable {
     case retryingEmptyAnswer
     /// The model answered without searching, and is asked once to search.
     case askingToSearchFirst
-    /// The model answered from search previews, and is asked once to open pages.
+    /// No page has been read yet: the model answered from search previews, or
+    /// searched several times without opening a page. It is asked once to
+    /// open pages.
     case askingToReadPages
     /// The model answered after one search or one page, and is asked once to
     /// search with other words and read another source.
     case askingToSearchMore
     /// The model read no page (it answered from search previews again after
-    /// it was asked to read, or kept repeating searches it already ran), or
+    /// it was asked to read, kept repeating searches it already ran, or kept
+    /// searching after it was asked to open pages), or
     /// the step budget ran out with fewer pages read than the run asks for
     /// (three by default). The loop
     /// opens top search results itself.
@@ -420,6 +456,9 @@ public struct ResearchAgent: Sendable {
         // step at which the loop stopped for that, if it did.
         var refusedOnlySteps = 0
         var stoppedAtStep: Int?
+        // Steps whose tool calls left the research with search results but
+        // no page read.
+        var searchOnlySteps = 0
         for step in 1...max(1, options.maxSteps) {
             onEvent(.modelTurn(step))
             state.modelTurns = step
@@ -537,6 +576,43 @@ public struct ResearchAgent: Sendable {
                     continue
                 }
             }
+            // A model that searches again and again without opening a page
+            // (Qwen searched in all 8 steps of a run) never answers without
+            // tools, so the request to read above never reaches it and the
+            // pages would only be opened at the end. Ask it to read after a
+            // few such steps; if it still reads nothing, open the top
+            // results for it. Without nudges the loop opens them right away.
+            if state.sources.isEmpty, state.searched {
+                searchOnlySteps += 1
+            }
+            if state.sources.isEmpty, state.searched, step < options.maxSteps {
+                let openAfter = options.nudges
+                    ? Self.searchStepsBeforeReading + Self.searchStepsAfterRequest
+                    : Self.searchStepsBeforeReading
+                if options.nudges, !askedToRead,
+                   searchOnlySteps >= Self.searchStepsBeforeReading {
+                    askedToRead = true
+                    onEvent(.askingToReadPages)
+                    state.messages.append(.object([
+                        "role": .string("user"),
+                        "content": .string(Self.searchedWithoutReadingRequest),
+                    ]))
+                } else if options.autoOpenPages, !openedTopResults,
+                          searchOnlySteps >= openAfter {
+                    openedTopResults = true
+                    onEvent(.openingTopResults)
+                    let pages = await openTopResults(state: &state)
+                    if !pages.isEmpty {
+                        state.messages.append(.object([
+                            "role": .string("user"),
+                            "content": .string(Self.searchedWithoutOpeningRequest + "\n\n"
+                                + pages.joined(separator: "\n\n")),
+                        ]))
+                        refusedOnlySteps = 0
+                        continue
+                    }
+                }
+            }
             // A model stuck repeating searches it already ran (Qwen did from
             // step 25 of a 40-step run, with pages read) only wastes its
             // remaining steps. After two such steps in a row, stop and ask
@@ -631,12 +707,12 @@ public struct ResearchAgent: Sendable {
             tokenLimit: turn.finishReason == "length" || retry.finishReason == "length")
     }
 
-    /// Adds the figures of the final answer that are not on the pages cited
-    /// for them. The answer is not changed and the model is not asked again.
+    /// Adds the figures and names of the final answer that the pages cited
+    /// for them do not back up. The answer is not changed and the model is not asked again.
     private func checkingFigures(_ report: ResearchReport, state: State) -> ResearchReport {
         var checked = report
         checked.unverifiedFigures = ResearchFigureCheck.unverified(
-            answer: report.answer, sourceTexts: state.pageTexts)
+            answer: report.answer, sourceTexts: state.pageTexts, question: state.question)
         if !checked.unverifiedFigures.isEmpty {
             onEvent(.unverifiedFigures(checked.unverifiedFigures.count))
         }
@@ -737,6 +813,24 @@ public struct ResearchAgent: Sendable {
         + "not opened any page, so the research opened the top search results for you. They "
         + "follow below. Answer from what these pages say, citing their source numbers, or "
         + "open other pages from the results. Do not repeat earlier searches."
+
+    static let searchedWithoutReadingRequest = "No page has been read yet, only search "
+        + "results, which are short snippets that can be out of date. Before you search "
+        + "again, open the most relevant results now with open_page, then go on from what the "
+        + "pages say, citing the source numbers open_page gives."
+
+    static let searchedWithoutOpeningRequest = "You keep searching and have not opened any page, "
+        + "so the research opened the top search results for you. They follow below. Answer "
+        + "from what these pages say, citing their source numbers, or open other pages from "
+        + "the results."
+
+    /// Steps that only searched, with no page read, before the model is asked
+    /// to open pages (or, without nudges, before the loop opens them).
+    static let searchStepsBeforeReading = 3
+
+    /// More such steps after that request before the loop opens the top
+    /// results itself.
+    static let searchStepsAfterRequest = 2
 
     /// Refused repeated searches, with no page read, before the loop opens
     /// the top results itself.

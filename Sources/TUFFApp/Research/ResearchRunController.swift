@@ -281,7 +281,7 @@ public final class ResearchRunController {
         case .askingToSearchFirst:
             append(.turn, "Answered without searching; asking it to search", started: started)
         case .askingToReadPages:
-            append(.turn, "Answered from search previews; asking it to read pages", started: started)
+            append(.turn, "No page read yet; asking it to read pages", started: started)
         case .askingToSearchMore:
             append(.turn, "Answered from one search or page; asking it to look wider", started: started)
         case .openingTopResults:
@@ -311,7 +311,8 @@ public final class ResearchRunController {
             append(.turn, "Only repeated searches or pages; stopping and asking for the answer",
                    started: started)
         case .unverifiedFigures(let count):
-            append(.turn, "\(count) figures not found on the pages they cite", started: started)
+            append(.turn, "\(count) \(count == 1 ? "point" : "points") could not be matched to the pages they cite",
+                   started: started)
         }
     }
 

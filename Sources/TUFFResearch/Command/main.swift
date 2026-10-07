@@ -62,7 +62,7 @@ let agent = ResearchAgent(
         case .toolFailed(let message): writeProgress("    tool error: \(message)")
         case .retryingEmptyAnswer: writeProgress("    no answer yet; asking for a short one")
         case .askingToSearchFirst: writeProgress("    answered without searching; asking it to search")
-        case .askingToReadPages: writeProgress("    answered from search previews; asking it to read pages")
+        case .askingToReadPages: writeProgress("    no page read yet; asking it to read pages")
         case .askingToSearchMore: writeProgress("    answered from one search or page; asking it to look wider")
         case .openingTopResults: writeProgress("    few or no pages read; opening top search results")
         case .repeatedSearchRefused(let query): writeProgress("    repeated search refused: \(query)")
@@ -76,7 +76,7 @@ let agent = ResearchAgent(
         case .retryingAfterModelError: writeProgress("    model error while thinking; asking again without thinking")
         case .retryingAfterModelErrorAgain: writeProgress("    model error; asking once more")
         case .stoppingRepeatedSearches: writeProgress("    only repeated searches or pages; stopping and asking for the answer")
-        case .unverifiedFigures(let count): writeProgress("    \(count) figures not found on the pages they cite")
+        case .unverifiedFigures(let count): writeProgress("    \(count) \(count == 1 ? "point" : "points") could not be matched to the pages they cite")
         }
     })
 

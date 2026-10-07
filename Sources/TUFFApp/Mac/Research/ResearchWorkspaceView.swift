@@ -851,7 +851,7 @@ private struct ResearchReportView: View {
                     .foregroundStyle(.orange)
             }
             if report.unverifiedFigureCount > 0 {
-                Text("\(report.unverifiedFigureCount) \(report.unverifiedFigureCount == 1 ? "figure was" : "figures were") not found on the pages they cite. The saved report lists them under Figure check.")
+                Text("\(report.unverifiedFigureCount) \(report.unverifiedFigureCount == 1 ? "point" : "points") (figures, dates or names) could not be matched to the pages they cite. The saved report lists them under Figure check.")
                     .appFont(.caption)
                     .foregroundStyle(.orange)
             }

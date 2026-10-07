@@ -354,7 +354,14 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
   searches or pages; stopping and asking for the answer", and the report notes the
   early stop. A step with any new search or page read starts the count again,
   and so do the top results opened for a model that had read no page.
-  This stop is always on; on the last step the run ends anyway, as before. When the step budget runs out, or the research stops
+  This stop is always on; on the last step the run ends anyway, as before.
+  A model that keeps calling tools but never opens a page (Qwen searched in
+  all 8 steps of one run, so neither request above ever reached it) is asked
+  to open the most relevant results after three such steps, once, with the
+  same "asking to read pages" progress line. If two more steps pass with
+  still no page read, the research opens the top results for it as above.
+  With `--nudges off` it opens them after the first three steps. Once a page
+  is read this changes nothing. When the step budget runs out, or the research stops
   this way, with fewer than three (`--min-pages`)
   pages read, the research opens more of the top results (ones not read yet)
   and hands them over with the request for the final answer. These top-up
@@ -373,19 +380,55 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
   third as long as the first answer; otherwise the first answer stays, and
   the report still flags its unread citations. This costs one more model
   turn, and only when it happens.
-- The report flags figures and dates in the answer that are not on the pages
-  the same sentence cites. The run keeps the full text of each page it read (up to
-  200,000 characters per page and a million in all, so compaction does not
-  affect it) and compares numbers by their digits, so `5,82` and `5.82`
-  match. Single digits, times and ordinal days such as `15. Februar` are
-  skipped. Full dates (`29.11.2024`, `29. November 2024`, `November 29, 2024`,
-  `2024-11-29`, German or English month names) match the same day, month and
-  year in any of these forms; `November 2024` needs that month on a cited page;
-  a year (also each of `2025/2026`) must be on a cited page as a year, in a
-  date or as a number. The answer is not
-  changed and the model is not asked again; the "Figure check" section is a
-  hint, not proof, since a page can state a figure in words or in a
-  different unit.
+- The report flags figures, dates and names in the answer that the pages the
+  same sentence cites do not back up. The run keeps the full text of each
+  page it read (up to 200,000 characters per page and a million in all, so
+  compaction does not affect it). The "Figure check" section has three short
+  lists, each with a one-line intro, and shares one limit of 20 points:
+  - Figures or dates not on the cited pages. Numbers are compared by their
+    digits, so `5,82` and `5.82` match. Single digits, times and ordinal days
+    such as `15. Februar` are skipped. Full dates (`29.11.2024`,
+    `29. November 2024`, `November 29, 2024`, `2024-11-29`, German or English
+    month names) match the same day, month and year in any of these forms;
+    `November 2024` needs that month on a cited page; a year (also each of
+    `2025/2026`) must be on a cited page as a year, in a date or as a number.
+  - Figures or dates that are on a cited page, but not next to what the
+    sentence names. The sentence's name words are its capitalized words other
+    than the first, acronyms and words such as `macOS` (without function
+    words, month and weekday names, units and the words of the date). A full
+    date or a number is flagged when the sentence has name words that are on
+    the page (as a word at most three letters longer than the name's stem),
+    but none of them stands within about 300 characters of the figure
+    anywhere on the page (the date in any of its formats, the number as a
+    whole token), on every cited page that has it. Numbers with fewer than
+    three significant digits are not checked this way. Name words that are
+    nowhere on the page are ignored here, and months and years are not
+    checked this way.
+  - Names a cited page does not have. Only name phrases are checked, since
+    German capitalizes every noun. A strong name is a word with an inner
+    capital or an acronym followed by a number (`macOS 26`, with the
+    capitalized words after it, such as `macOS Sequoia 26`). Other phrases
+    are two or more capitalized words in a row, with linking words allowed
+    (`Bibliotheca Albertina`, `Bund der Kommunist:innen`), or a capitalized
+    word before a number (`Staffel 3`; a year does not count). None starts
+    at the sentence's first word or after a colon or a bar, unless it has an
+    inner capital. Units such as `kWh` and `GmbH` and the currency codes are
+    skipped, and so are headings, source lists and the labels of links. A
+    phrase is flagged when one of its words is on none of the cited pages (no
+    page word contains the word's stem, so the German compound
+    `Kommunistenbund` matches `Kommunist:innen`); for a sentence with no
+    citation, when it is on none of the pages read. To avoid noise from
+    answers that translate, the second kind of phrase is only checked
+    against cited pages in the answer's language (guessed from German and
+    English function words; unclear counts as no match), and not at all in a
+    sentence without citation. Words that are in the question do not count,
+    and each phrase is flagged once. Sentences without citations are checked
+    for names only, never for figures.
+
+  The answer is not changed and the model is not asked again; the section is
+  a hint, not proof, since a page can state a figure in words or in a
+  different unit, and an answer in German from English pages can name things
+  in its own words.
 - The model is told today's date and that pages dated up to today are real.
   Without that, Qwen called 2026 news "simulated" because it is newer than
   its training data. It is also told that a real page is not automatically a

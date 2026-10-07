@@ -83,7 +83,8 @@ public struct SavedResearchReport: Codable, Equatable, Identifiable, Sendable {
     public var endedEarly: String? { endedEarlyReason }
     /// Optional so reports saved before it existed still load.
     private let unverifiedFigureTotal: Int?
-    /// How many figures in the answer were not found on the pages cited.
+    /// How many figures, dates or names in the answer could not be matched to
+    /// the pages cited.
     public var unverifiedFigureCount: Int { unverifiedFigureTotal ?? 0 }
     public let unknownCitations: [Int]
     public let steps: [ResearchStep]
