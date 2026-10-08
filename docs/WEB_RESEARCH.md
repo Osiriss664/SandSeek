@@ -373,7 +373,7 @@ TUFF's OpenAI-compatible endpoint with the probe modules `latentinjection`
 characters) and `encoding` (instructions in base64, hex, Morse and similar).
 It tests the model alone, not the sandbox or the research loop, and it is a
 Mac-only test tool that does not ship with TUFF. The default run is a small
-first pass (about 96 prompts, 25 to 65 minutes); the wide run is about 552
+first pass (about 96 prompts; 39 minutes with Qwen3.6 35B-A3B on a 16 GB Mac); the wide run is about 552
 prompts. It needs Python 3.11 or newer (`GARAK_PYTHON`, for example from
 `brew install python@3.12`). The steps and how to read the report are in
 `Scripts/garak/README.md`.
@@ -436,8 +436,13 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
   `preserve_thinking` is always sent so earlier turns render the same. The
   retry, the continuation and the revision ask with reasoning off, so with
   reasoning on they can still miss. A reply with tool calls is never used: the
-  calls are not run, its text is dropped, and the request is sent once more
-  with `tool_choice` `none` and reasoning off. That reply is the answer.
+  calls are not run and its text is dropped. A short note is added for that
+  one request ("The tools are closed now; do not call web_search or open_page
+  again. Reply with text only, as asked above.") and it is sent again with
+  `tool_choice` `auto` and reasoning off. Only if that reply has tool calls as
+  well is the request sent once more with `tool_choice` `none` (Qwen once
+  started a tool call even then, and the server answered with an error). The
+  note is not kept in the conversation.
 - An answer that stopped at the token limit (`finish_reason` `length`; the
   heat-pump answer did at 2048 tokens) is given back once, with reasoning off
   and the cut-off text as the assistant's message, with the request to
