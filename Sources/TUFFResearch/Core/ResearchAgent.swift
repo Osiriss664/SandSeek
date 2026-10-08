@@ -1141,15 +1141,30 @@ public struct ResearchAgent: Sendable {
     /// The retry and the rewrite ask with reasoning off, so with reasoning on
     /// they still miss on the server's "reasoning mode changed".
     /// A reply with tool calls is never used: the calls are not run, and its
-    /// text is only the preamble to them. The request is sent once more with
-    /// `tool_choice=none` and reasoning off, and that reply is the answer.
+    /// text is only the preamble to them. The model is then told once, in a
+    /// note that is not kept, that the tools are closed, still with the tools
+    /// in the prompt so the cache holds, and reasoning off. Only if it calls
+    /// a tool again is it asked with `tool_choice=none`. Qwen went on calling
+    /// tools there in a Bali run, and the server refused the reply as an
+    /// unknown tool, so that is the last resort.
     private func completeAnswer(_ state: inout State,
                                 thinking: Bool? = nil) async throws -> ResearchAssistantTurn {
         let turn = try await complete(&state, toolUse: .discouraged, thinking: thinking)
         guard !turn.toolCalls.isEmpty else { return turn }
         try Task.checkCancellation()
+        state.messages.append(.object([
+            "role": .string("user"),
+            "content": .string(Self.toolsClosedNote),
+        ]))
+        defer { state.messages.removeLast() }
+        let again = try await complete(&state, toolUse: .discouraged, thinking: false)
+        guard !again.toolCalls.isEmpty else { return again }
+        try Task.checkCancellation()
         return try await complete(&state, toolUse: .off, thinking: false)
     }
+
+    static let toolsClosedNote = "The tools are closed now; do not call web_search or "
+        + "open_page again. Reply with text only, as asked above."
 
     /// Sends the conversation. A turn with reasoning on that runs past the
     /// thinking limit (`thinkingMinutes`) or the request timeout is asked

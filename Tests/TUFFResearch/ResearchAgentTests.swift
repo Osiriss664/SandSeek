@@ -1250,7 +1250,7 @@ struct ResearchAgentTests {
         #expect(final["tools"]?.arrayValue?.isEmpty == false)
     }
 
-    @Test func aFinalReplyWithOnlyToolCallsIsAskedOnceMoreWithToolChoiceNone() async throws {
+    @Test func aFinalReplyWithOnlyToolCallsIsToldTheToolsAreClosedThenAskedWithNone() async throws {
         var options = ResearchOptions()
         options.maxSteps = 2
         let services = FakeServices(modelReplies: [
@@ -1258,20 +1258,27 @@ struct ResearchAgentTests {
             FakeServices.calls([("c", "web_search", #"{"query":"three"}"#)]),
             // The final request: it calls a tool instead of answering.
             FakeServices.calls([("b", "web_search", #"{"query":"two"}"#)]),
+            // Told the tools are closed, it calls one again.
+            FakeServices.calls([("d", "web_search", #"{"query":"four"}"#)]),
             FakeServices.answer("Partial answer."),
         ])
         let report = try await agent(services, options: options).run(question: "q")
         #expect(report.answer == "Partial answer.")
-        #expect(services.modelRequests.count == 4)
+        #expect(services.modelRequests.count == 5)
         #expect(services.requests.filter { $0.url.path == "/v1/search" }.count == 2)
         let asked = services.modelRequests[2]
-        let again = services.modelRequests[3]
+        let told = services.modelRequests[3]
+        let again = services.modelRequests[4]
         #expect(asked["tool_choice"] == .string("auto"))
+        #expect(told["tool_choice"] == .string("auto"))
+        #expect(told["tools"] == asked["tools"])
+        #expect(told["messages"]?.arrayValue?.last?["content"]?.stringValue
+            == ResearchAgent.toolsClosedNote)
         #expect(again["tool_choice"] == .string("none"))
-        #expect(again["messages"] == asked["messages"])
+        #expect(again["messages"] == told["messages"])
     }
 
-    @Test func aFinalReplyWithContentAndToolCallsIsAskedAgainAndTheRetryIsUsed() async throws {
+    @Test func aFinalReplyWithContentAndToolCallsIsToldTheToolsAreClosed() async throws {
         var options = ResearchOptions()
         options.maxSteps = 2
         let services = FakeServices(modelReplies: [
@@ -1286,7 +1293,7 @@ struct ResearchAgentTests {
         #expect(report.answer == "Partial answer.")
         #expect(services.modelRequests.count == 4)
         #expect(services.modelRequests[2]["tool_choice"] == .string("auto"))
-        #expect(services.modelRequests[3]["tool_choice"] == .string("none"))
+        #expect(services.modelRequests[3]["tool_choice"] == .string("auto"))
         #expect(services.modelRequests[3]["enable_thinking"] == .bool(false))
         #expect(services.requests.filter { $0.url.path == "/v1/search" }.count == 2)
     }
