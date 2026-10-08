@@ -45,7 +45,7 @@ if [ ! -x "$GARAK_VENV/bin/python" ]; then
   "$GARAK_PYTHON" -m venv "$GARAK_VENV"
 fi
 
-INSTALLED="$("$GARAK_VENV/bin/python" -m pip show garak 2>/dev/null | sed -n 's/^Version: //p')"
+INSTALLED="$({ "$GARAK_VENV/bin/python" -m pip show garak 2>/dev/null || true; } | sed -n 's/^Version: //p')"
 if [ "$INSTALLED" != "$GARAK_VERSION" ]; then
   echo "Installing garak==$GARAK_VERSION (installed: ${INSTALLED:-none})"
   "$GARAK_VENV/bin/python" -m pip install --upgrade pip
