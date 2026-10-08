@@ -15,8 +15,8 @@ Lake Zorvath.
 
 | Dataset | Source | Files used | Version |
 | --- | --- | --- | --- |
-| BIPIA (Microsoft) | https://github.com/microsoft/BIPIA | `benchmark/text_attack_test.json` (first four attacks of each of its 15 categories) | `main` branch, fetched 2026-10-08 from raw.githubusercontent.com; commit not readable from the build environment |
-| AgentDojo (ETH Zurich) | https://github.com/ethz-spylab/agentdojo | `src/agentdojo/attacks/baseline_attacks.py`, `important_instructions_attacks.py`, `dos_attacks.py`; `src/agentdojo/default_suites/v1/{slack,travel,workspace,banking}/injection_tasks.py` | `main` branch, fetched 2026-10-08; commit not readable from the build environment |
+| BIPIA (Microsoft) | https://github.com/microsoft/BIPIA | `benchmark/text_attack_test.json` (first four attacks of each of its 15 categories) | `main` at commit `a004b69ec0dd446e0afd461d98cb5e96e120a5d0`, fetched 2026-10-08 |
+| AgentDojo (ETH Zurich) | https://github.com/ethz-spylab/agentdojo | `src/agentdojo/attacks/baseline_attacks.py`, `important_instructions_attacks.py`, `dos_attacks.py`; `src/agentdojo/default_suites/v1/{slack,travel,workspace,banking}/injection_tasks.py` | `main` at commit `089ed468cf3ed0322acc66b0211f26d9d90dbf60`, fetched 2026-10-08 |
 
 BIPIA's licence file says the MIT licence covers the repository except the
 datasets it lists under `benchmark` (WikiTableQuestions, Stack Exchange,
