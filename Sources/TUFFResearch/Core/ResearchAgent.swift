@@ -462,7 +462,7 @@ public struct ResearchAgent: Sendable {
         for step in 1...max(1, options.maxSteps) {
             onEvent(.modelTurn(step))
             state.modelTurns = step
-            let turn = try await complete(&state, allowTools: true)
+            let turn = try await complete(&state, toolUse: .allowed)
             // A turn cut off while thinking has not chosen to answer; with
             // steps left, the research goes on rather than ending here, with
             // reasoning off from now on. A turn cut off with reasoning
@@ -659,7 +659,7 @@ public struct ResearchAgent: Sendable {
             "role": .string("user"),
             "content": .string(finalRequest),
         ]))
-        let final = try await complete(&state, allowTools: false)
+        let final = try await completeAnswer(&state)
         let turns = (stoppedAtStep ?? options.maxSteps) + 1
         let exhausted = stoppedAtStep == nil
         var report: ResearchReport
@@ -694,11 +694,11 @@ public struct ResearchAgent: Sendable {
         onEvent(.retryingEmptyAnswer)
         let retry: ResearchAssistantTurn
         do {
-            retry = try await complete(&state, allowTools: false, thinking: false)
+            retry = try await completeAnswer(&state, thinking: false)
         } catch ResearchError.modelRequestFailed(_, _, "unsupported_parameter"?) {
             // GPT-OSS takes reasoning_effort instead and refuses
             // enable_thinking; ask with the client's own setting.
-            retry = try await complete(&state, allowTools: false)
+            retry = try await completeAnswer(&state)
         }
         if let content = retry.content, !Self.isBlank(content) {
             return (content, retry.finishReason == "length")
@@ -745,10 +745,10 @@ public struct ResearchAgent: Sendable {
         let revision: ResearchAssistantTurn
         do {
             do {
-                revision = try await complete(&state, allowTools: false, thinking: false)
+                revision = try await completeAnswer(&state, thinking: false)
             } catch ResearchError.modelRequestFailed(_, _, "unsupported_parameter"?) {
                 // GPT-OSS refuses enable_thinking; ask with the client's setting.
-                revision = try await complete(&state, allowTools: false)
+                revision = try await completeAnswer(&state)
             }
         } catch {
             // A stopped run stays stopped; any other failure keeps the answer.
@@ -960,6 +960,23 @@ public struct ResearchAgent: Sendable {
         return Int(min(characters, Double(Self.largestBudgetCharacters)))
     }
 
+    /// The request for an answer now (the final answer, the empty-answer
+    /// retry, the citation rewrite). It keeps the tools in the prompt and
+    /// sends `tool_choice=auto`, because dropping them (`none`) changes the
+    /// rendered system block, and the server then misses its prompt cache.
+    /// The retry and the rewrite ask with reasoning off, so with reasoning on
+    /// they still miss on the server's "reasoning mode changed".
+    /// A reply with tool calls is never used: the calls are not run, and its
+    /// text is only the preamble to them. The request is sent once more with
+    /// `tool_choice=none` and reasoning off, and that reply is the answer.
+    private func completeAnswer(_ state: inout State,
+                                thinking: Bool? = nil) async throws -> ResearchAssistantTurn {
+        let turn = try await complete(&state, toolUse: .discouraged, thinking: thinking)
+        guard !turn.toolCalls.isEmpty else { return turn }
+        try Task.checkCancellation()
+        return try await complete(&state, toolUse: .off, thinking: false)
+    }
+
     /// Sends the conversation. A turn with reasoning on that runs past the
     /// thinking limit (`thinkingMinutes`) or the request timeout is asked
     /// once more with reasoning off, so a run is not held up, or lost, by
@@ -970,7 +987,7 @@ public struct ResearchAgent: Sendable {
     /// next turns would most likely go the same way. A server error on a step
     /// with reasoning already off is sent once more as it was.
     private func complete(_ state: inout State,
-                          allowTools: Bool,
+                          toolUse: ResearchToolUse,
                           thinking: Bool? = nil) async throws -> ResearchAssistantTurn {
         let thinking = state.reasoningOff ? false : thinking
         let thinks = (thinking ?? chat.enableThinking) == true
@@ -978,7 +995,7 @@ public struct ResearchAgent: Sendable {
         // that never reasoned already sent.
         var retryThinking: Bool? = false
         do {
-            return try await sendTurningThinkingOff(&state, allowTools: allowTools,
+            return try await sendTurningThinkingOff(&state, toolUse: toolUse,
                                                     thinking: thinking)
         } catch ResearchError.modelTimedOut where thinks {
             state.thinkingTimedOut = true
@@ -1004,7 +1021,7 @@ public struct ResearchAgent: Sendable {
             }
         }
         // The only retry of this call: a second failure is thrown.
-        return try await sendTurningThinkingOff(&state, allowTools: allowTools,
+        return try await sendTurningThinkingOff(&state, toolUse: toolUse,
                                                 thinking: retryThinking)
     }
 
@@ -1015,15 +1032,15 @@ public struct ResearchAgent: Sendable {
     /// that asked for reasoning off is then sent with the client's own
     /// setting, and so are the turns after it.
     private func sendTurningThinkingOff(_ state: inout State,
-                                        allowTools: Bool,
+                                        toolUse: ResearchToolUse,
                                         thinking: Bool?) async throws -> ResearchAssistantTurn {
         let thinking = thinking == false && state.enableThinkingRefused ? nil : thinking
         do {
-            return try await send(&state, allowTools: allowTools, thinking: thinking)
+            return try await send(&state, toolUse: toolUse, thinking: thinking)
         } catch ResearchError.modelRequestFailed(_, _, "unsupported_parameter"?)
                     where thinking == false {
             state.enableThinkingRefused = true
-            return try await send(&state, allowTools: allowTools, thinking: nil)
+            return try await send(&state, toolUse: toolUse, thinking: nil)
         }
     }
 
@@ -1032,7 +1049,7 @@ public struct ResearchAgent: Sendable {
     /// then once more with even the newest results shortened, so a long
     /// run keeps going instead of failing on a full context.
     private func send(_ state: inout State,
-                      allowTools: Bool,
+                      toolUse: ResearchToolUse,
                       thinking: Bool?) async throws -> ResearchAssistantTurn {
         if state.compact(toFit: promptBudget(state), overhead: Self.toolCharacters) {
             onEvent(.shortenedOlderResults)
@@ -1045,7 +1062,7 @@ public struct ResearchAgent: Sendable {
         let turn: ResearchAssistantTurn
         do {
             turn = try await chat.complete(
-                messages: state.messages, tools: Self.tools, allowTools: allowTools,
+                messages: state.messages, tools: Self.tools, toolUse: toolUse,
                 thinking: thinking, timeout: limit)
         } catch ResearchError.modelRequestFailed(_, _, "context_length_exceeded"?) {
             // The server's tokens hold fewer characters than estimated.
@@ -1057,7 +1074,7 @@ public struct ResearchAgent: Sendable {
             sent = state.size(overhead: Self.toolCharacters)
             do {
                 turn = try await chat.complete(
-                    messages: state.messages, tools: Self.tools, allowTools: allowTools,
+                    messages: state.messages, tools: Self.tools, toolUse: toolUse,
                     thinking: thinking, timeout: limit)
             } catch ResearchError.modelRequestFailed(let status, let message,
                                                      "context_length_exceeded"?) {
@@ -1069,7 +1086,7 @@ public struct ResearchAgent: Sendable {
                 onEvent(.shortenedOlderResults)
                 sent = state.size(overhead: Self.toolCharacters)
                 turn = try await chat.complete(
-                    messages: state.messages, tools: Self.tools, allowTools: allowTools,
+                    messages: state.messages, tools: Self.tools, toolUse: toolUse,
                     thinking: thinking, timeout: limit)
             }
         }

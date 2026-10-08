@@ -25,6 +25,16 @@ public struct ResearchAssistantTurn: Equatable, Sendable {
     public var model: String? = nil
 }
 
+/// Whether a request lets the model call tools. `.discouraged` is for an
+/// "answer now" request: the tools stay in the prompt with `tool_choice=auto`
+/// so the rendered tool block, which the server's prompt cache needs to
+/// match, stays the same, and the request text asks for an answer. Only
+/// `.off` sends `tool_choice=none`, which the server renders without the
+/// tools. A request that also changes the reasoning mode still misses.
+public enum ResearchToolUse: Sendable {
+    case allowed, discouraged, off
+}
+
 /// Talks to TUFF's OpenAI-compatible Chat Completions endpoint. It sends only
 /// fields TUFF accepts: the server refuses unknown keys, and it refuses
 /// `tool_choice=required` and `parallel_tool_calls=false`, so neither is used.
@@ -51,7 +61,7 @@ public struct ResearchChatClient: Sendable {
 
     func requestBody(messages: [ResearchJSON],
                      tools: [ResearchJSON],
-                     allowTools: Bool,
+                     toolUse: ResearchToolUse,
                      thinking: Bool? = nil) -> ResearchJSON {
         var body: [String: ResearchJSON] = [
             "model": .string(model),
@@ -61,25 +71,26 @@ public struct ResearchChatClient: Sendable {
         ]
         if !tools.isEmpty {
             body["tools"] = .array(tools)
-            body["tool_choice"] = .string(allowTools ? "auto" : "none")
+            body["tool_choice"] = .string(toolUse == .off ? "none" : "auto")
         }
         if let thinking = thinking ?? enableThinking {
             body["enable_thinking"] = .bool(thinking)
         }
-        // Keyed to the setting, not the per-step override, so a step run with
-        // thinking off renders earlier reasoning the way the cached prompt did.
-        if enableThinking == true {
-            body["preserve_thinking"] = .bool(true)
-        }
+        // Always sent, whatever the setting or the per-step override. Without
+        // it the Qwen ChatML template drops the empty think blocks of earlier
+        // assistant turns once a new user message (the final request, a
+        // nudge) is last, and the whole cached prefix is missed. The server
+        // applies it to ChatML only.
+        body["preserve_thinking"] = .bool(true)
         return .object(body)
     }
 
     public func complete(messages: [ResearchJSON],
                          tools: [ResearchJSON],
-                         allowTools: Bool = true,
+                         toolUse: ResearchToolUse = .allowed,
                          thinking: Bool? = nil,
                          timeout: TimeInterval? = nil) async throws -> ResearchAssistantTurn {
-        let body = try requestBody(messages: messages, tools: tools, allowTools: allowTools,
+        let body = try requestBody(messages: messages, tools: tools, toolUse: toolUse,
                                    thinking: thinking).encoded()
         let response: ResearchHTTPResponse
         do {

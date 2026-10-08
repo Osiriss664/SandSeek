@@ -70,11 +70,12 @@ private final class FakeServices: ResearchHTTPTransport, @unchecked Sendable {
         ])])]))
     }
 
-    static func calls(_ calls: [(String, String, String)]) -> ResearchHTTPResponse {
+    static func calls(_ calls: [(String, String, String)],
+                      content: String? = nil) -> ResearchHTTPResponse {
         json(200, .object(["choices": .array([.object([
             "message": .object([
                 "role": .string("assistant"),
-                "content": .null,
+                "content": content.map(ResearchJSON.string) ?? .null,
                 "tool_calls": .array(calls.map { id, name, arguments in
                     .object([
                         "id": .string(id),
@@ -508,7 +509,8 @@ struct ResearchAgentTests {
         _ = try await agent(services).run(question: "q")
         let request = try #require(services.modelRequests.first)
         let keys = Set(request.objectValue?.keys.map { $0 } ?? [])
-        #expect(keys == ["model", "messages", "max_tokens", "stream", "tools", "tool_choice"])
+        #expect(keys == ["model", "messages", "max_tokens", "stream", "tools", "tool_choice",
+                         "preserve_thinking"])
         #expect(request["tool_choice"] == .string("auto"))
         #expect(request["max_tokens"] == .integer(512))
         let names = request["tools"]?.arrayValue?.compactMap { $0["function"]?["name"]?.stringValue }
@@ -521,26 +523,25 @@ struct ResearchAgentTests {
             serverURL: URL(string: "http://127.0.0.1:8080/v1")!, model: "qwen36",
             maxTokens: 100, enableThinking: false, transport: FakeServices(modelReplies: []))
         #expect(client.endpoint.absoluteString == "http://127.0.0.1:8080/v1/chat/completions")
-        let body = client.requestBody(messages: [], tools: [], allowTools: true)
+        let body = client.requestBody(messages: [], tools: [], toolUse: .allowed)
         #expect(body["enable_thinking"] == .bool(false))
         #expect(body["tools"] == nil)
         #expect(body["tool_choice"] == nil)
     }
 
-    @Test func preserveThinkingFollowsTheSettingNotTheStepOverride() {
+    @Test func preserveThinkingIsAlwaysSent() {
         func body(_ enableThinking: Bool?, thinking: Bool? = nil) -> ResearchJSON {
             ResearchChatClient(
                 serverURL: URL(string: "http://127.0.0.1:8080")!, model: "qwen36",
                 maxTokens: 100, enableThinking: enableThinking,
                 transport: FakeServices(modelReplies: []))
-                .requestBody(messages: [], tools: [], allowTools: true, thinking: thinking)
+                .requestBody(messages: [], tools: [], toolUse: .allowed, thinking: thinking)
         }
         #expect(body(true)["preserve_thinking"] == .bool(true))
-        // A step run with thinking off still renders earlier reasoning alike.
         #expect(body(true, thinking: false)["preserve_thinking"] == .bool(true))
-        #expect(body(false)["preserve_thinking"] == nil)
-        #expect(body(nil)["preserve_thinking"] == nil)
-        #expect(body(nil, thinking: true)["preserve_thinking"] == nil)
+        #expect(body(false)["preserve_thinking"] == .bool(true))
+        #expect(body(nil)["preserve_thinking"] == .bool(true))
+        #expect(body(nil, thinking: true)["preserve_thinking"] == .bool(true))
     }
 
     @Test func answersFromSnippetsAloneAreSentBackOnce() async throws {
@@ -651,7 +652,7 @@ struct ResearchAgentTests {
         #expect(report.unknownCitations.isEmpty)
         #expect(log.events.filter { $0 == .revisingUnreadCitations }.count == 1)
         let rewrite = try #require(services.modelRequests.last)
-        #expect(rewrite["tool_choice"] == .string("none"))
+        #expect(rewrite["tool_choice"] == .string("auto"))
         #expect(rewrite["enable_thinking"] == .bool(false))
         let asked = messages(rewrite).suffix(2)
         #expect(asked.first?["content"] == .string("VMs [1], and Linux 6 [3][4]."))
@@ -942,7 +943,7 @@ struct ResearchAgentTests {
         #expect(log.events.contains(.retryingEmptyAnswer))
         let retry = try #require(services.modelRequests.last)
         #expect(retry["enable_thinking"] == .bool(false))
-        #expect(retry["tool_choice"] == .string("none"))
+        #expect(retry["tool_choice"] == .string("auto"))
         #expect(messages(retry).last?["content"] == .string(ResearchAgent.answerNowRequest))
 
         let silent = FakeServices(modelReplies: [
@@ -977,7 +978,7 @@ struct ResearchAgentTests {
         #expect(report.answer == "Each container is a VM [1].")
         let last = try #require(services.modelRequests.last)
         #expect(last["enable_thinking"] == nil)
-        #expect(last["tool_choice"] == .string("none"))
+        #expect(last["tool_choice"] == .string("auto"))
     }
 
     @Test func anAnswerAtTheTokenLimitIsMarkedAsCutOff() async throws {
@@ -996,7 +997,66 @@ struct ResearchAgentTests {
         #expect(!done.markdown.contains("cut off"))
     }
 
-    @Test func spentBudgetForcesAnAnswerWithoutTools() async throws {
+    @Test func theFinalRequestKeepsTheToolsWithToolChoiceAuto() async throws {
+        var options = ResearchOptions()
+        options.maxSteps = 2
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"one"}"#)]),
+            FakeServices.calls([("c", "web_search", #"{"query":"three"}"#)]),
+            FakeServices.answer("Partial answer."),
+        ])
+        _ = try await agent(services, options: options).run(question: "q")
+        let first = try #require(services.modelRequests.first)
+        let final = try #require(services.modelRequests.last)
+        #expect(services.modelRequests.count == 3)
+        #expect(final["tool_choice"] == .string("auto"))
+        // The same tools as the steps before, so the server's prompt matches.
+        #expect(final["tools"] == first["tools"])
+        #expect(final["tools"]?.arrayValue?.isEmpty == false)
+    }
+
+    @Test func aFinalReplyWithOnlyToolCallsIsAskedOnceMoreWithToolChoiceNone() async throws {
+        var options = ResearchOptions()
+        options.maxSteps = 2
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"one"}"#)]),
+            FakeServices.calls([("c", "web_search", #"{"query":"three"}"#)]),
+            // The final request: it calls a tool instead of answering.
+            FakeServices.calls([("b", "web_search", #"{"query":"two"}"#)]),
+            FakeServices.answer("Partial answer."),
+        ])
+        let report = try await agent(services, options: options).run(question: "q")
+        #expect(report.answer == "Partial answer.")
+        #expect(services.modelRequests.count == 4)
+        #expect(services.requests.filter { $0.url.path == "/v1/search" }.count == 2)
+        let asked = services.modelRequests[2]
+        let again = services.modelRequests[3]
+        #expect(asked["tool_choice"] == .string("auto"))
+        #expect(again["tool_choice"] == .string("none"))
+        #expect(again["messages"] == asked["messages"])
+    }
+
+    @Test func aFinalReplyWithContentAndToolCallsIsAskedAgainAndTheRetryIsUsed() async throws {
+        var options = ResearchOptions()
+        options.maxSteps = 2
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"one"}"#)]),
+            FakeServices.calls([("c", "web_search", #"{"query":"three"}"#)]),
+            // Only the preamble to a tool call.
+            FakeServices.calls([("b", "web_search", #"{"query":"two"}"#)],
+                               content: "I'll search for more."),
+            FakeServices.answer("Partial answer."),
+        ])
+        let report = try await agent(services, options: options).run(question: "q")
+        #expect(report.answer == "Partial answer.")
+        #expect(services.modelRequests.count == 4)
+        #expect(services.modelRequests[2]["tool_choice"] == .string("auto"))
+        #expect(services.modelRequests[3]["tool_choice"] == .string("none"))
+        #expect(services.modelRequests[3]["enable_thinking"] == .bool(false))
+        #expect(services.requests.filter { $0.url.path == "/v1/search" }.count == 2)
+    }
+
+    @Test func spentBudgetAsksForTheFinalAnswerOnce() async throws {
         var options = ResearchOptions()
         options.maxSteps = 2
         let services = FakeServices(modelReplies: [
@@ -1009,7 +1069,7 @@ struct ResearchAgentTests {
         #expect(report.answer == "Partial answer.")
         #expect(report.markdown.contains("step budget ran out"))
         let final = try #require(services.modelRequests.last)
-        #expect(final["tool_choice"] == .string("none"))
+        #expect(final["tool_choice"] == .string("auto"))
         #expect(messages(final).last?["role"] == .string("user"))
         // No page was read, so the top result (both searches found the same
         // one) is opened and handed over with the request for the answer.
@@ -1300,12 +1360,12 @@ struct ResearchAgentTests {
         #expect(log.events.filter { $0 == .stoppingRepeatedSearches }.count == 1)
         #expect(report.markdown.contains("stopped early because the model kept repeating"))
         // Fewer pages than asked for were read, so more top results are opened
-        // before the answer, and the answer is asked for without tools.
+        // before the answer, and the answer is asked for with tool_choice auto.
         #expect(report.sources.map(\.url) == ["https://one.example/1", "https://one.example/2"])
         let final = messages(services.modelRequests[4]).last?["content"]?.stringValue ?? ""
         #expect(final.hasPrefix(ResearchAgent.repeatedSearchesStopRequest + "\n\n"
             + ResearchAgent.topUpNote + "\n\nSource [2]: "))
-        #expect(services.modelRequests[4]["tool_choice"] == .string("none"))
+        #expect(services.modelRequests[4]["tool_choice"] == .string("auto"))
     }
 
     @Test func aStepWithANewSearchOrPageStartsTheCountAgain() async throws {
@@ -1458,7 +1518,7 @@ struct ResearchAgentTests {
         #expect(report.modelTurns == 4)
         #expect(Self.fetches(services) == 1)
         #expect(log.events.filter { $0 == .stoppingRepeatedSearches }.count == 1)
-        #expect(services.modelRequests[3]["tool_choice"] == .string("none"))
+        #expect(services.modelRequests[3]["tool_choice"] == .string("auto"))
     }
 
     @Test func aFailedSearchMayBeTriedAgain() async throws {
