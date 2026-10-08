@@ -302,6 +302,14 @@ public final class ResearchRunController {
                    started: started)
         case .revisingUnreadCitations:
             append(.turn, "Answer cites pages it never read; asking for a rewrite", started: started)
+        case .askingForCitations:
+            append(.turn, "Answer lacks source numbers; asking for citations",
+                   started: started)
+        case .askingForAnswerLanguage:
+            append(.turn, "Answer is not in the language asked for; asking for a rewrite",
+                   started: started)
+        case .continuingCutOffAnswer:
+            append(.turn, "Answer hit the token limit; asking it to continue", started: started)
         case .retryingAfterModelError:
             append(.turn, "Model error while thinking; asking again without thinking",
                    started: started)

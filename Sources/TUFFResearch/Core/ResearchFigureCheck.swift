@@ -3,7 +3,8 @@ import Foundation
 /// A figure, date or name in the answer that the pages it cites do not back up.
 public struct ResearchUnverifiedFigure: Equatable, Sendable {
     public enum Kind: Equatable, Sendable {
-        /// A figure or date that is on none of the cited pages.
+        /// A figure or date that is on none of the cited pages, or, in a
+        /// sentence with no citation, on none of the pages read.
         case notOnPage
         /// A figure or date that is on a cited page, but not near any of the
         /// names the sentence gives it.
@@ -18,8 +19,9 @@ public struct ResearchUnverifiedFigure: Equatable, Sendable {
     /// `29. November 2024` or `Bibliotheca Albertina`.
     public let figure: String
     /// The source numbers whose pages were checked: the cited ones, or for
-    /// `elsewhereOnPage` those that have the figure. Empty for a name in a
-    /// sentence without citations, which was checked against all pages read.
+    /// `elsewhereOnPage` those that have the figure. Empty for a name or a
+    /// figure in a sentence without citations, which was checked against all
+    /// pages read.
     public let sources: [Int]
     public let kind: Kind
     /// For `elsewhereOnPage`, the names of the sentence that are on the page
@@ -47,7 +49,8 @@ public struct ResearchUnverifiedFigure: Equatable, Sendable {
 /// found as a year, in a date, or as any number on the page.
 /// A full date or a number that is on a cited page is also expected near
 /// what the sentence names (see `unverified`), and the names in the answer
-/// are looked up on the pages (see `phrases`).
+/// are looked up on the pages (see `phrases`). A sentence without citation has
+/// its dates and numbers looked up on all pages read.
 enum ResearchFigureCheck {
     struct Token: Equatable {
         /// The number as written, with its separators.
@@ -77,10 +80,17 @@ enum ResearchFigureCheck {
     ///
     /// Names (see `phrases`) are checked in every sentence, against the
     /// cited pages, or against all pages read when the sentence cites none.
-    /// `question` words are not flagged as names: the user wrote them.
+    /// So are short labels (see `labels`). `question` words are not flagged
+    /// as names: the user wrote them.
+    ///
+    /// A sentence without citation has its dates, month-years and numbers
+    /// (not a year alone) looked up on all pages read, once any page was read
+    /// (see `uncitedFindings`). A figure on none is `notOnPage` with no
+    /// sources. Headings and source lists are not checked.
     static func unverified(answer: String,
                            sourceTexts: [Int: String],
-                           question: String = "") -> [ResearchUnverifiedFigure] {
+                           question: String = "",
+                           today: String = "") -> [ResearchUnverifiedFigure] {
         var pages: [Int: PageFacts] = [:]
         func facts(_ number: Int) -> PageFacts? {
             if let known = pages[number] { return known }
@@ -92,6 +102,8 @@ enum ResearchFigureCheck {
         // One form of every accented letter, so words and offsets agree.
         let text = answer.precomposedStringWithCanonicalMapping
         let questionWords = WordIndex(question)
+        let questionNumbers = Set(tokens(in: question).map { significant($0.digits) })
+        let todayParts = today.split(separator: "-").compactMap { Int($0) }
         let answerLanguage = language(text[...])
         var found: [ResearchUnverifiedFigure] = []
         func add(_ item: ResearchUnverifiedFigure) {
@@ -103,7 +115,9 @@ enum ResearchFigureCheck {
             }
             if !known { found.append(item) }
         }
-        for piece in pieces(of: text) {
+        let allPieces = pieces(of: text)
+        let notices = noticeFlags(for: allPieces)
+        for (pieceIndex, piece) in allPieces.enumerated() {
             let cited = citations(in: piece)
             let usable = cited.filter { sourceTexts[$0] != nil }
             // A sentence that cites only pages that were not read has nothing
@@ -121,12 +135,40 @@ enum ResearchFigureCheck {
             }
             // Source lists and headings are lists of titles, not claims. A
             // link's label is a title as well.
-            if skipsNameCheck(piece) { continue }
+            let skipped = skipsNameCheck(piece)
+            // A figure in a sentence without citation is looked up on all
+            // pages read: Qwen left the numbers out of its answers and put
+            // in figures that were on no page. Only the surer kinds are
+            // looked up (see `uncitedFindings`), and not what the answer
+            // itself lists as unverified.
+            var bare = piece
+            if piece.contains("](") {
+                bare = markdownLink.stringByReplacingMatches(
+                    in: piece, range: NSRange(piece.startIndex..., in: piece), withTemplate: " ")
+            }
+            if usable.isEmpty, !skipped, !notices[pieceIndex] {
+                let everyPage: [(number: Int, page: PageFacts)] = sourceTexts.keys.sorted()
+                    .compactMap { number in facts(number).map { (number: number, page: $0) } }
+                let unlinked = piece.contains("](") ? scan(withoutCitationsAndLinks(bare)) : scanned
+                for item in uncitedFindings(scanned: unlinked, pages: everyPage,
+                                            question: questionNumbers, today: todayParts) {
+                    add(item)
+                }
+            }
+            if skipped { continue }
+            var nameText = scanned.remainder
             var nameWords = sentenceWords
             if piece.contains("](") {
-                let bare = markdownLink.stringByReplacingMatches(
-                    in: piece, range: NSRange(piece.startIndex..., in: piece), withTemplate: " ")
-                nameWords = wordList(in: scan(withoutCitationsAndLinks(bare)).remainder)
+                nameText = scan(withoutCitationsAndLinks(bare)).remainder
+                nameWords = wordList(in: nameText)
+            }
+            // With no page read there is nothing to look the names up in.
+            let namePages = usable.isEmpty
+                ? sourceTexts.keys.sorted().compactMap(facts) : checked.map { $0.page }
+            if namePages.isEmpty { continue }
+            for label in labels(in: nameText)
+            where isMissing(label, from: namePages, question: questionWords) {
+                add(ResearchUnverifiedFigure(figure: label.text, sources: usable, kind: .name))
             }
             // Without a usable citation only the sure kind of name is
             // checked. The others (two nouns in a row) are checked only when
@@ -136,10 +178,6 @@ enum ResearchFigureCheck {
                 $0.strong || (!usable.isEmpty && answerLanguage != 0)
             }
             if named.isEmpty { continue }
-            let namePages = usable.isEmpty
-                ? sourceTexts.keys.sorted().compactMap(facts) : checked.map { $0.page }
-            // With no page read there is nothing to look the names up in.
-            if namePages.isEmpty { continue }
             // The language only decides whether two nouns are checked; once
             // they are, any cited page that has them counts.
             for phrase in named {
@@ -183,6 +221,71 @@ enum ResearchFigureCheck {
         }
         return result
     }
+
+    /// The full dates and the numbers of a sentence without citation that are
+    /// on none of the pages read, with no sources. Without a citation nothing
+    /// says which page a figure is from, so only the surer kinds are looked
+    /// up: today's date (`today` as year, month, day) is the model's own
+    /// knowledge, a month and year or a year alone is too common, and a number
+    /// needs three significant digits (`12,4`, `125`, not `12`). A number the
+    /// question has is not checked either.
+    private static func uncitedFindings(scanned: Scan,
+                                        pages: [(number: Int, page: PageFacts)],
+                                        question: Set<String>,
+                                        today: [Int]) -> [ResearchUnverifiedFigure] {
+        guard !pages.isEmpty else { return [] }
+        var candidates: [Candidate] = []
+        for mention in scanned.dates
+        where [mention.year, mention.month, mention.day ?? 0] != today {
+            candidates.append(.date(mention))
+        }
+        for token in tokens(in: withoutNoise(scanned.remainder))
+        where !token.ignored && significant(token.digits).count >= 3
+            && !question.contains(significant(token.digits)) {
+            candidates.append(.number(token))
+        }
+        var result: [ResearchUnverifiedFigure] = []
+        for candidate in candidates {
+            let (figure, present) = candidate.check(in: pages.map { $0.page })
+            if !present { result.append(ResearchUnverifiedFigure(figure: figure, sources: [])) }
+        }
+        return result
+    }
+
+    /// Whether each piece lies in a part of the answer that lists what could
+    /// not be verified, from the line that says so up to the next heading.
+    /// Figures there are the answer's own caveat.
+    private static func noticeFlags(for pieces: [String]) -> [Bool] {
+        var inside = false
+        return pieces.map { piece in
+            let line = piece.trimmingCharacters(in: .whitespaces)
+            let range = NSRange(line.startIndex..., in: line)
+            // A heading ends the part, unless it names it ("## Nicht verifiziert").
+            if line.hasPrefix("#") {
+                inside = noticeHeading.firstMatch(in: line, range: range) != nil
+                return false
+            }
+            if !inside, notice.firstMatch(in: line, range: range) != nil {
+                inside = true
+            }
+            return inside
+        }
+    }
+
+    /// The caveat words a notice line or heading names.
+    private static let noticeWords = #"(?:nicht (?:verifiz|belegt|bestätig)|unbestätigt|"#
+        + #"not (?:be )?verif|could not (?:be )?(?:verif|confirm)|unverified|unclear|unklar)"#
+
+    /// A heading that names the caveat part.
+    private static let noticeHeading = try! NSRegularExpression(
+        pattern: #"^#{1,6}\s[^\n]{0,40}?"# + noticeWords,
+        options: [.caseInsensitive])
+
+    /// A label line that names the caveat part ("Nicht verifiziert:",
+    /// "**Unklar:** …"), not an ordinary sentence ("Es ist unklar, ob …").
+    private static let notice = try! NSRegularExpression(
+        pattern: #"^[^.:!?\n]{0,40}?"# + noticeWords + #"[^.:!?\n]{0,40}:"#,
+        options: [.caseInsensitive])
 
     /// Characters before and after a figure in which a name of its sentence
     /// is expected.
@@ -345,6 +448,19 @@ enum ResearchFigureCheck {
 
         lazy var words: WordIndex = WordIndex(self.text)
 
+        /// Short labels as written on the page, in lower case with the
+        /// separator taken out: `F-35` and `F 35` are `f35`.
+        lazy var labels: Set<String> = {
+            var result = Set<String>()
+            let whole = NSRange(self.text.startIndex..., in: self.text)
+            for match in ResearchFigureCheck.labelOnPage.matches(in: self.text, range: whole) {
+                guard let letters = Range(match.range(at: 1), in: self.text),
+                      let digits = Range(match.range(at: 2), in: self.text) else { continue }
+                result.insert((String(self.text[letters]) + String(self.text[digits])).lowercased())
+            }
+            return result
+        }()
+
         /// German (1), English (-1) or unclear (0), from the first 20,000
         /// characters.
         lazy var language: Int = ResearchFigureCheck.language(self.text.prefix(20_000))
@@ -413,6 +529,12 @@ enum ResearchFigureCheck {
             let answer = position < words.count && words[position].hasPrefix(prefix)
             prefixKnown[prefix] = answer
             return answer
+        }
+
+        /// Whether the text has exactly this word, in lower case.
+        func has(word: String) -> Bool {
+            let position = lowerBound(word)
+            return position < words.count && words[position] == word
         }
 
         /// Whether a word is the stem and at most three letters more, so
@@ -706,7 +828,7 @@ enum ResearchFigureCheck {
     }()
 
     private static let germanFunctionWords = wordSet("der die das und ist nicht mit von für auf ein eine")
-    private static let englishFunctionWords = wordSet("the and is of to with for that on are was")
+    private static let englishFunctionWords = wordSet("the and is of to with for that on are")
 
     /// German (1), English (-1) or unclear (0), by counting function words.
     /// Short texts, and texts with both languages, are unclear.
@@ -721,6 +843,111 @@ enum ResearchFigureCheck {
         if german >= 3, german > english * 2 { return 1 }
         if english >= 3, english > german * 2 { return -1 }
         return 0
+    }
+
+    private static let germanQuestionWords = wordSet("""
+        wer wie wo wann warum wieso welche welcher welches welchen gibt hat haben sind ist im \
+        den dem des der die das und nicht mit von für auf ein eine zu bei nach
+        """)
+    private static let englishQuestionWords = wordSet("""
+        what who how where when why which does do did is are were the of to and for with \
+        that on
+        """)
+
+    /// German (1), English (-1) or unclear (0) for a short question, which
+    /// has fewer function words than an answer: two are enough, if none of
+    /// the other language is there.
+    static func questionLanguage(_ question: String) -> Int {
+        var german = 0
+        var english = 0
+        for word in question.split(whereSeparator: { !$0.isLetter }) {
+            let lowered = word.lowercased()
+            if germanQuestionWords.contains(lowered) { german += 1 }
+            if englishQuestionWords.contains(lowered) { english += 1 }
+        }
+        if german >= 2, english == 0 { return 1 }
+        if english >= 2, german == 0 { return -1 }
+        return 0
+    }
+
+    /// The language the question asks the answer to be in: German (1) or
+    /// English (-1), or 0 for none. A request in the question (`Antworte auf
+    /// Deutsch`, `please answer in English`) wins; a request word must stand
+    /// before the language, so `available in German?` is no request. A
+    /// question that asks for both is 0. Otherwise the question's own
+    /// language counts, when it is clear and does not name a language itself
+    /// (it is then about that language, as in a translation).
+    static func wantedLanguage(question: String) -> Int {
+        let whole = NSRange(question.startIndex..., in: question)
+        let german = germanRequest.firstMatch(in: question, range: whole) != nil
+        let english = englishRequest.firstMatch(in: question, range: whole) != nil
+        if german != english { return german ? 1 : -1 }
+        if german { return 0 }
+        if namesLanguage.firstMatch(in: question, range: whole) != nil { return 0 }
+        return questionLanguage(question)
+    }
+
+    private static let germanRequest = try! NSRegularExpression(
+        pattern: #"\b(?:antwort\w*|answer|reply|respond|write|schreib\w*|bitte|please)\b[^.?!\n]{0,25}?\b(?:auf|in)\s+(?:deutsch|german)\b"#,
+        options: [.caseInsensitive])
+    private static let englishRequest = try! NSRegularExpression(
+        pattern: #"\b(?:antwort\w*|answer|reply|respond|write|schreib\w*|bitte|please)\b[^.?!\n]{0,25}?\b(?:auf|in)\s+(?:englisch|english)\b"#,
+        options: [.caseInsensitive])
+    private static let namesLanguage = try! NSRegularExpression(
+        pattern: #"\b(?:deutsch|german|englisch|english)\b"#, options: [.caseInsensitive])
+    private static let quotedText = try! NSRegularExpression(
+        pattern: #"“[^”]*”|„[^“”]*[“”]|"[^"]*""#)
+
+    /// The language of an answer without its source list, its quotations and
+    /// the labels of its links, which are in the language of the sources.
+    static func answerLanguage(_ answer: String) -> Int {
+        var body: [String] = []
+        for line in answer.split(whereSeparator: \.isNewline).map(String.init) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            let listedLink = (trimmed.hasPrefix("-") || trimmed.hasPrefix("*"))
+                && trimmed.contains("](http")
+            if listedLink || sourceLine.firstMatch(
+                in: line, range: NSRange(line.startIndex..., in: line)) != nil { continue }
+            body.append(line)
+        }
+        var text = body.joined(separator: "\n")
+        for expression in [markdownLink, quotedText] {
+            text = expression.stringByReplacingMatches(
+                in: text, range: NSRange(text.startIndex..., in: text), withTemplate: " ")
+        }
+        return language(text[...])
+    }
+
+    /// What is missing in the citations of an answer: the sentences with a
+    /// figure (a date, a month and year, or a number, not a year alone) and
+    /// no citation, those whose citations are all to pages not in `read`
+    /// (when it is given), all sentences, and those with a citation. Headings,
+    /// source lists and the part that lists what could not be verified are
+    /// not sentences.
+    static func citationGaps(in answer: String, read: Set<Int> = [])
+        -> (uncitedFigures: Int, unreadFigures: Int, sentences: Int, cited: Int) {
+        var uncited = 0
+        var unread = 0
+        var sentences = 0
+        var cited = 0
+        let all = pieces(of: answer.precomposedStringWithCanonicalMapping)
+        let notices = noticeFlags(for: all)
+        for (index, piece) in all.enumerated() where !skipsNameCheck(piece) && !notices[index] {
+            guard !piece.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+            sentences += 1
+            let numbers = citations(in: piece)
+            if !numbers.isEmpty { cited += 1 }
+            let scanned = scan(withoutCitationsAndLinks(piece))
+            guard !scanned.dates.isEmpty || !scanned.monthYears.isEmpty
+                || tokens(in: withoutNoise(scanned.remainder)).contains(where: { !$0.ignored })
+            else { continue }
+            if numbers.isEmpty {
+                uncited += 1
+            } else if !read.isEmpty, numbers.allSatisfy({ !read.contains($0) }) {
+                unread += 1
+            }
+        }
+        return (uncited, unread, sentences, cited)
     }
 
     private static let sourceLine = try! NSRegularExpression(
@@ -864,6 +1091,65 @@ enum ResearchFigureCheck {
             }
         }
         return false
+    }
+
+    /// A short label of letters directly followed by digits, such as `M1`,
+    /// `A17`, `H100` or a range of them, `M1-M4`. `parts` are the labels of
+    /// it to look up, in lower case.
+    private struct ShortLabel {
+        let text: String
+        let parts: [String]
+    }
+
+    /// One to four letters, one to four digits, as a whole word, and
+    /// optionally a second such label after a hyphen.
+    private static let labelPattern = try! NSRegularExpression(
+        pattern: #"(?<![\p{L}\p{N}])\p{L}{1,4}\d{1,4}(?:[-–]\p{L}{1,4}\d{1,4})?(?![\p{L}\p{N}])"#)
+
+    /// A label on a page: letters and digits, also with a hyphen or a blank
+    /// between them.
+    private static let labelOnPage = try! NSRegularExpression(
+        pattern: #"(?<![\p{L}\p{N}])(\p{L}{1,4})[-\s]?(\d{1,4})(?![\p{L}\p{N}])"#)
+
+    /// Letters of chemical formulas and units (`CO2`, `PM10`, `5 mm2`), which
+    /// stand before digits without being names. The words in `ignoredWords`
+    /// are left out as well, except single letters: `A18` is a chip, and a
+    /// bare `H` is not in the list, so `H100` is a label.
+    private static let notLabelLetters = wordSet(
+        "co ch nh pm o n km kg mm cm kw mw gb mb tb ghz mhz ps hp nr no s p q h1 h2")
+
+    private static func isLabelLike(_ part: String) -> Bool {
+        let letters = String(part.prefix(while: { $0.isLetter }))
+        return !notLabelLetters.contains(part) && !notLabelLetters.contains(letters)
+            && (letters.count < 2 || !ignoredWords.contains(letters))
+    }
+
+    /// The short labels in a sentence. A label starts with a capital: `m2`
+    /// and `x86` are units and the like, and lowercase words are too many to
+    /// look at. A label right after a number is a unit (`100 M2`), not a name.
+    private static func labels(in text: String) -> [ShortLabel] {
+        var result: [ShortLabel] = []
+        for match in labelPattern.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
+            guard let range = Range(match.range, in: text) else { continue }
+            let written = String(text[range])
+            guard written.first?.isUppercase == true else { continue }
+            let before = text[..<range.lowerBound].last { $0 != " " && $0 != "\u{00A0}" }
+            if let before, before.isNumber { continue }
+            let parts = written.split(whereSeparator: { $0 == "-" || $0 == "–" })
+                .map { $0.lowercased() }.filter(isLabelLike)
+            if !parts.isEmpty { result.append(ShortLabel(text: written, parts: parts)) }
+        }
+        return result
+    }
+
+    /// Whether a label is on none of the pages and not in the question. It
+    /// must be a whole word of the page, in any case, so `M1` is not `M10`.
+    private static func isMissing(_ label: ShortLabel, from pages: [PageFacts],
+                                  question: WordIndex) -> Bool {
+        label.parts.contains { part in
+            !question.has(word: part)
+                && !pages.contains { $0.words.has(word: part) || $0.labels.contains(part) }
+        }
     }
 
     /// A month written as a number or as a name, from 1 to 12.

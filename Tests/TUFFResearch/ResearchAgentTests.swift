@@ -235,6 +235,25 @@ private func messages(_ request: ResearchJSON) -> [ResearchJSON] {
     request["messages"]?.arrayValue ?? []
 }
 
+/// Serves `page` as the text of every page the model opens.
+private func pageServices(_ page: String, replies: [ResearchHTTPResponse]) -> FakeServices {
+    FakeServices(modelReplies: replies, sandbox: { path, body in
+        guard path == "/v1/fetch" else { return FakeServices.webPages(path, body) }
+        return FakeServices.json(200, .object([
+            "url": .string(body?["url"]?.stringValue ?? ""),
+            "title": .string("apple/container"),
+            "text": .string(page),
+            "offset": .integer(0),
+            "next_offset": .null,
+            "total_chars": .integer(page.count),
+        ]))
+    })
+}
+
+private let openContainerPage = FakeServices.calls([
+    ("a", "open_page", #"{"url":"https://github.com/apple/container"}"#),
+])
+
 @Suite("Web research loop")
 struct ResearchAgentTests {
     @Test func searchesReadsAndAnswersWithNumberedSources() async throws {
@@ -708,6 +727,216 @@ struct ResearchAgentTests {
         #expect(!unreadLog.events.contains(.revisingUnreadCitations))
     }
 
+    @Test func aCutOffAnswerIsContinuedAndJoined() async throws {
+        var options = ResearchOptions()
+        options.nudges = false
+        let services = pageServices("Each container is a VM.", replies: [
+            openContainerPage,
+            FakeServices.answer("Each container is a V", finishReason: "length"),
+            FakeServices.answer("M [1]. It is small [1]."),
+        ])
+        let log = EventLog()
+        let report = try await agent(services, options: options, events: log).run(question: "q")
+        #expect(report.answer == "Each container is a VM [1]. It is small [1].")
+        #expect(!report.answerCutOff)
+        #expect(log.events.filter { $0 == .continuingCutOffAnswer }.count == 1)
+        #expect(services.modelRequests.count == 3)
+        let request = try #require(services.modelRequests.last)
+        #expect(request["tool_choice"] == .string("auto"))
+        #expect(request["tools"] == services.modelRequests.first?["tools"])
+        #expect(request["enable_thinking"] == .bool(false))
+        let asked = messages(request).suffix(2)
+        #expect(asked.first?["role"] == .string("assistant"))
+        #expect(asked.first?["content"] == .string("Each container is a V"))
+        #expect(asked.last?["content"] == .string(ResearchAgent.continueCutOffRequest))
+
+        // The continuation is cut off as well: the answer still is.
+        let again = pageServices("Each container is a VM.", replies: [
+            openContainerPage,
+            FakeServices.answer("Each container is a V", finishReason: "length"),
+            FakeServices.answer("M [1] and", finishReason: "length"),
+        ])
+        let longer = try await agent(again, options: options).run(question: "q")
+        #expect(longer.answer == "Each container is a VM [1] and")
+        #expect(longer.answerCutOff)
+        #expect(again.modelRequests.count == 3)
+
+        // A list or heading marker after a line cut in the middle starts a new line.
+        #expect(ResearchAgent.joined("- one\n- tw", "o\n- three") == "- one\n- two\n- three")
+        #expect(ResearchAgent.joined("Intro text", "- one") == "Intro text\n- one")
+        #expect(ResearchAgent.joined("Intro text\n", "- one") == "Intro text\n- one")
+        #expect(ResearchAgent.joined("Intro text.", " Next") == "Intro text. Next")
+    }
+
+    @Test func aBlankContinuationKeepsThePartialAnswer() async throws {
+        var options = ResearchOptions()
+        options.nudges = false
+        let services = pageServices("Each container is a VM.", replies: [
+            openContainerPage,
+            FakeServices.answer("Each container is a VM [1], and", finishReason: "length"),
+            FakeServices.answer("  \n"),
+        ])
+        let log = EventLog()
+        let report = try await agent(services, options: options, events: log).run(question: "q")
+        #expect(report.answer == "Each container is a VM [1], and")
+        #expect(report.answerCutOff)
+        #expect(log.events.filter { $0 == .continuingCutOffAnswer }.count == 1)
+        #expect(report.markdown.contains("reached the model's token limit and may be cut off"))
+    }
+
+    private static let uncitedAnswer = "Sumar kommt auf 12 Prozent der Stimmen. "
+        + "Die Beteiligung lag bei 66 Prozent. Es gab 350 Sitze."
+    private static let spainPage = "Sumar 12 Prozent der Stimmen, Beteiligung 66 Prozent, "
+        + "350 Sitze im Parlament."
+
+    @Test func anAnswerWithUncitedFiguresIsAskedForCitationsOnce() async throws {
+        var options = ResearchOptions()
+        options.nudges = false
+        let cited = "Sumar kommt auf 12 Prozent der Stimmen [1]. "
+            + "Die Beteiligung lag bei 66 Prozent [1]. Es gab 350 Sitze [1]."
+        let services = pageServices(Self.spainPage, replies: [
+            openContainerPage,
+            FakeServices.answer(Self.uncitedAnswer),
+            FakeServices.answer(cited),
+        ])
+        let log = EventLog()
+        let report = try await agent(services, options: options, events: log).run(question: "q")
+        #expect(report.answer == cited)
+        #expect(log.events.filter { $0 == .askingForCitations }.count == 1)
+        #expect(!log.events.contains(.revisingUnreadCitations))
+        #expect(!log.events.contains(.askingForAnswerLanguage))
+        #expect(services.modelRequests.count == 3)
+        let request = try #require(services.modelRequests.last)
+        #expect(request["enable_thinking"] == .bool(false))
+        let asked = messages(request).suffix(2)
+        #expect(asked.first?["content"] == .string(Self.uncitedAnswer))
+        #expect(asked.last?["content"] == .string(ResearchAgent.missingCitationsRequest(read: [1])))
+        #expect(ResearchAgent.missingCitationsRequest(read: [1])
+            .contains("Put the source number [n] after every claim taken from a page"))
+
+        // An answer with no citation at all and three sentences is asked too.
+        let none = pageServices(Self.spainPage, replies: [
+            openContainerPage,
+            FakeServices.answer("Sumar hat gewonnen. Die Wahl war am Sonntag. Es gab viele Sitze."),
+            FakeServices.answer("Sumar hat gewonnen [1]. Die Wahl war am Sonntag [1]. "
+                + "Es gab viele Sitze [1]."),
+        ])
+        let noneLog = EventLog()
+        let all = try await agent(none, options: options, events: noneLog).run(question: "q")
+        #expect(all.answer.contains("[1]"))
+        #expect(noneLog.events.contains(.askingForCitations))
+
+        // Two sentences with citation, or one uncited figure, are left alone.
+        let fine = pageServices(Self.spainPage, replies: [
+            openContainerPage,
+            FakeServices.answer("Sumar hat 12 Prozent. Die Beteiligung lag bei 66 Prozent [1]."),
+        ])
+        let fineLog = EventLog()
+        _ = try await agent(fine, options: options, events: fineLog).run(question: "q")
+        #expect(!fineLog.events.contains(.askingForCitations))
+        #expect(fine.modelRequests.count == 2)
+    }
+
+    @Test func aRevisionThatRemovesCitationsIsRejected() async throws {
+        var options = ResearchOptions()
+        options.nudges = false
+        for revision in [
+            // Still no citation.
+            "Sumar kommt auf 12 Prozent. Die Beteiligung lag bei 66 Prozent. Es gab 350 Sitze.",
+            // Cited, but as many sentences with an uncited figure as before.
+            "Sumar kommt auf 12 Prozent der Stimmen. Die Beteiligung lag bei 66 Prozent. "
+                + "Es gab 350 Sitze. Quelle [1].",
+        ] {
+            let services = pageServices(Self.spainPage, replies: [
+                openContainerPage,
+                FakeServices.answer(Self.uncitedAnswer),
+                FakeServices.answer(revision),
+            ])
+            let report = try await agent(services, options: options).run(question: "q")
+            #expect(report.answer == Self.uncitedAnswer)
+            #expect(services.modelRequests.count == 3)
+        }
+    }
+
+    @Test func anAnswerInTheWrongLanguageIsRewrittenOnce() async throws {
+        var options = ResearchOptions()
+        options.nudges = false
+        let english = "The new container is open and the team is there for the users "
+            + "that live on it [1]."
+        let german = "Der neue Container ist offen und das Team ist für die Nutzer da, "
+            + "mit Garten [1]."
+        let question = "Wer hat gewonnen? Antworte auf Deutsch."
+        let services = pageServices("Container page.", replies: [
+            openContainerPage, FakeServices.answer(english), FakeServices.answer(german),
+        ])
+        let log = EventLog()
+        let report = try await agent(services, options: options, events: log).run(question: question)
+        #expect(report.answer == german)
+        #expect(!report.answerLanguageMismatch)
+        #expect(!report.markdown.contains("language the question asks for"))
+        #expect(log.events.filter { $0 == .askingForAnswerLanguage }.count == 1)
+        #expect(!log.events.contains(.askingForCitations))
+        #expect(!log.events.contains(.revisingUnreadCitations))
+        let asked = messages(try #require(services.modelRequests.last)).suffix(2)
+        #expect(asked.first?["content"] == .string(english))
+        #expect(asked.last?["content"] == .string(ResearchAgent.answerLanguageRequest(1)))
+        #expect(ResearchAgent.answerLanguageRequest(1)
+            == "The question asks for an answer in German, but your answer is not in German. "
+            + "Rewrite the whole answer in German, keeping every citation.")
+        #expect(ResearchAgent.answerLanguageRequest(-1).contains("in English"))
+
+        // A rewrite that is still in English is not kept, and the report says so.
+        let stubborn = pageServices("Container page.", replies: [
+            openContainerPage, FakeServices.answer(english),
+            FakeServices.answer("The new container is open and the team is there for the users "
+                + "that live on it and on the site [1]."),
+        ])
+        let kept = try await agent(stubborn, options: options).run(question: question)
+        #expect(kept.answer == english)
+        #expect(kept.answerLanguageMismatch)
+        #expect(kept.markdown.contains("may not be in the language the question asks for"))
+
+        // Without the rewrite the note is shown as well.
+        var asIs = options
+        asIs.reviseUnreadCitations = false
+        let off = pageServices("Container page.", replies: [
+            openContainerPage, FakeServices.answer(english),
+        ])
+        let unchanged = try await agent(off, options: asIs).run(question: question)
+        #expect(unchanged.answerLanguageMismatch)
+        #expect(off.modelRequests.count == 2)
+    }
+
+    @Test func allProblemsOfTheAnswerGoIntoOneRequest() async throws {
+        var options = ResearchOptions()
+        options.nudges = false
+        let english = "The party won 12 percent of the votes [1]. The turnout was 66 percent "
+            + "and that is the highest of the country [3]. There were 350 seats in the house. "
+            + "It is the largest party with 20 members of the staff."
+        let german = "Die Partei gewann 12 Prozent der Stimmen [1]. Die Wahlbeteiligung war "
+            + "66 Prozent und das ist die höchste für das Land [1]. Es gab 350 Sitze in der "
+            + "Kammer [1]. Sie ist die größte Partei mit 20 Mitgliedern von der Fraktion [1]."
+        let services = pageServices("12 Prozent, 66 Prozent, 350 Sitze, 20 Mitglieder.", replies: [
+            openContainerPage, FakeServices.answer(english), FakeServices.answer(german),
+        ])
+        let log = EventLog()
+        let report = try await agent(services, options: options, events: log)
+            .run(question: "Wer hat gewonnen? Antworte auf Deutsch.")
+        #expect(report.answer == german)
+        #expect(report.unknownCitations.isEmpty)
+        #expect(services.modelRequests.count == 3)
+        #expect(log.events.filter { $0 == .revisingUnreadCitations }.count == 1)
+        #expect(log.events.filter { $0 == .askingForCitations }.count == 1)
+        #expect(log.events.filter { $0 == .askingForAnswerLanguage }.count == 1)
+        let request = try #require(messages(try #require(services.modelRequests.last)).last?["content"]?
+            .stringValue)
+        #expect(request == ResearchAgent.revisionRequest(
+            unknown: [3], read: [1], missingCitations: true, language: 1))
+        #expect(request.contains(ResearchAgent.unreadCitationsRequest(unknown: [3], read: [1])))
+        #expect(request.contains(ResearchAgent.missingCitationsRequest(read: [1])))
+        #expect(request.contains(ResearchAgent.answerLanguageRequest(1)))
+    }
+
     @Test func topResultsTakeTheFirstHitOfEverySearchFirst() {
         var state = ResearchAgent.State(question: "q")
         state.resultURLs = [
@@ -985,8 +1214,14 @@ struct ResearchAgentTests {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
             FakeServices.answer("Each container runs in", finishReason: "length"),
+            FakeServices.answer(""),
         ])
-        let report = try await agent(services).run(question: "q")
+        let log = EventLog()
+        let report = try await agent(services, events: log).run(question: "q")
+        // The continuation came back blank, so the cut-off answer stays.
+        #expect(services.modelRequests.count == 3)
+        #expect(log.events.filter { $0 == .continuingCutOffAnswer }.count == 1)
+        #expect(report.answer == "Each container runs in")
         #expect(report.answerCutOff)
         #expect(report.markdown.contains("reached the model's token limit and may be cut off"))
         let whole = FakeServices(modelReplies: [
@@ -2403,8 +2638,11 @@ struct ResearchFigureCheckTests {
             == [ResearchUnverifiedFigure(figure: "6,2", sources: [3])])
     }
 
-    @Test func aSentenceWithoutCitationsOrWithoutPageTextIsNotChecked() {
-        #expect(check("Es sind 4,74 % gewesen.", [1: "nothing"]).isEmpty)
+    @Test func aSentenceCitingOnlyUnreadPagesIsNotChecked() {
+        // Without a citation, the figure is looked up on all pages read.
+        #expect(check("Es sind 4,74 % gewesen.", [1: "nothing"])
+            == [ResearchUnverifiedFigure(figure: "4,74", sources: [])])
+        #expect(check("Es sind 4,74 % gewesen.", [1: "4.74"]).isEmpty)
         #expect(check("Es sind 4,74 % gewesen [2].", [1: "nothing"]).isEmpty)
         // The citation after the full stop belongs to the sentence before it.
         #expect(check("Es sind 4,74 % gewesen. [1]", [1: "nothing"])
@@ -2562,8 +2800,9 @@ struct ResearchFigureCheckTests {
         let found = check(answer, pages, question: "Was ist neu?")
         #expect(found == [ResearchUnverifiedFigure(
             figure: "macOS Sequoia 26", sources: [], kind: .name)])
-        // Its figures are not checked without a citation.
-        #expect(check("Es kostet 4,74 Euro.", [1: "nothing"]).isEmpty)
+        // A figure without a citation is looked up on all pages read.
+        #expect(check("Es kostet 4,74 Euro.", [1: "nothing"])
+            == [ResearchUnverifiedFigure(figure: "4,74", sources: [])])
         // A name on one of the pages is fine, and so is one from the question.
         #expect(check(answer, pages.merging([3: "Sequoia was the name of macOS 15."]) { $1 }).isEmpty)
         #expect(check(answer, pages, question: "Was bringt macOS Sequoia?").isEmpty)
@@ -2708,5 +2947,137 @@ struct ResearchFigureCheckTests {
     @Test func aPageWithDecomposedLettersMatchesPrecomposedOnes() {
         let page = "Die Stadt ist nicht groß, mit Haus Ko\u{308}ln und von Bäumen für die Leute."
         #expect(check("Das Haus Köln ist nicht mit der Stadt verbunden und hilft [1].", [1: page]).isEmpty)
+    }
+
+    @Test func aFigureWithoutCitationIsLookedUpOnAllPagesRead() throws {
+        let found = check("Sumar kommt auf 12,4 % der Stimmen.", [1: "Die Wahl brachte 130 Sitze."])
+        #expect(found == [ResearchUnverifiedFigure(figure: "12,4", sources: [])])
+        let first = try #require(found.first)
+        #expect(ResearchReport.figureCheckLine(first) == "12,4 — not on any page read")
+        // A full date as well, on any page; a month and year, a short number and
+        // today's date are not looked up without a citation.
+        let answer = "Am 29. November 2024 und seit Mai 2023 waren es 12 Leute."
+        let dated = check(answer, [1: "Wahl am 30. November 2024.", 2: "Seit Juni 2023."])
+        #expect(dated.map(\.figure) == ["29. November 2024"])
+        #expect(dated.allSatisfy { $0.sources.isEmpty })
+        let today = ResearchFigureCheck.unverified(
+            answer: answer, sourceTexts: [1: "Nichts."], question: "", today: "2024-11-29")
+        #expect(today.isEmpty)
+    }
+
+    @Test func anUncitedFigureThatIsOnAPageIsNotFlagged() {
+        #expect(check("Sumar kommt auf 12,4 % der Stimmen.", [1: "nothing", 2: "Sumar: 12.4 percent."])
+            .isEmpty)
+        #expect(check("Am 29. November 2024 lief es.", [1: "Wahl am 29.11.2024."]).isEmpty)
+        // A year alone, a number from the question, a heading and a source list
+        // are not looked up, and without a page read there is nothing to look in.
+        #expect(check("Im Jahr 2031 lief es.", [1: "nothing"]).isEmpty)
+        #expect(check("Es gibt 125 Orte.", [1: "nothing"], question: "Nenne 125 Orte").isEmpty)
+        #expect(check("## Wahl mit 999 Sitzen", [1: "nothing"]).isEmpty)
+        #expect(check("1. [Wahl 2027 mit 999 Sitzen](https://example.com/x)", [1: "nothing"]).isEmpty)
+        #expect(check("Sumar kommt auf 12,4 % der Stimmen.", [:]).isEmpty)
+        // Nor what the answer lists as unverified, up to the next heading.
+        #expect(check("Nicht verifiziert:\nSumar kommt auf 12,4 %.\n- Es gab 999 Sitze.",
+                      [1: "nothing"]).isEmpty)
+        #expect(check("Nicht verifiziert: x.\n## Ergebnis\nEs gab 999 Sitze.", [1: "nothing"])
+            .map(\.figure) == ["999"])
+        #expect(check("## Nicht verifiziert\nEs gab 999 Sitze.", [1: "nothing"]).isEmpty)
+        // An ordinary sentence with a caveat word does not start that part.
+        #expect(check("Es ist unklar, ob es hält.\nEs gab 999 Sitze.", [1: "nothing"])
+            .map(\.figure) == ["999"])
+        // A figure in a link's label is a title's.
+        #expect(check("Siehe [Wahl 999](https://example.com/x) dazu.", [1: "nothing"]).isEmpty)
+        // A cited sentence is still checked against its own pages only.
+        #expect(check("Sumar kommt auf 12 % [1].", [1: "nothing", 2: "12 percent"])
+            == [ResearchUnverifiedFigure(figure: "12", sources: [1])])
+    }
+
+    @Test func aShortLabelMissingFromThePageIsFlagged() {
+        let answer = "Die Chips M1-M4 sind schnell [1]."
+        let found = check(answer, [1: "Die Chips M1 und M2 sind schnell."])
+        #expect(found == [ResearchUnverifiedFigure(figure: "M1-M4", sources: [1], kind: .name)])
+        #expect(check(answer, [1: "Chips: M1, M2, m3 und M4 sind schnell."]).isEmpty)
+        // Without citation the label is looked up on all pages read.
+        #expect(check("Die Chips M1-M4 sind schnell.", [1: "M1", 2: "Chip m2"])
+            == [ResearchUnverifiedFigure(figure: "M1-M4", sources: [], kind: .name)])
+        #expect(check("Der H100 ist schnell [1].", [1: "nothing"])
+            == [ResearchUnverifiedFigure(figure: "H100", sources: [1], kind: .name)])
+        #expect(check("Der A18 ist schnell [1].", [1: "Der A17 ist schnell."]).map(\.figure) == ["A18"])
+        // A label in the question is the user's own.
+        #expect(check(answer, [1: "Die Chips M1 sind schnell."], question: "Was ist mit M4?").isEmpty)
+    }
+
+    @Test func aShortLabelIsFoundWithAHyphenOnThePage() {
+        #expect(check("Der F35 ist schnell [1].", [1: "Der F-35 ist schnell."]).isEmpty)
+        #expect(check("Der F35 ist schnell [1].", [1: "Der F 35 ist schnell."]).isEmpty)
+        #expect(check("Der F35 ist schnell [1].", [1: "Der F-350 ist schnell."])
+            == [ResearchUnverifiedFigure(figure: "F35", sources: [1], kind: .name)])
+    }
+
+    @Test func aShortLabelMustBeAWholeWordOnThePage() {
+        #expect(check("Der M1 ist schnell [1].", [1: "Der M10 ist schnell."])
+            == [ResearchUnverifiedFigure(figure: "M1", sources: [1], kind: .name)])
+        #expect(check("Der M1 ist schnell [1].", [1: "Der M1-Chip ist schnell."]).isEmpty)
+        #expect(check("Der M1 ist schnell [1].", [1: "Der m1 ist schnell."]).isEmpty)
+    }
+
+    @Test func unitsAndFormulasAreNoShortLabels() {
+        #expect(check("Der Verbrauch ist 5 kWh und CO2 sinkt [1].", [1: "nothing"]).isEmpty)
+        #expect(check("Die PM10 Werte und NO2 sind hoch [1].", [1: "nothing"]).isEmpty)
+        #expect(check("Die Fläche beträgt 100 m2 [1].", [1: "100"]).isEmpty)
+        #expect(check("Es entsteht CH4, H2 und H2O hier [1].", [1: "nothing"]).isEmpty)
+        // Lowercase words are out of scope.
+        #expect(check("Der m1 ist schnell [1].", [1: "nothing"]).isEmpty)
+    }
+
+    @Test func theWantedLanguageComesFromTheQuestion() {
+        let wanted = ResearchFigureCheck.wantedLanguage(question:)
+        #expect(wanted("Wer gewann die Wahl in Spanien? Antworte auf Deutsch.") == 1)
+        #expect(wanted("Wer gewann? Bitte in Deutsch") == 1)
+        #expect(wanted("Who won? Answer in German.") == 1)
+        #expect(wanted("Who won? ANSWER IN GERMAN") == 1)
+        #expect(wanted("Who won the election? Antworte auf Englisch.") == -1)
+        #expect(wanted("Wer gewann? Please reply in English.") == -1)
+        // A request wins over the question's own language.
+        #expect(wanted("Der Hund ist nicht mit der Katze und das ist gut. Answer in English") == -1)
+        // Without a request, a clear question language counts; else none.
+        #expect(wanted("Der Hund ist nicht mit der Katze und das ist gut?") == 1)
+        #expect(wanted("The dog is with the cat and that is good?") == -1)
+        // Only a request word before the language makes a request.
+        #expect(wanted("Is the book available in German?") == 0)
+        #expect(wanted("Wie ist die Lage in Germany?") == 1)
+        #expect(wanted("Wer hat die Wahl gewonnen?") == 1)
+        #expect(wanted("Who won the election in Spain?") == -1)
+        #expect(wanted("Was kostet das?") == 0)
+        #expect(wanted("Antworte auf Deutsch und auf Englisch") == 0)
+        #expect(wanted("q") == 0)
+        #expect(ResearchAgent.wrongLanguage(
+            question: "Wer gewann? Antworte auf Deutsch.",
+            answer: "The house is open and the staff are there for the people that live on it.") == 1)
+        #expect(ResearchAgent.wrongLanguage(
+            question: "Wer gewann? Antworte auf Deutsch.", answer: "Ja.") == nil)
+        #expect(ResearchAgent.wrongLanguage(
+            question: "q", answer: "The house is open and the staff are there.") == nil)
+    }
+
+    @Test func theAnswersLanguageIgnoresItsSourceList() {
+        let english = "The house is open and the staff are there for the people that live on it."
+        let sources = "\n\nSources:\n1. [Der Hund ist nicht mit der Katze und das ist gut]"
+            + "(https://example.com)\n- [1] Die Stadt ist nicht für die Leute und das ist gut"
+            + "\n- [Das ist nicht mit der Stadt und der Hund](https://example.com/b)"
+        #expect(ResearchFigureCheck.answerLanguage(english) == -1)
+        #expect(ResearchFigureCheck.answerLanguage(english + sources) == -1)
+    }
+
+    @Test func citationGapsCountSentencesWithAnUncitedFigure() {
+        let gaps = ResearchFigureCheck.citationGaps(in: """
+            ## Ergebnis 2024 mit 5 Sitzen
+            Sumar kommt auf 12 Prozent. Die Wahl war am Sonntag. Es gab 350 Sitze [1].
+            - 66 Prozent kamen zur Wahl.
+            1. [Seite 99](https://example.com)
+            """)
+        #expect(gaps.uncitedFigures == 2)
+        #expect(gaps.sentences == 4)
+        #expect(gaps.cited == 1)
     }
 }

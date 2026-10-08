@@ -50,7 +50,9 @@ public struct ResearchArguments: Equatable, Sendable {
                                to look wider when it answers too early
                                (default on).
       --rewrite on|off         Ask once for a rewrite when the answer cites
-                               pages that were never read (default on).
+                               pages that were never read, has figures without
+                               a source number, or is in the wrong language
+                               (default on).
       --step-timeout <1...60>  Minutes one model step may take before it is
                                retried without reasoning (default 30).
       --thinking-limit <1...60>

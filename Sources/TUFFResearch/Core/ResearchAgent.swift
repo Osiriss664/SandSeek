@@ -16,8 +16,10 @@ public struct ResearchOptions: Equatable, Sendable {
     /// Whether the model is asked once to search, to open pages, or to look
     /// wider when it answers too early.
     public var nudges = true
-    /// Whether an answer citing pages the research never read is sent back
-    /// once to be rewritten.
+    /// Whether the final answer is sent back once to be rewritten when it
+    /// cites pages the research never read, when figures in it carry no
+    /// citation (or it has none at all), or when it is not in the language the
+    /// question asks for. All problems found go into one request.
     public var reviseUnreadCitations = true
     /// Minutes a step with reasoning on may take before it is asked again
     /// with reasoning off, which then stays off for the rest of the run.
@@ -76,6 +78,9 @@ public struct ResearchReport: Equatable, Sendable {
     public let budgetExhausted: Bool
     /// True when the answer stopped at the model's token limit.
     public var answerCutOff: Bool = false
+    /// True when the question asks for an answer in German or English, and the
+    /// answer is in the other language.
+    public var answerLanguageMismatch: Bool = false
     /// True when the research stopped early because the model kept
     /// repeating searches it had already run, and the answer was forced.
     public var stoppedRepeatedSearches: Bool = false
@@ -161,6 +166,9 @@ public struct ResearchReport: Equatable, Sendable {
         if answerCutOff {
             text += "\n_The answer reached the model's token limit and may be cut off._\n"
         }
+        if answerLanguageMismatch {
+            text += "\n_The answer may not be in the language the question asks for._\n"
+        }
         if searchQueries.count == 1, endedEarly == nil {
             text += "\n_Only one search was run, so other sources may have been missed._\n"
         }
@@ -172,8 +180,8 @@ public struct ResearchReport: Equatable, Sendable {
 
     /// The lists of the "Figure check" section, each with its one-line intro.
     static let figureCheckLists: [(ResearchUnverifiedFigure.Kind, String)] = [
-        (.notOnPage, "These figures or dates were not found on the pages they cite; "
-            + "check them before relying on them:"),
+        (.notOnPage, "These figures or dates were not found on the pages they cite, or for "
+            + "a sentence without citation, on any page read; check them before relying on them:"),
         (.elsewhereOnPage, "These figures or dates are on a cited page, but not next to "
             + "what the sentence names; check that they belong to it:"),
         (.name, "These names were not found on the pages they cite, or for a sentence "
@@ -186,7 +194,8 @@ public struct ResearchReport: Equatable, Sendable {
         let cited = item.sources.map { "[\($0)]" }.joined(separator: ", ")
         switch item.kind {
         case .notOnPage:
-            return "\(figure) — not on \(cited)"
+            return cited.isEmpty
+                ? "\(figure) — not on any page read" : "\(figure) — not on \(cited)"
         case .elsewhereOnPage:
             let near = item.names.map {
                 ResearchText.inertMarkdown(ResearchText.oneLine($0, limit: 40))
@@ -285,6 +294,15 @@ public enum ResearchEvent: Equatable, Sendable {
     /// The answer cited pages the research never read, and the model is
     /// asked once to rewrite it from the pages it did read.
     case revisingUnreadCitations
+    /// The answer has figures without a source number, or none at all, and
+    /// the model is asked to put them in.
+    case askingForCitations
+    /// The answer is not in the language the question asks for, and the model
+    /// is asked to rewrite it.
+    case askingForAnswerLanguage
+    /// The final answer stopped at the token limit, and the model is asked
+    /// to continue it.
+    case continuingCutOffAnswer
     /// The server failed a step with reasoning on (Gemma 4 wrote a broken
     /// tool call), and the step is asked again with reasoning off.
     case retryingAfterModelError
@@ -527,8 +545,7 @@ public struct ResearchAgent: Sendable {
                     return checkingFigures(
                         state.report(answer: earlier, turns: step, exhausted: false), state: state)
                 }
-                let first = try await answer(from: turn, state: &state)
-                let (text, cutOff) = try await reviseUnreadCitations(first, state: &state)
+                let (text, cutOff) = try await finalAnswer(from: turn, state: &state)
                 return checkingFigures(
                     state.report(answer: text, turns: step, exhausted: false, cutOff: cutOff),
                     state: state)
@@ -667,8 +684,7 @@ public struct ResearchAgent: Sendable {
             report = checkingFigures(
                 state.report(answer: earlier, turns: turns, exhausted: exhausted), state: state)
         } else {
-            let first = try await answer(from: final, state: &state)
-            let (text, cutOff) = try await reviseUnreadCitations(first, state: &state)
+            let (text, cutOff) = try await finalAnswer(from: final, state: &state)
             report = checkingFigures(
                 state.report(answer: text, turns: turns, exhausted: exhausted, cutOff: cutOff),
                 state: state)
@@ -712,34 +728,131 @@ public struct ResearchAgent: Sendable {
     private func checkingFigures(_ report: ResearchReport, state: State) -> ResearchReport {
         var checked = report
         checked.unverifiedFigures = ResearchFigureCheck.unverified(
-            answer: report.answer, sourceTexts: state.pageTexts, question: state.question)
+            answer: report.answer, sourceTexts: state.pageTexts, question: state.question,
+            today: options.currentDate)
         if !checked.unverifiedFigures.isEmpty {
             onEvent(.unverifiedFigures(checked.unverifiedFigures.count))
         }
+        checked.answerLanguageMismatch = Self.wrongLanguage(
+            question: state.question, answer: report.answer) != nil
         return checked
     }
 
-    /// An answer that cites source numbers no page was read for (Qwen cited
-    /// pages it only saw in search previews) is sent back once, to be
-    /// rewritten from the pages read. The rewrite is kept only if it is
-    /// complete and cites fewer unread numbers; otherwise the first answer
-    /// stays, and the report flags its unread citations.
-    private func reviseUnreadCitations(_ answer: (String, Bool),
-                                       state: inout State) async throws -> (String, Bool) {
-        let unknown = state.report(answer: answer.0, turns: 0, exhausted: false)
-            .unknownCitations
-        guard options.reviseUnreadCitations, !unknown.isEmpty, !state.sources.isEmpty else {
+    /// The final answer of a turn without tool calls: the answer itself, then
+    /// its continuation if it stopped at the token limit, then one revision.
+    private func finalAnswer(from turn: ResearchAssistantTurn,
+                             state: inout State) async throws -> (String, Bool) {
+        let first = try await answer(from: turn, state: &state)
+        let whole = try await continuingCutOff(first, from: turn, state: &state)
+        // A rewrite of a continued answer would be cut off again and dropped.
+        if first.1 { return whole }
+        return try await revise(whole, state: &state)
+    }
+
+    /// An answer that stopped at the token limit (Qwen did at 2048 tokens on
+    /// a long list) is given back to the model once, to be continued. The
+    /// continuation is joined to it. If the continuation fails or is empty,
+    /// the cut-off answer stays, still marked as cut off; a stopped run
+    /// stays stopped.
+    private func continuingCutOff(_ answer: (String, Bool),
+                                  from turn: ResearchAssistantTurn,
+                                  state: inout State) async throws -> (String, Bool) {
+        try Task.checkCancellation()
+        guard answer.1 else { return answer }
+        onEvent(.continuingCutOffAnswer)
+        // The reasoning goes back with the answer, like `textMessage`, for the
+        // prompt cache; it is the turn's own only if the answer came from it.
+        var cutOff: [String: ResearchJSON] = [
+            "role": .string("assistant"),
+            "content": .string(answer.0),
+        ]
+        if let content = turn.content, !Self.isBlank(content),
+           let reasoning = turn.reasoning, !reasoning.isEmpty {
+            cutOff["reasoning_content"] = .string(reasoning)
+        }
+        state.messages.append(.object(cutOff))
+        state.messages.append(.object([
+            "role": .string("user"),
+            "content": .string(Self.continueCutOffRequest),
+        ]))
+        // The answer joined to its continuation is what the next request,
+        // if any, gets to see, so these two messages are not kept.
+        defer { state.messages.removeLast(2) }
+        // Continuing needs no reasoning, which would only make the turn slow.
+        let continuation: ResearchAssistantTurn
+        do {
+            do {
+                continuation = try await completeAnswer(&state, thinking: false)
+            } catch ResearchError.modelRequestFailed(_, _, "unsupported_parameter"?) {
+                // GPT-OSS refuses enable_thinking; ask with the client's setting.
+                continuation = try await completeAnswer(&state)
+            }
+        } catch {
+            try Task.checkCancellation()
             return answer
         }
-        onEvent(.revisingUnreadCitations)
+        guard let content = continuation.content, !Self.isBlank(content) else { return answer }
+        return (Self.joined(answer.0, content), continuation.finishReason == "length")
+    }
+
+    /// The cut-off answer and its continuation as one text. The model goes on
+    /// where it stopped, in the middle of a word or a line, so nothing is
+    /// added between them, unless the answer stopped in the middle of a line
+    /// and the continuation begins with a list or heading marker.
+    static func joined(_ partial: String, _ continuation: String) -> String {
+        let range = NSRange(continuation.startIndex..., in: continuation)
+        let startsBlock = listOrHeadingStart.firstMatch(in: continuation, range: range) != nil
+        // A digit at the end may go on (`2` and `0. x` are `20`).
+        let endsInNumber = partial.last?.isNumber ?? false
+        return startsBlock && !partial.hasSuffix("\n") && !endsInNumber
+            ? partial + "\n" + continuation : partial + continuation
+    }
+
+    private static let listOrHeadingStart = try! NSRegularExpression(
+        pattern: #"^(?:[-*+•]\s|#{1,6}\s|\d{1,2}[.)]\s)"#)
+
+    static let continueCutOffRequest = "Your answer stopped at the token limit. Continue exactly "
+        + "where it stopped, without repeating anything you already wrote, in the same language "
+        + "and format."
+
+    /// The final answer is sent back once, to be rewritten, for each problem
+    /// that applies, all in one request:
+    /// - it cites source numbers no page was read for (Qwen cited pages it
+    ///   only saw in search previews);
+    /// - pages were read, but figures in the answer carry no citation, or the
+    ///   answer has none at all (Qwen did this in 3 of 6 runs, and the figure
+    ///   check only looks at cited sentences);
+    /// - the question asks for German or English, and the answer is in the
+    ///   other (Qwen answered "Antworte auf Deutsch" in English).
+    /// The rewrite is kept only if it is complete, not a stub, cites no new
+    /// unread number (and fewer, if that was a problem), has fewer sentences
+    /// with an uncited figure and some citation (if citations were missing),
+    /// and is in the wanted language (if that was a problem). Otherwise the
+    /// first answer stays, and the report flags what is left.
+    private func revise(_ answer: (String, Bool),
+                        state: inout State) async throws -> (String, Bool) {
+        try Task.checkCancellation()
+        guard options.reviseUnreadCitations else { return answer }
+        let read = state.sources.map(\.number)
+        let unknown: [Int] = read.isEmpty ? [] : state.report(answer: answer.0, turns: 0, exhausted: false)
+            .unknownCitations
+        let gaps = ResearchFigureCheck.citationGaps(in: answer.0, read: Set(read))
+        let figuresUncited = gaps.uncitedFigures >= Self.uncitedFigureSentencesBeforeAsking
+        let noneCited = gaps.cited == 0 && gaps.sentences >= Self.sentencesBeforeAskingForCitations
+        let missing = !read.isEmpty && (figuresUncited || noneCited)
+        let wanted = Self.wrongLanguage(question: state.question, answer: answer.0)
+        guard !unknown.isEmpty || missing || wanted != nil else { return answer }
+        if !unknown.isEmpty { onEvent(.revisingUnreadCitations) }
+        if missing { onEvent(.askingForCitations) }
+        if wanted != nil { onEvent(.askingForAnswerLanguage) }
         state.messages.append(.object([
             "role": .string("assistant"),
             "content": .string(answer.0),
         ]))
         state.messages.append(.object([
             "role": .string("user"),
-            "content": .string(Self.unreadCitationsRequest(
-                unknown: unknown, read: state.sources.map(\.number))),
+            "content": .string(Self.revisionRequest(
+                unknown: unknown, read: read, missingCitations: missing, language: wanted)),
         ]))
         // Rewriting needs no reasoning, which would only make the turn slow.
         let revision: ResearchAssistantTurn
@@ -758,20 +871,81 @@ public struct ResearchAgent: Sendable {
         guard let content = revision.content, !Self.isIncomplete(revision) else {
             return answer
         }
-        // Kept only if it cites no new unread number, fewer of them, and is
-        // not a stub in place of the whole answer.
-        let left = state.report(answer: content, turns: 0, exhausted: false).unknownCitations
+        // Kept only if it cites no new unread number, fewer of them if that
+        // was a problem, and is not a stub in place of the whole answer.
+        let left: [Int] = read.isEmpty ? [] : state.report(answer: content, turns: 0, exhausted: false)
+            .unknownCitations
         let shrunk = ResearchText.terminalSafe(content).count * Self.shortestRewriteDivisor
             < ResearchText.terminalSafe(answer.0).count
-        guard left.allSatisfy(unknown.contains), left.count < unknown.count, !shrunk else {
+        guard left.allSatisfy(unknown.contains), unknown.isEmpty || left.count < unknown.count,
+              !shrunk else {
             return answer
         }
+        if missing {
+            // It must cite something and not leave more figures without a
+            // citation than there were without a valid one. If figures were
+            // the problem, fewer of them, unless the answer also cited unread
+            // pages, which the rewrite may leave without any citation.
+            let now = ResearchFigureCheck.citationGaps(in: content, read: Set(read))
+            guard now.cited > 0,
+                  now.uncitedFigures <= gaps.uncitedFigures + gaps.unreadFigures,
+                  !unknown.isEmpty || !figuresUncited
+                      || now.uncitedFigures < gaps.uncitedFigures else {
+                return answer
+            }
+        }
+        if let wanted {
+            // The citations the answer had, other than unread ones, stay, and
+            // the text is not clearly in the other language.
+            let kept = Set(ResearchFigureCheck.citations(in: answer.0)).subtracting(unknown)
+            guard kept.isSubset(of: Set(ResearchFigureCheck.citations(in: content))),
+                  ResearchFigureCheck.answerLanguage(content) != -wanted else {
+                return answer
+            }
+        }
         return (content, false)
+    }
+
+    /// Sentences with a figure and no citation from which the model is asked
+    /// for citations, and sentences in an answer with no citation at all.
+    static let uncitedFigureSentencesBeforeAsking = 2
+    static let sentencesBeforeAskingForCitations = 3
+
+    /// The language the question asks for (1 German, -1 English) when the
+    /// answer is in the other one, else nil. A text of unclear language is
+    /// never taken as wrong.
+    static func wrongLanguage(question: String, answer: String) -> Int? {
+        let wanted = ResearchFigureCheck.wantedLanguage(question: question)
+        return wanted != 0 && ResearchFigureCheck.answerLanguage(answer) == -wanted
+            ? wanted : nil
     }
 
     /// A rewrite shorter than this fraction of the answer (one third) is
     /// taken as a stub, not a rewrite.
     static let shortestRewriteDivisor = 3
+
+    /// One request that lists every problem found.
+    static func revisionRequest(unknown: [Int], read: [Int], missingCitations: Bool,
+                                language: Int?) -> String {
+        var parts: [String] = []
+        if !unknown.isEmpty { parts.append(unreadCitationsRequest(unknown: unknown, read: read)) }
+        if missingCitations { parts.append(missingCitationsRequest(read: read)) }
+        if let language { parts.append(answerLanguageRequest(language)) }
+        return parts.joined(separator: "\n\n")
+    }
+
+    static func missingCitationsRequest(read: [Int]) -> String {
+        let pages = read.map { "[\($0)]" }.joined(separator: ", ")
+        return "Your answer gives figures and claims from the pages without a source number. "
+            + "Put the source number [n] after every claim taken from a page, using only the "
+            + "numbers of the pages you read: \(pages). Change nothing else."
+    }
+
+    static func answerLanguageRequest(_ language: Int) -> String {
+        let name = language == 1 ? "German" : "English"
+        return "The question asks for an answer in \(name), but your answer is not in \(name). "
+            + "Rewrite the whole answer in \(name), keeping every citation."
+    }
 
     static func unreadCitationsRequest(unknown: [Int], read: [Int]) -> String {
         let cited = unknown.map { "[\($0)]" }.joined(separator: ", ")
@@ -1136,10 +1310,16 @@ public struct ResearchAgent: Sendable {
                 state.resultURLs.append(results.map(\.url))
                 return Self.formatSearch(query: query, results: results)
             case "open_page":
-                guard let url = arguments["url"]?.stringValue?
-                        .trimmingCharacters(in: .whitespacesAndNewlines),
+                let requested = arguments["url"]?.stringValue?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard let url = requested,
                       url.lowercased().hasPrefix("http://") || url.lowercased().hasPrefix("https://")
                 else {
+                    // Shown in the progress, so a page the model tried to
+                    // open by a bare host name is on record (the injection
+                    // check looks for planted host names there).
+                    let shown = ResearchText.oneLine(requested ?? "", limit: 200)
+                    onEvent(.toolFailed("open_page needs an http or https url: \(shown)"))
                     return "Tool error: open_page needs an http or https url."
                 }
                 let offset = max(0, arguments["offset"]?.intValue ?? 0)
