@@ -928,8 +928,8 @@ struct ResearchAgentTests {
         #expect(log.events.filter { $0 == .revisingUnreadCitations }.count == 1)
         #expect(log.events.filter { $0 == .askingForCitations }.count == 1)
         #expect(log.events.filter { $0 == .askingForAnswerLanguage }.count == 1)
-        let request = try #require(messages(try #require(services.modelRequests.last)).last?["content"]?
-            .stringValue)
+        let last = try #require(services.modelRequests.last)
+        let request = try #require(messages(last).last?["content"]?.stringValue)
         #expect(request == ResearchAgent.revisionRequest(
             unknown: [3], read: [1], missingCitations: true, language: 1))
         #expect(request.contains(ResearchAgent.unreadCitationsRequest(unknown: [3], read: [1])))
