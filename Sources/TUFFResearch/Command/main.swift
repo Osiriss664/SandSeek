@@ -25,9 +25,24 @@ if arguments.showHelp {
     exit(0)
 }
 
+// The replay needs no model, sandbox or question: it only reads one file.
+if let path = arguments.replayFiguresPath {
+    do {
+        print(ResearchFigureReplay.render(try ResearchSavedPages.load(from: path)))
+        exit(0)
+    } catch {
+        writeProgress("error: cannot replay \(path): \(error)")
+        exit(1)
+    }
+}
+
 // Refuse before any research runs, so a long run never ends in a lost report.
 if let path = arguments.outputPath, FileManager.default.fileExists(atPath: path) {
     writeError("error: \(path) already exists; choose a new --output file")
+    exit(2)
+}
+if let path = arguments.savePagesPath, FileManager.default.fileExists(atPath: path) {
+    writeError("error: \(path) already exists; choose a new --save-pages file")
     exit(2)
 }
 
@@ -79,6 +94,7 @@ let agent = ResearchAgent(
         case .retryingAfterModelError: writeProgress("    model error while thinking; asking again without thinking")
         case .retryingAfterModelErrorAgain: writeProgress("    model error; asking once more")
         case .stoppingRepeatedSearches: writeProgress("    only repeated searches or pages; stopping and asking for the answer")
+        case .answerHadToolCalls: writeProgress("    the model tried to call a tool; telling it the tools are closed")
         case .unverifiedFigures(let count): writeProgress("    \(count) \(count == 1 ? "point" : "points") could not be matched to the pages they cite")
         }
     })
@@ -111,6 +127,10 @@ switch outcome {
 case .success(let report):
     do {
         try deliver(report, outputPath: arguments.outputPath)
+        if let path = arguments.savePagesPath, let saved = ResearchSavedPages(report: report) {
+            try saved.encoded().write(to: URL(fileURLWithPath: path), options: .withoutOverwriting)
+            writeError("pages written to \(path)")
+        }
     } catch {
         writeProgress("error: \(error)")
         exit(1)
@@ -122,6 +142,9 @@ case .failure(let error):
         do {
             try deliver(ended.partial, outputPath: arguments.outputPath)
             writeError("the research ended early; the report has no answer, only what was read")
+            if arguments.savePagesPath != nil {
+                writeError("no pages were saved: there is no answer to replay")
+            }
         } catch {
             writeProgress("error: \(error)")
         }

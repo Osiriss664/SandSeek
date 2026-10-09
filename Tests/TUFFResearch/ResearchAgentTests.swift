@@ -235,6 +235,35 @@ private func messages(_ request: ResearchJSON) -> [ResearchJSON] {
     request["messages"]?.arrayValue ?? []
 }
 
+/// A tool-call reply with reasoning, as Qwen sends it.
+private func callsWithReasoning(_ id: String, _ reasoning: String) -> ResearchHTTPResponse {
+    FakeServices.json(200, .object(["choices": .array([.object([
+        "message": .object([
+            "role": .string("assistant"), "content": .null,
+            "reasoning_content": .string(reasoning),
+            "tool_calls": .array([.object([
+                "id": .string(id), "type": .string("function"),
+                "function": .object([
+                    "name": .string("web_search"), "arguments": .string(#"{"query":"two"}"#),
+                ]),
+            ])]),
+        ]),
+        "finish_reason": .string("tool_calls"),
+    ])])]))
+}
+
+/// Each request from `first` on holds the messages of the one before it
+/// unchanged, then that request's reply as an assistant message.
+private func expectHistoryGrows(_ requests: [ResearchJSON], from first: Int) {
+    for index in requests.indices where index > first {
+        let before = messages(requests[index - 1])
+        let now = messages(requests[index])
+        #expect(now.count > before.count)
+        #expect(Array(now.prefix(before.count)) == before)
+        #expect(now[before.count]["role"] == .string("assistant"))
+    }
+}
+
 /// Serves `page` as the text of every page the model opens.
 private func pageServices(_ page: String, replies: [ResearchHTTPResponse]) -> FakeServices {
     FakeServices(modelReplies: replies, sandbox: { path, body in
@@ -784,6 +813,87 @@ struct ResearchAgentTests {
         #expect(report.markdown.contains("reached the model's token limit and may be cut off"))
     }
 
+    @Test func pageTextsAreKeptForTheReportOnlyWhenAsked() async throws {
+        var options = ResearchOptions()
+        options.nudges = false
+        let replies = [openContainerPage, FakeServices.answer("Es gab 350 Sitze [1].")]
+        let plain = try await agent(pageServices(Self.spainPage, replies: replies), options: options)
+            .run(question: "q")
+        #expect(plain.checkedPages.isEmpty)
+        #expect(ResearchSavedPages(report: plain)?.pages.first?.text == "")
+
+        options.keepPageTexts = true
+        let kept = try await agent(pageServices(Self.spainPage, replies: replies), options: options)
+            .run(question: "q")
+        #expect(kept.checkedOn == options.currentDate)
+        #expect(kept.checkedPages[1]?.contains("350 Sitze") == true)
+        let saved = try #require(ResearchSavedPages(report: kept))
+        #expect(saved.answer == "Es gab 350 Sitze [1].")
+        #expect(saved.question == "q")
+        #expect(saved.date == options.currentDate)
+        #expect(saved.pages.map(\.number) == [1])
+        #expect(saved.pages.first?.url == "https://github.com/apple/container")
+        #expect(saved.pages.first?.text.contains("350 Sitze") == true)
+    }
+
+    @Test func theToolsClosedTurnsAreKeptWholeWithTheirReasoningWhenThePromptIsOverBudget() async throws {
+        var options = ResearchOptions()
+        options.maxSteps = 1
+        options.nudges = false
+        // Far below the size of the tool definitions: every request is over budget.
+        options.contextBudgetCharacters = ResearchOptions.contextCharactersRange.lowerBound
+        let services = pageServices(Self.spainPage, replies: [
+            openContainerPage,
+            callsWithReasoning("b", "first reasoning"),
+            callsWithReasoning("c", "second reasoning"),
+            FakeServices.answer("Es gab 350 Sitze [1]."),
+        ])
+        _ = try await agent(services, options: options).run(question: "q")
+        let requests = services.modelRequests
+        #expect(requests.count == 4)
+        // The request for the answer is request 1; from there the history only grows.
+        expectHistoryGrows(requests, from: 1)
+        let last = messages(requests[3])
+        let reasoning = last.compactMap { $0["reasoning_content"]?.stringValue }
+        #expect(reasoning == ["first reasoning", "second reasoning"])
+    }
+
+    @Test func anEmptyReplyAfterTheToolsClosedTurnIsAskedAgainOnTheSameHistory() async throws {
+        var options = ResearchOptions()
+        options.maxSteps = 1
+        options.nudges = false
+        let services = pageServices(Self.spainPage, replies: [
+            openContainerPage,
+            FakeServices.calls([("b", "web_search", #"{"query":"two"}"#)]),
+            FakeServices.answer(""),
+            FakeServices.answer("Es gab 350 Sitze [1]."),
+        ])
+        let report = try await agent(services, options: options).run(question: "q")
+        #expect(report.answer == "Es gab 350 Sitze [1].")
+        #expect(services.modelRequests.count == 4)
+        expectHistoryGrows(services.modelRequests, from: 1)
+        let retry = messages(services.modelRequests[3])
+        #expect(retry.last?["content"]?.stringValue == ResearchAgent.answerNowRequest)
+    }
+
+    @Test func aCutOffReplyAfterTheToolsClosedTurnIsContinuedOnTheSameHistory() async throws {
+        var options = ResearchOptions()
+        options.maxSteps = 1
+        options.nudges = false
+        let services = pageServices(Self.spainPage, replies: [
+            openContainerPage,
+            FakeServices.calls([("b", "web_search", #"{"query":"two"}"#)]),
+            FakeServices.answer("Es gab 350 Sitze [1] und", finishReason: "length"),
+            FakeServices.answer(" mehr [1]."),
+        ])
+        let report = try await agent(services, options: options).run(question: "q")
+        #expect(report.answer == "Es gab 350 Sitze [1] und mehr [1].")
+        #expect(services.modelRequests.count == 4)
+        expectHistoryGrows(services.modelRequests, from: 1)
+        let continued = messages(services.modelRequests[3])
+        #expect(continued.last?["content"]?.stringValue == ResearchAgent.continueCutOffRequest)
+    }
+
     private static let uncitedAnswer = "Sumar kommt auf 12 Prozent der Stimmen. "
         + "Die Beteiligung lag bei 66 Prozent. Es gab 350 Sitze."
     private static let spainPage = "Sumar 12 Prozent der Stimmen, Beteiligung 66 Prozent, "
@@ -1272,10 +1382,24 @@ struct ResearchAgentTests {
         #expect(asked["tool_choice"] == .string("auto"))
         #expect(told["tool_choice"] == .string("auto"))
         #expect(told["tools"] == asked["tools"])
-        #expect(told["messages"]?.arrayValue?.last?["content"]?.stringValue
-            == ResearchAgent.toolsClosedNote)
+        // The reply stays, and its call is answered with a closed-tools result.
+        let toldMessages = messages(told)
+        #expect(toldMessages.count == messages(asked).count + 2)
+        #expect(Array(toldMessages.prefix(messages(asked).count)) == messages(asked))
+        let kept = toldMessages[toldMessages.count - 2]
+        #expect(kept["role"] == .string("assistant"))
+        #expect(kept["tool_calls"]?.arrayValue?.first?["id"] == .string("b"))
+        let result = try #require(toldMessages.last)
+        #expect(result["role"] == .string("tool"))
+        #expect(result["tool_call_id"] == .string("b"))
+        #expect(result["content"]?.stringValue == ResearchAgent.toolsClosedNote)
+        // Told again, the last request keeps both turns and asks with none.
         #expect(again["tool_choice"] == .string("none"))
-        #expect(again["messages"] == told["messages"])
+        let againMessages = messages(again)
+        #expect(againMessages.count == toldMessages.count + 2)
+        #expect(Array(againMessages.prefix(toldMessages.count)) == toldMessages)
+        #expect(againMessages.last?["tool_call_id"] == .string("d"))
+        #expect(againMessages.last?["content"]?.stringValue == ResearchAgent.toolsClosedNote)
     }
 
     @Test func aFinalReplyWithContentAndToolCallsIsToldTheToolsAreClosed() async throws {
@@ -1296,6 +1420,51 @@ struct ResearchAgentTests {
         #expect(services.modelRequests[3]["tool_choice"] == .string("auto"))
         #expect(services.modelRequests[3]["enable_thinking"] == .bool(false))
         #expect(services.requests.filter { $0.url.path == "/v1/search" }.count == 2)
+        // The preamble stays in the turn, ahead of its call and the result.
+        let history = messages(services.modelRequests[3])
+        #expect(history.count == messages(services.modelRequests[2]).count + 2)
+        let kept = history[history.count - 2]
+        #expect(kept["role"] == .string("assistant"))
+        #expect(kept["content"]?.stringValue == "I'll search for more.")
+        #expect(kept["tool_calls"]?.arrayValue?.first?["id"] == .string("b"))
+        #expect(history.last?["role"] == .string("tool"))
+        #expect(history.last?["tool_call_id"] == .string("b"))
+    }
+
+    @Test func theHistoryOnlyGrowsOnTheToolsClosedPathAndTheRevisionAfterIt() async throws {
+        var options = ResearchOptions()
+        options.maxSteps = 1
+        options.nudges = false
+        let cited = "Sumar kommt auf 12 Prozent der Stimmen [1]. "
+            + "Die Beteiligung lag bei 66 Prozent [1]. Es gab 350 Sitze [1]."
+        let services = pageServices(Self.spainPage, replies: [
+            openContainerPage,
+            // The final request calls a tool, and so does the next one.
+            FakeServices.calls([("b", "web_search", #"{"query":"two"}"#)]),
+            FakeServices.calls([("c", "web_search", #"{"query":"three"}"#)]),
+            FakeServices.answer(Self.uncitedAnswer),
+            FakeServices.answer(cited),
+        ])
+        let log = EventLog()
+        let report = try await agent(services, options: options, events: log).run(question: "q")
+        #expect(report.answer == cited)
+        #expect(log.events.filter { $0 == .answerHadToolCalls }.count == 2)
+        #expect(log.events.filter { $0 == .askingForCitations }.count == 1)
+        let requests = services.modelRequests
+        #expect(requests.count == 5)
+        // Each request holds the previous one's messages unchanged, then the
+        // previous reply, then what was added after it.
+        for index in requests.indices.dropFirst() {
+            let before = messages(requests[index - 1])
+            let now = messages(requests[index])
+            #expect(now.count > before.count)
+            #expect(Array(now.prefix(before.count)) == before)
+            #expect(now[before.count]["role"] == .string("assistant"))
+        }
+        // The answer goes back as the model wrote it, ahead of the rewrite request.
+        let last = messages(requests[4])
+        #expect(last[last.count - 2]["content"] == .string(Self.uncitedAnswer))
+        #expect(last.last?["role"] == .string("user"))
     }
 
     @Test func spentBudgetAsksForTheFinalAnswerOnce() async throws {
@@ -2577,6 +2746,31 @@ struct ResearchArgumentsTests {
         }
     }
 
+    @Test func testAidsAreParsed() throws {
+        let saving = try ResearchArguments.parse(["q", "--save-pages", "pages.json"])
+        #expect(saving.savePagesPath == "pages.json")
+        #expect(saving.options.keepPageTexts)
+        #expect(try ResearchArguments.parse(["q"]).savePagesPath == nil)
+        #expect(!(try ResearchArguments.parse(["q"]).options.keepPageTexts))
+        // A replay reads one file and needs no question.
+        let replay = try ResearchArguments.parse(["--replay-figures", "pages.json"])
+        #expect(replay.replayFiguresPath == "pages.json")
+        for extra in [["--save-pages", "b.json"], ["--output", "b.md"], ["--max-steps", "3"],
+                      ["--model", "m"], ["a question"]] {
+            #expect(throws: ResearchArgumentError.self) {
+                _ = try ResearchArguments.parse(["--replay-figures", "a.json"] + extra)
+            }
+        }
+        #expect(try ResearchArguments.parse(["--replay-figures", "a.json", "--quiet"]).quiet)
+        #expect(throws: ResearchArgumentError.self) {
+            _ = try ResearchArguments.parse(["q", "--output", "a.md", "--save-pages", "./a.md"])
+        }
+        #expect(throws: (any Error).self) { _ = try ResearchArguments.parse(["q", "--save-pages"]) }
+        for flag in ["--save-pages", "--replay-figures"] {
+            #expect(ResearchArguments.usage.contains(flag), "\(flag)")
+        }
+    }
+
     @Test func badInputIsRefused() {
         for arguments in [[String](), ["--max-steps", "0", "q"], ["--thinking", "maybe", "q"],
                           ["--frobnicate", "q"], ["q", "--model"],
@@ -3086,5 +3280,134 @@ struct ResearchFigureCheckTests {
         #expect(gaps.uncitedFigures == 2)
         #expect(gaps.sentences == 4)
         #expect(gaps.cited == 1)
+    }
+
+    private func check(_ answer: String, _ texts: [Int: String],
+                       rules: ResearchFigureCheck.Rules) -> [ResearchUnverifiedFigure] {
+        ResearchFigureCheck.unverified(answer: answer, sourceTexts: texts, rules: rules)
+    }
+
+    @Test func aSharedPrefixOfAtLeastFiveLettersAndSixTenthsOfTheShorterWordMatches() {
+        #expect(ResearchFigureCheck.sharesPrefix("technologie", "technik"))
+        #expect(!ResearchFigureCheck.sharesPrefix("wasserstoff", "wasserkraft"))
+        #expect(!ResearchFigureCheck.sharesPrefix("solarthermie", "solarstrom"))
+        // Under five letters never matches, however short the words are.
+        #expect(!ResearchFigureCheck.sharesPrefix("haus", "haut"))
+    }
+
+    @Test func aWeakNameMayMatchOneWordByPrefixOnlyWithTheCandidateRule() {
+        let candidate = ResearchFigureCheck.Rules(prefixNames: true)
+        let answer = "Der Ansatz ist eine Bewährte Technologie und wird von der Stadt für die "
+            + "Menschen genutzt [1]."
+        let page = "Der Ansatz ist eine Bewährte Technik und wird von der Stadt für die "
+            + "Menschen genutzt."
+        let flagged = [ResearchUnverifiedFigure(
+            figure: "Bewährte Technologie", sources: [1], kind: .name)]
+        #expect(check(answer, [1: page]) == flagged)
+        #expect(check(answer, [1: page], rules: .current) == flagged)
+        #expect(check(answer, [1: page], rules: candidate).isEmpty)
+
+        // Wasserstoff is not Wasserkraft, nor Solarthermie Solarstrom.
+        for (name, other) in [("Grüne Wasserstoff", "Grüne Wasserkraft"),
+                              ("Moderne Solarthermie", "Moderne Solarstrom")] {
+            let sentence = "Der Ansatz ist die \(name) und wird von der Stadt für die Menschen "
+                + "genutzt [1]."
+            let source = "Der Ansatz ist die \(other) und wird von der Stadt für die Menschen "
+                + "genutzt."
+            #expect(check(sentence, [1: source], rules: candidate).map(\.figure) == [name])
+        }
+
+        // Only one word may match by prefix; the other words match as before.
+        let twoWords = "Der Ansatz ist die Bewährte Technologie Methodik und wird von der Stadt "
+            + "für die Menschen genutzt [1]."
+        let twoPage = "Der Ansatz ist die Bewährte Technik Methode und wird von der Stadt "
+            + "für die Menschen genutzt."
+        #expect(check(twoWords, [1: twoPage], rules: candidate).map(\.figure)
+            == ["Bewährte Technologie Methodik"])
+    }
+
+    @Test func aFigureNextToNamesOfAnotherFigureIsFlaggedOnlyWithTheCandidateRule() {
+        let page = "Der Block um Sánchez hat 143 Sitze, PP und Vox kommen auf 202 Sitze."
+        let answer = "PP und Vox haben zusammen etwa 143 Sitze [1]."
+        #expect(check(answer, [1: page], rules: .current).isEmpty)
+        let found = check(answer, [1: page], rules: .candidate)
+        #expect(found.map(\.kind) == [.elsewhereOnPage])
+        #expect(found.first?.figure == "143")
+        #expect(found.first?.sources == [1])
+    }
+
+    @Test func aNameDirectlyBeforeItsOwnFigureIsNotFlaggedUnderEitherRule() {
+        let page = "Der Block um Sánchez hat 143 Sitze, PP stellt 202 Sitze, Vox 33 Sitze."
+        for (answer, figure) in [("PP stellt 202 Sitze [1].", "202"),
+                                 ("Der Block um Sánchez hat 143 Sitze [1].", "143")] {
+            #expect(check(answer, [1: page], rules: .current).isEmpty, "\(figure)")
+            #expect(check(answer, [1: page], rules: .candidate).isEmpty, "\(figure)")
+        }
+    }
+
+    @Test func aNameOnlyAfterTheFigureCountsWhenNoNumberFollowsIt() {
+        let page = "Es gab 143 Sitze für PP. " + filler
+        let answer = "PP hat 143 Sitze [1]."
+        #expect(check(answer, [1: page], rules: .candidate).isEmpty)
+        // A number between the name and the figure breaks the tie.
+        let split = "Es gab 143 Sitze und 17 Ausschüsse für PP. " + filler
+        #expect(check(answer, [1: split], rules: .candidate).map(\.figure) == ["143"])
+    }
+
+    @Test func aSavedRunReplaysWithBothRuleSets() throws {
+        let saved = ResearchSavedPages(
+            question: "Wer hat wie viele Sitze?",
+            answer: "PP und Vox haben zusammen etwa 143 Sitze [1].", date: "2026-10-09",
+            pages: [ResearchSavedPages.Page(
+                number: 1, url: "https://example.com/a", title: "Wahl",
+                text: "Der Block um Sánchez hat 143 Sitze, PP und Vox kommen auf 202 Sitze.")])
+        let again = try JSONDecoder().decode(ResearchSavedPages.self, from: saved.encoded())
+        #expect(again == saved)
+        #expect(ResearchFigureReplay.check(saved, rules: .current).isEmpty)
+        #expect(ResearchFigureReplay.check(saved, rules: .candidate).count == 1)
+        let text = ResearchFigureReplay.render(saved)
+        let current = try #require(text.range(of: "# Figure check, current rules (0)"))
+        let candidate = try #require(text.range(of: "# Figure check, candidate rules (1)"))
+        #expect(current.lowerBound < candidate.lowerBound)
+        #expect(text.contains("only with the candidate rules (1):"))
+        #expect(text.contains("143 — found on [1], but not near"))
+        #expect(!text.contains("only with the current rules"))
+    }
+
+    @Test func capitalizedWordsCountAsNamesOnlyWhenTheSentenceHasNoSureName() {
+        // PP is a sure name, so Sitze, a noun, does not tie 143 to the answer.
+        let page = "PP und Vox kommen auf 202 Sitze, der Block um Sánchez hat 143 Sitze."
+        let answer = "PP und Vox haben zusammen etwa 143 Sitze [1]."
+        #expect(check(answer, [1: page], rules: .current).isEmpty)
+        let found = check(answer, [1: page], rules: .candidate)
+        #expect(found.map(\.kind) == [.elsewhereOnPage])
+        #expect(found.first?.figure == "143")
+    }
+
+    @Test func aPercentageDoesNotTieANameToAnotherNumber() {
+        let following = "143 Sitze gingen an PSOE und Sumar. Die Beteiligung lag bei 66,6 Prozent."
+        #expect(check("PSOE und Sumar haben 143 Sitze [1].", [1: following], rules: .candidate)
+            .isEmpty)
+        let preceding = "PP erhielt 33,1 % und 137 Sitze."
+        #expect(check("PP hat 137 Sitze [1].", [1: preceding], rules: .candidate).isEmpty)
+        // A figure after the name's sentence is not the name's.
+        let another = "143 Sitze gingen an PSOE und Sumar und 17 an andere."
+        #expect(check("PSOE und Sumar haben 143 Sitze [1].", [1: another], rules: .candidate)
+            .map(\.figure) == ["143"])
+        // A decimal point does not end the sentence.
+        let decimal = "143 Sitze gingen an PSOE und Sumar, 33.5 Prozent, und 17 an andere."
+        #expect(check("PSOE und Sumar haben 143 Sitze [1].", [1: decimal], rules: .candidate)
+            .map(\.figure) == ["143"])
+    }
+
+    @Test func aPrefixMatchedWordMustStandNextToTheRestOfTheName() {
+        let candidate = ResearchFigureCheck.Rules(prefixNames: true)
+        let tail = " und wird von der Stadt für die Menschen genutzt."
+        let answer = "Der Ansatz ist die Deutsche Bundesrat und wird von der Stadt für die "
+            + "Menschen genutzt [1]."
+        let near = "Der Ansatz ist die Deutsche Bundestag" + tail
+        let far = "Der Ansatz ist die Deutsche " + filler + "Bundestag" + tail
+        #expect(check(answer, [1: near], rules: candidate).isEmpty)
+        #expect(check(answer, [1: far], rules: candidate).map(\.figure) == ["Deutsche Bundesrat"])
     }
 }

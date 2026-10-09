@@ -64,6 +64,23 @@ enum ResearchFigureCheck {
         let location: Int
     }
 
+    /// Candidate rules for the check, off by default so the check stays as it
+    /// is until the replay of saved runs (`--replay-figures`) shows they help.
+    struct Rules: Equatable, Sendable {
+        /// A weak name (two or more capitalized words) may have one word that
+        /// is on no page, if it shares a long prefix with a page word
+        /// (`Technologie` and `Technik`) and stands next to the name's other
+        /// words on the page, see `sharesPrefix`.
+        var prefixNames = false
+        /// Only proper names, not every capitalized word, place a figure
+        /// next to what the sentence names, and no other number may stand
+        /// between the name and the figure on the page, see `PageFacts.has(_:boundTo:length:)`.
+        var properNamesNear = false
+
+        static let current = Rules()
+        static let candidate = Rules(prefixNames: true, properNamesNear: true)
+    }
+
     /// The figures, dates and names not backed up, each once per
     /// sentence-and-sources: in each sentence the dates and months first,
     /// then the numbers and years in the order they appear, then the names.
@@ -90,7 +107,8 @@ enum ResearchFigureCheck {
     static func unverified(answer: String,
                            sourceTexts: [Int: String],
                            question: String = "",
-                           today: String = "") -> [ResearchUnverifiedFigure] {
+                           today: String = "",
+                           rules: Rules = .current) -> [ResearchUnverifiedFigure] {
         var pages: [Int: PageFacts] = [:]
         func facts(_ number: Int) -> PageFacts? {
             if let known = pages[number] { return known }
@@ -130,7 +148,8 @@ enum ResearchFigureCheck {
             let checked: [(number: Int, page: PageFacts)] = usable.compactMap { number in
                 facts(number).map { (number: number, page: $0) }
             }
-            for item in figureFindings(scanned: scanned, words: sentenceWords, pages: checked) {
+            for item in figureFindings(scanned: scanned, words: sentenceWords, pages: checked,
+                                       rules: rules) {
                 add(item)
             }
             // Source lists and headings are lists of titles, not claims. A
@@ -184,7 +203,7 @@ enum ResearchFigureCheck {
                 if !phrase.strong, !namePages.contains(where: { $0.language == answerLanguage }) {
                     continue
                 }
-                if isMissing(phrase, from: namePages, question: questionWords) {
+                if isMissing(phrase, from: namePages, question: questionWords, rules: rules) {
                     add(ResearchUnverifiedFigure(figure: phrase.text, sources: usable, kind: .name))
                 }
             }
@@ -195,7 +214,8 @@ enum ResearchFigureCheck {
     /// The figures and dates of one sentence that are not on the pages it
     /// cites, or not near what it names.
     private static func figureFindings(scanned: Scan, words: [Word],
-                                       pages: [(number: Int, page: PageFacts)])
+                                       pages: [(number: Int, page: PageFacts)],
+                                       rules: Rules)
         -> [ResearchUnverifiedFigure] {
         guard !pages.isEmpty else { return [] }
         var candidates: [Candidate] = []
@@ -215,7 +235,7 @@ enum ResearchFigureCheck {
             if !present {
                 result.append(ResearchUnverifiedFigure(figure: figure, sources: pages.map { $0.number }))
             } else if let elsewhere = elsewhereOnPage(candidate, figure: figure, names: names,
-                                                      pages: pages) {
+                                                      pages: pages, rules: rules) {
                 result.append(elsewhere)
             }
         }
@@ -295,7 +315,8 @@ enum ResearchFigureCheck {
     /// never near a name of the sentence that is also on that page.
     private static func elsewhereOnPage(_ candidate: Candidate, figure: String,
                                         names: [NameWord],
-                                        pages: [(number: Int, page: PageFacts)])
+                                        pages: [(number: Int, page: PageFacts)],
+                                        rules: Rules)
         -> ResearchUnverifiedFigure? {
         guard candidate.isContextChecked, !names.isEmpty else { return nil }
         var failing: [Int] = []
@@ -306,14 +327,32 @@ enum ResearchFigureCheck {
             let occurring = names.filter { page.words.hasShortExtension(of: $0.stem) }
             // A page with none of the sentence's names cannot tell.
             if occurring.isEmpty { return nil }
+            // With the candidate rule only proper names of this page count;
+            // a sentence with none of them is judged as before.
+            // Acronyms and words with an inner capital are the sure names; the
+            // capitalized words (German nouns among them) count only when the
+            // sentence has no sure name on the page.
+            let sure = occurring.filter { $0.sure }
+            let proper: [NameWord] = !rules.properNamesNear ? []
+                : !sure.isEmpty ? sure
+                : occurring.filter { page.hasMidSentenceCapital($0.stem) }
             for place in places {
-                for name in occurring
-                where page.has(name.stem, near: place, length: figure.utf16.count) {
-                    return nil
+                if proper.isEmpty {
+                    for name in occurring
+                    where page.has(name.stem, near: place, length: figure.utf16.count) {
+                        return nil
+                    }
+                } else {
+                    for name in proper
+                    where page.has(name.stem, boundTo: place, length: figure.utf16.count) {
+                        return nil
+                    }
                 }
             }
             failing.append(number)
-            for name in occurring where !missing.contains(name.text) { missing.append(name.text) }
+            for name in (proper.isEmpty ? occurring : proper) where !missing.contains(name.text) {
+                missing.append(name.text)
+            }
         }
         guard !failing.isEmpty else { return nil }
         return ResearchUnverifiedFigure(figure: figure, sources: failing,
@@ -477,6 +516,161 @@ enum ResearchFigureCheck {
             }
             return result
         }()
+
+        /// The numbers of the page that are figures, where they start and end,
+        /// in UTF-16 units, and whether a percentage: a percentage between a
+        /// name and a figure does not tie the name to another number.
+        private lazy var numberSpans: [(start: Int, end: Int, percent: Bool)] =
+            ResearchFigureCheck.tokens(in: self.text).filter { !$0.ignored }.map { token in
+                let end = token.location + token.text.utf16.count
+                return (start: token.location, end: end, percent: self.percentSign(at: end))
+            }
+
+        /// Whether `%`, `Prozent` or `percent` follows, after at most a blank.
+        private func percentSign(at end: Int) -> Bool {
+            var position = end
+            if position < folded.count, folded[position] == 0x20 || folded[position] == 0xA0 {
+                position += 1
+            }
+            guard position < folded.count else { return false }
+            if folded[position] == 0x25 { return true }
+            return ["prozent", "percent"].contains { word in
+                let needle = Array(word.utf16)
+                return position + needle.count <= folded.count
+                    && ResearchFigureCheck.occurs(needle, in: folded, from: position,
+                                                  to: position + needle.count)
+            }
+        }
+
+        /// Where the sentence that holds `position` ends: at a full stop that
+        /// is not a decimal point or a thousands separator, a semicolon, an
+        /// exclamation or question mark, or a line break, or after
+        /// `contextWindow` characters.
+        private func sentenceEnd(after position: Int) -> Int {
+            let limit = min(folded.count, position + ResearchFigureCheck.contextWindow)
+            var index = position
+            while index < limit {
+                let unit = folded[index]
+                if unit == 0x3B || unit == 0x21 || unit == 0x3F || unit == 0x0A { return index }
+                if unit == 0x2E {
+                    let isDigit: (UInt16) -> Bool = { $0 >= 0x30 && $0 <= 0x39 }
+                    let inNumber = index > 0 && index + 1 < folded.count
+                        && isDigit(folded[index - 1]) && isDigit(folded[index + 1])
+                    if !inNumber { return index }
+                }
+                index += 1
+            }
+            return limit
+        }
+
+        /// The lower-case words that are capitalized somewhere other than at
+        /// the start of a sentence or after a colon or a bar.
+        private lazy var midSentenceCapitals: Set<String> = {
+            var result = Set<String>()
+            var word = ""
+            var capitalized = false
+            var startsClause = false
+            var clauseStart = true
+            for character in self.text {
+                if character.isLetter || character.isNumber {
+                    if word.isEmpty {
+                        capitalized = character.isUppercase
+                        startsClause = clauseStart
+                        clauseStart = false
+                    }
+                    word.append(character)
+                    continue
+                }
+                if !word.isEmpty, capitalized, !startsClause { result.insert(word.lowercased()) }
+                word = ""
+                if ".!?:|\n".contains(character) { clauseStart = true }
+            }
+            if !word.isEmpty, capitalized, !startsClause { result.insert(word.lowercased()) }
+            return result
+        }()
+
+        /// Whether the page writes a word that starts with `stem` (and has at
+        /// most three letters more) with a capital inside a sentence, as it
+        /// does a name. German nouns are capitalized there too, so this only
+        /// rules out words the page writes capitalized at sentence starts alone.
+        func hasMidSentenceCapital(_ stem: String) -> Bool {
+            midSentenceCapitals.contains { $0.hasPrefix(stem) && $0.count <= stem.count + 3 }
+        }
+
+        /// Whether the lowercase `stem` stands before the figure at `place`
+        /// with no other number between them, or after it with no number
+        /// between and no number after the name in its sentence: a name is
+        /// followed by its number more often than it is preceded by it (`PP
+        /// und Vox kommen auf 202`), so that number is the name's. A
+        /// percentage is no such number (`PP erhielt 33,1 % und 137 Sitze`),
+        /// unless the figure is a percentage itself (`PP 28,4 %, Vox 33,1 %`).
+        func has(_ stem: String, boundTo place: Int, length: Int) -> Bool {
+            let needle = Array(stem.utf16)
+            let low = max(0, place - ResearchFigureCheck.contextWindow)
+            let high = min(folded.count, place + length + ResearchFigureCheck.contextWindow)
+            guard !needle.isEmpty, high - low >= needle.count else { return false }
+            let figureEnd = place + length
+            let skipsPercent = !percentSign(at: figureEnd)
+            for start in low...(high - needle.count)
+            where ResearchFigureCheck.occurs(needle, in: folded, from: start, to: start + needle.count) {
+                let end = start + needle.count
+                if end <= place {
+                    if !numberSpans.contains(where: {
+                        !(skipsPercent && $0.percent) && $0.start >= end && $0.end <= place
+                    }) {
+                        return true
+                    }
+                } else if start >= figureEnd {
+                    let between = numberSpans.contains {
+                        !(skipsPercent && $0.percent) && $0.start >= figureEnd && $0.end <= start
+                    }
+                    let stop = sentenceEnd(after: end)
+                    let following = numberSpans.contains {
+                        !(skipsPercent && $0.percent) && $0.start >= end && $0.start < stop
+                    }
+                    if !between, !following { return true }
+                }
+            }
+            return false
+        }
+
+        /// Words of the page in lower case with where they start and end, in
+        /// UTF-16 units.
+        private lazy var placedWords: [(word: String, start: Int, end: Int)] = {
+            var result: [(word: String, start: Int, end: Int)] = []
+            var word = ""
+            var start = 0
+            var units = 0
+            for character in self.text {
+                let length = String(character).utf16.count
+                if character.isLetter || character.isNumber {
+                    if word.isEmpty { start = units }
+                    word.append(character)
+                } else if !word.isEmpty {
+                    result.append((word: word.lowercased(), start: start, end: units))
+                    word = ""
+                }
+                units += length
+            }
+            if !word.isEmpty { result.append((word: word.lowercased(), start: start, end: units)) }
+            return result
+        }()
+
+        /// Whether the page has a word that shares a long prefix with `word`
+        /// (see `ResearchFigureCheck.sharesPrefix`) and stands within `gap`
+        /// characters of a word that contains one of the `stems`.
+        func hasSimilarWord(to word: String, nearAnyOf stems: [String], within gap: Int) -> Bool {
+            let similar = placedWords.filter {
+                $0.word != word && ResearchFigureCheck.sharesPrefix($0.word, word)
+            }
+            if similar.isEmpty { return false }
+            let anchors = placedWords.filter { placed in stems.contains { placed.word.contains($0) } }
+            return similar.contains { near in
+                anchors.contains { anchor in
+                    max(near.start - anchor.end, anchor.start - near.end) <= gap
+                }
+            }
+        }
 
         /// Whether the lowercase `stem` is within `contextWindow` characters
         /// before or after the figure that starts at `place`.
@@ -711,6 +905,9 @@ enum ResearchFigureCheck {
     private struct NameWord {
         let text: String
         let stem: String
+        /// An acronym or a word with an inner capital, which is a name; any
+        /// other capitalized word may be a German noun.
+        let sure: Bool
     }
 
     /// A name in a sentence, and the words of it to look up on the pages.
@@ -997,7 +1194,8 @@ enum ResearchFigureCheck {
                 || word.allCaps || word.internalCapital else { continue }
             let stem = wordStem(word.text)
             if stem.count >= 2, !result.contains(where: { $0.stem == stem }) {
-                result.append(NameWord(text: word.text, stem: stem))
+                result.append(NameWord(text: word.text, stem: stem,
+                                       sure: word.allCaps || word.internalCapital))
             }
         }
         return result
@@ -1082,15 +1280,47 @@ enum ResearchFigureCheck {
     /// question. A word counts as on a page when a page word has its stem
     /// anywhere in it, so a German compound that contains the name matches.
     private static func isMissing(_ phrase: Phrase, from pages: [PageFacts],
-                                  question: WordIndex) -> Bool {
+                                  question: WordIndex, rules: Rules = .current) -> Bool {
+        var absent: [String] = []
         for word in phrase.checked {
             let stem = wordStem(word)
             if stem.count >= 2, !question.has(prefix: stem),
                !pages.contains(where: { $0.words.has(containing: stem) }) {
-                return true
+                absent.append(word)
             }
         }
-        return false
+        // With the candidate rule, one word of a weak name may be missing if
+        // it shares a long prefix with a page word that stands right next to
+        // the other words of the name on that page.
+        if rules.prefixNames, !phrase.strong, phrase.checked.count >= 2, absent.count == 1,
+           let word = absent.first?.lowercased() {
+            let stems = phrase.checked.filter { !absent.contains($0) }.map(wordStem)
+                .filter { $0.count >= 2 }
+            if pages.contains(where: {
+                $0.hasSimilarWord(to: word, nearAnyOf: stems, within: Self.prefixNameGap)
+            }) {
+                return false
+            }
+        }
+        return !absent.isEmpty
+    }
+
+    /// Characters between a word matched by prefix and the other words of its
+    /// name on the page.
+    static let prefixNameGap = 30
+
+    /// Whether two lower-case words share a prefix of at least five letters
+    /// that is at least 60% of the shorter word: `technologie` and `technik`
+    /// share `techn`, 5 of 7, but `wasserstoff` and `wasserkraft` share
+    /// `wasser`, 6 of 11, and `solarthermie` and `solarstrom` share `solar`,
+    /// 5 of 10.
+    static func sharesPrefix(_ first: String, _ second: String) -> Bool {
+        var shared = 0
+        for (left, right) in zip(first, second) {
+            guard left == right else { break }
+            shared += 1
+        }
+        return shared >= 5 && shared * 5 >= min(first.count, second.count) * 3
     }
 
     /// A short label of letters directly followed by digits, such as `M1`,

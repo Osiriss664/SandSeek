@@ -8,6 +8,11 @@ public struct ResearchArguments: Equatable, Sendable {
         string: "http://127.0.0.1:\(TUFFBackgroundServerSettings.defaultPort)")!
     public var sandboxURL: URL = URL(string: "http://127.0.0.1:9000")!
     public var outputPath: String?
+    /// Test aids: write the answer and page texts of a finished run to a new
+    /// JSON file, and run the figure check again on such a file, with no
+    /// model and no sandbox.
+    public var savePagesPath: String?
+    public var replayFiguresPath: String?
     public var maxTokens: Int = 2_048
     public var enableThinking: Bool?
     public var showThinking = false
@@ -63,6 +68,15 @@ public struct ResearchArguments: Equatable, Sendable {
       --show-thinking          Turn reasoning on and print it with the
                                progress. It is not added to the report.
       --output <file.md>       Also write the report to a new file.
+      --save-pages <file.json> Test aid: also write the question, the answer,
+                               today's date and the text of every page read to
+                               a new JSON file, for --replay-figures. Only
+                               finished reports are saved.
+      --replay-figures <file.json>
+                               Test aid: run the figure check again on a file
+                               from --save-pages, with the current and the
+                               candidate rules, and print both. Needs no
+                               question, server or sandbox.
       --quiet                  Do not print progress to standard error.
     """
 
@@ -73,6 +87,8 @@ public struct ResearchArguments: Equatable, Sendable {
         var words: [String] = []
         var index = 0
         var maxTokensGiven = false
+        // The first option other than the replay's own, which it cannot take.
+        var runOption: String?
         func value(_ flag: String) throws -> String {
             guard index + 1 < arguments.count else {
                 throw ResearchArgumentError("missing value for \(flag)")
@@ -97,6 +113,10 @@ public struct ResearchArguments: Equatable, Sendable {
         }
         while index < arguments.count {
             let argument = arguments[index]
+            if argument.hasPrefix("-"), argument != "--", runOption == nil,
+               !["--help", "-h", "--replay-figures", "--quiet"].contains(argument) {
+                runOption = argument
+            }
             switch argument {
             case "--help", "-h":
                 parsed.showHelp = true
@@ -144,6 +164,11 @@ public struct ResearchArguments: Equatable, Sendable {
                 parsed.showThinking = true
             case "--output":
                 parsed.outputPath = try value(argument)
+            case "--save-pages":
+                parsed.savePagesPath = try value(argument)
+                parsed.options.keepPageTexts = true
+            case "--replay-figures":
+                parsed.replayFiguresPath = try value(argument)
             case "--quiet":
                 parsed.quiet = true
             case "--":
@@ -168,7 +193,21 @@ public struct ResearchArguments: Equatable, Sendable {
         }
         parsed.question = words.joined(separator: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        if !parsed.showHelp && parsed.question.isEmpty {
+        // A replay reads one file; no run, question or output goes with it.
+        if parsed.replayFiguresPath != nil, !parsed.showHelp {
+            if let runOption {
+                throw ResearchArgumentError("--replay-figures cannot be combined with \(runOption)")
+            }
+            if !words.isEmpty {
+                throw ResearchArgumentError("--replay-figures takes no question")
+            }
+        }
+        if let output = parsed.outputPath, let saved = parsed.savePagesPath,
+           URL(fileURLWithPath: output).standardizedFileURL
+               == URL(fileURLWithPath: saved).standardizedFileURL {
+            throw ResearchArgumentError("--output and --save-pages must name different files")
+        }
+        if !parsed.showHelp && parsed.replayFiguresPath == nil && parsed.question.isEmpty {
             throw ResearchArgumentError("a question is required")
         }
         return parsed

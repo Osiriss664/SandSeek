@@ -35,6 +35,9 @@ public struct ResearchOptions: Equatable, Sendable {
     /// The budget when the server does not say how large the context is.
     public static let fallbackBudgetCharacters = 16_000
     public var currentDate: String = ResearchOptions.today()
+    /// Whether a finished report also carries the page texts the figure check
+    /// used, for `--save-pages`. A test aid; off otherwise.
+    public var keepPageTexts = false
 
     /// The ranges the command line and the app accept. Limits that protect
     /// the Mac (the sandbox, its firewall, fetch sizes and the sandbox's own
@@ -97,6 +100,11 @@ public struct ResearchReport: Equatable, Sendable {
     /// do not back up, worked out from the page text the run read. A hint,
     /// not proof: a page can state a figure in words or in another unit.
     public var unverifiedFigures: [ResearchUnverifiedFigure] = []
+    /// The page text per source number that the figure check used, and the
+    /// date it used as today. Only set when `ResearchOptions.keepPageTexts`
+    /// asks for it.
+    public var checkedPages: [Int: String] = [:]
+    public var checkedOn = ""
 
     /// The report as Markdown that is safe to print and to open in a viewer:
     /// no control or invisible characters, no images, no loading HTML tags.
@@ -122,23 +130,7 @@ public struct ResearchReport: Equatable, Sendable {
                 text += "\(source.number). [\(title)](\(url))\n"
             }
         }
-        if !unverifiedFigures.isEmpty {
-            text += "\n## Figure check\n"
-            // The limit counts the points over all three lists.
-            var shown = 0
-            for (kind, intro) in Self.figureCheckLists {
-                let items = unverifiedFigures.filter { $0.kind == kind }
-                guard !items.isEmpty, shown < Self.figureCheckLimit else { continue }
-                text += "\n_\(intro)_\n\n"
-                for item in items.prefix(Self.figureCheckLimit - shown) {
-                    text += "- \(Self.figureCheckLine(item))\n"
-                    shown += 1
-                }
-            }
-            if unverifiedFigures.count > shown {
-                text += "- and \(unverifiedFigures.count - shown) more\n"
-            }
-        }
+        text += figureCheckSection
         if !searchQueries.isEmpty {
             text += "\n## Searches\n\n"
             for query in searchQueries {
@@ -173,6 +165,27 @@ public struct ResearchReport: Equatable, Sendable {
             text += "\n_Only one search was run, so other sources may have been missed._\n"
         }
         return ResearchText.terminalSafe(text)
+    }
+
+    /// The "Figure check" section, or nothing when no point was found.
+    var figureCheckSection: String {
+        guard !unverifiedFigures.isEmpty else { return "" }
+        var text = "\n## Figure check\n"
+        // The limit counts the points over all three lists.
+        var shown = 0
+        for (kind, intro) in Self.figureCheckLists {
+            let items = unverifiedFigures.filter { $0.kind == kind }
+            guard !items.isEmpty, shown < Self.figureCheckLimit else { continue }
+            text += "\n_\(intro)_\n\n"
+            for item in items.prefix(Self.figureCheckLimit - shown) {
+                text += "- \(Self.figureCheckLine(item))\n"
+                shown += 1
+            }
+        }
+        if unverifiedFigures.count > shown {
+            text += "- and \(unverifiedFigures.count - shown) more\n"
+        }
+        return text
     }
 
     /// Points the report lists under "Figure check"; the rest are counted.
@@ -315,6 +328,10 @@ public enum ResearchEvent: Equatable, Sendable {
     /// The final answer has this many figures that are not on the pages cited
     /// for them. Emitted once, with the report carrying the list.
     case unverifiedFigures(Int)
+    /// The reply to a request for the answer called a tool. The calls are
+    /// not run; each is answered with a result that says the tools are
+    /// closed, and the model is asked again.
+    case answerHadToolCalls
 }
 
 /// The research loop. The model can only search the web and read pages, and
@@ -651,8 +668,9 @@ public struct ResearchAgent: Sendable {
         // A run that spent its steps searching can reach the end with few
         // pages read (Qwen read 2 in a long run). Top up from the search
         // results so the answer rests on a few real sources.
-        // The pages are in the last message, which shortening never touches,
-        // so they get at most half the prompt budget between them. A draft
+        // The pages are in the request's message, which shortening never
+        // touches (see `sealedFrom`), so they get at most half the prompt
+        // budget between them. A draft
         // kept from before looking wider is left alone: if the final answer
         // fails, that draft is returned and must match the sources.
         var finalRequest = stoppedAtStep == nil
@@ -733,6 +751,10 @@ public struct ResearchAgent: Sendable {
         if !checked.unverifiedFigures.isEmpty {
             onEvent(.unverifiedFigures(checked.unverifiedFigures.count))
         }
+        if options.keepPageTexts {
+            checked.checkedPages = state.pageTexts
+            checked.checkedOn = options.currentDate
+        }
         checked.answerLanguageMismatch = Self.wrongLanguage(
             question: state.question, answer: report.answer) != nil
         return checked
@@ -775,9 +797,8 @@ public struct ResearchAgent: Sendable {
             "role": .string("user"),
             "content": .string(Self.continueCutOffRequest),
         ]))
-        // The answer joined to its continuation is what the next request,
-        // if any, gets to see, so these two messages are not kept.
-        defer { state.messages.removeLast(2) }
+        // Nothing is removed afterwards: a cut-off answer is not revised, so
+        // no request follows, and completeAnswer may have added messages.
         // Continuing needs no reasoning, which would only make the turn slow.
         let continuation: ResearchAssistantTurn
         do {
@@ -1141,30 +1162,50 @@ public struct ResearchAgent: Sendable {
     /// The retry and the rewrite ask with reasoning off, so with reasoning on
     /// they still miss on the server's "reasoning mode changed".
     /// A reply with tool calls is never used: the calls are not run, and its
-    /// text is only the preamble to them. The model is then told once, in a
-    /// note that is not kept, that the tools are closed, still with the tools
-    /// in the prompt so the cache holds, and reasoning off. Only if it calls
-    /// a tool again is it asked with `tool_choice=none`. Qwen went on calling
-    /// tools there in a Bali run, and the server refused the reply as an
-    /// unknown tool, so that is the last resort.
+    /// text is only the preamble to them. The turn stays in the conversation
+    /// as it came, each of its calls answered with a result that says the
+    /// tools are closed, and the model is asked again, still with the tools
+    /// in the prompt so the cache holds, and reasoning off. Nothing is
+    /// removed afterwards, so every later request (the empty-answer retry, the
+    /// citation rewrite) extends what the server cached instead of rewriting
+    /// it: a note appended and removed again made the server miss twice.
+    /// Only if it calls a tool again is it told once more and asked with
+    /// `tool_choice=none`. Qwen went on calling tools there in a Bali run,
+    /// and the server refused the reply as an unknown tool, so that is the
+    /// last resort.
     private func completeAnswer(_ state: inout State,
                                 thinking: Bool? = nil) async throws -> ResearchAssistantTurn {
         let turn = try await complete(&state, toolUse: .discouraged, thinking: thinking)
         guard !turn.toolCalls.isEmpty else { return turn }
         try Task.checkCancellation()
-        state.messages.append(.object([
-            "role": .string("user"),
-            "content": .string(Self.toolsClosedNote),
-        ]))
-        defer { state.messages.removeLast() }
+        closeTools(after: turn, state: &state)
         let again = try await complete(&state, toolUse: .discouraged, thinking: false)
         guard !again.toolCalls.isEmpty else { return again }
         try Task.checkCancellation()
+        closeTools(after: again, state: &state)
         return try await complete(&state, toolUse: .off, thinking: false)
     }
 
-    static let toolsClosedNote = "The tools are closed now; do not call web_search or "
-        + "open_page again. Reply with text only, as asked above."
+    /// Keeps a reply whose tool calls will not run, as `assistantMessage`
+    /// renders it for the step loop, and answers each call with a result that
+    /// says the tools are closed.
+    private func closeTools(after turn: ResearchAssistantTurn, state: inout State) {
+        onEvent(.answerHadToolCalls)
+        // From the request that got this reply on, the messages stay as the
+        // server cached them.
+        if state.sealedFrom == nil { state.sealedFrom = state.messages.count - 1 }
+        state.messages.append(assistantMessage(turn))
+        for call in turn.toolCalls {
+            state.messages.append(.object([
+                "role": .string("tool"),
+                "tool_call_id": .string(call.id),
+                "content": .string(Self.toolsClosedNote),
+            ]))
+        }
+    }
+
+    static let toolsClosedNote = "Not run: the tools are closed now. Reply with text only, "
+        + "as asked above."
 
     /// Sends the conversation. A turn with reasoning on that runs past the
     /// thinking limit (`thinkingMinutes`) or the request timeout is asked
@@ -1240,7 +1281,11 @@ public struct ResearchAgent: Sendable {
     private func send(_ state: inout State,
                       toolUse: ResearchToolUse,
                       thinking: Bool?) async throws -> ResearchAssistantTurn {
-        if state.compact(toFit: promptBudget(state), overhead: Self.toolCharacters) {
+        // Once a reply to the request for an answer called a tool, the prompt
+        // is not shortened any more, so each request extends the last; only a
+        // context overflow or a timeout (see `complete`) still shortens it.
+        if state.sealedFrom == nil,
+           state.compact(toFit: promptBudget(state), overhead: Self.toolCharacters) {
             onEvent(.shortenedOlderResults)
         }
         var sent = state.size(overhead: Self.toolCharacters)
@@ -1472,6 +1517,10 @@ public struct ResearchAgent: Sendable {
         /// The page text read per source number, every slice in turn, kept
         /// whole because compaction shortens the copies in the messages.
         var pageTexts: [Int: String] = [:]
+        /// The index of the request for an answer whose reply called a tool.
+        /// That message and all after it are never shortened and keep their
+        /// reasoning, so every later request extends what the server cached.
+        var sealedFrom: Int?
         private var pageTextTotal = 0
         static let pageTextPerSource = 200_000
         static let pageTextTotalLimit = 1_000_000
@@ -1673,7 +1722,9 @@ public struct ResearchAgent: Sendable {
         /// those results are shortened too, rather than the run ending.
         /// Before any of that, reasoning is dropped from every assistant
         /// message but the newest, which stays so the latest step still
-        /// matches the server's prompt cache.
+        /// matches the server's prompt cache. The last user message and what
+        /// follows a tool-call reply to the request for an answer (`sealedFrom`)
+        /// stay whole too.
         /// Returns whether anything changed.
         @discardableResult
         mutating func compact(toFit budget: Int, overhead: Int = 0,
@@ -1686,7 +1737,8 @@ public struct ResearchAgent: Sendable {
             let candidates = messages.indices.filter { index in
                 let role = messages[index]["role"]?.stringValue
                 return role != "system" && index != firstUser
-                    && (emergency || (index != newestTool && index != messages.count - 1))
+                    && (emergency || (index != newestTool && index != messages.count - 1
+                        && index < (sealedFrom ?? messages.count)))
             }
             // The protected part cannot shrink, so the target leaves room
             // below the budget only out of what can.
@@ -1731,7 +1783,8 @@ public struct ResearchAgent: Sendable {
         private mutating func dropOlderReasoning() -> Bool {
             let newest = messages.lastIndex { $0["role"]?.stringValue == "assistant" }
             var removed = false
-            for index in messages.indices where index != newest {
+            for index in messages.indices where index != newest
+                && index < (sealedFrom ?? messages.count) {
                 guard case .object(var message) = messages[index],
                       message["role"]?.stringValue == "assistant",
                       message.removeValue(forKey: "reasoning_content") != nil else { continue }

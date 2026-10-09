@@ -183,8 +183,8 @@ what it downloads. The design limits what either can reach:
 
 - **The model can only search and read.** There is no shell, file, or network
   tool, so injected instructions have nothing on the Mac to act through. The
-  only file written is the `--output` report, and only to a path that does not
-  exist yet.
+  only files written are the `--output` report and, as a test aid, the
+  `--save-pages` file, each only to a path that does not exist yet.
 - **Tool results are marked untrusted.** Every page is wrapped in markers the
   system prompt tells the model to treat as information only. Copies of the
   markers inside a page are removed, repeatedly, so a page cannot close the
@@ -378,6 +378,22 @@ prompts. It needs Python 3.11 or newer (`GARAK_PYTHON`, for example from
 `brew install python@3.12`). The steps and how to read the report are in
 `Scripts/garak/README.md`.
 
+### Test aids
+
+Two options help to measure the figure check on real runs. They are for
+testing and are not in the app.
+
+| Option | What it does |
+| --- | --- |
+| `--save-pages <file.json>` | After a finished run, also writes the question, the answer as the figure check saw it, the date it used as today, and for every source its number, URL, title and the full page text the check used. It writes only this one file, only to a path that does not exist yet, and no file for a run that ended early. |
+| `--replay-figures <file.json>` | Runs the figure check again on such a file, with no model, sandbox or question, and prints its section twice, once with the current rules and once with the candidate rules, then the points only one of them flags. |
+
+The candidate rules (`ResearchFigureCheck.Rules`) are off in a normal run:
+a weak name may match one word by a shared prefix (at least 5 letters and 60%
+of the shorter word, so `Technologie` matches `Technik` but `Wasserstoff` does
+not match `Wasserkraft`), and a figure counts as next to a name only for
+proper names with no other number between them on the page.
+
 ### Unit tests
 
 ```sh
@@ -436,13 +452,21 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
   `preserve_thinking` is always sent so earlier turns render the same. The
   retry, the continuation and the revision ask with reasoning off, so with
   reasoning on they can still miss. A reply with tool calls is never used: the
-  calls are not run and its text is dropped. A short note is added for that
-  one request ("The tools are closed now; do not call web_search or open_page
-  again. Reply with text only, as asked above.") and it is sent again with
-  `tool_choice` `auto` and reasoning off. Only if that reply has tool calls as
-  well is the request sent once more with `tool_choice` `none` (Qwen once
-  started a tool call even then, and the server answered with an error). The
-  note is not kept in the conversation.
+  calls are not run. The turn stays in the conversation as the step loop
+  renders it, so the server's cache still matches, and each of its calls is
+  answered with a tool result ("Not run: the tools are closed now. Reply with
+  text only, as asked above."). The request is then sent again with
+  `tool_choice` `auto` and reasoning off, and a progress line says the model
+  tried to call a tool. Only if that reply has tool calls as well is it kept
+  and answered the same way, and the request sent once more with `tool_choice`
+  `none` (Qwen once started a tool call even then, and the server answered
+  with an error). Nothing is removed afterwards: the conversation only grows,
+  so the citation rewrite that may follow extends what the server cached
+  instead of rewriting it (a removed note had made the server miss twice).
+  The server's cache is kept only when the tool-call reply has no text
+  before its calls; a reply with a preamble still misses once. From the
+  request that got the tool-call reply on, the prompt is not shortened again
+  (and keeps its reasoning), unless the server reports a context overflow.
 - An answer that stopped at the token limit (`finish_reason` `length`; the
   heat-pump answer did at 2048 tokens) is given back once, with reasoning off
   and the cut-off text as the assistant's message, with the request to

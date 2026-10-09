@@ -318,6 +318,9 @@ public final class ResearchRunController {
         case .stoppingRepeatedSearches:
             append(.turn, "Only repeated searches or pages; stopping and asking for the answer",
                    started: started)
+        case .answerHadToolCalls:
+            append(.turn, "The model tried to call a tool; telling it the tools are closed",
+                   started: started)
         case .unverifiedFigures(let count):
             append(.turn, "\(count) \(count == 1 ? "point" : "points") could not be matched to the pages they cite",
                    started: started)
