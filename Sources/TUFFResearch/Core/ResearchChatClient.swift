@@ -76,13 +76,29 @@ public struct ResearchChatClient: Sendable {
         if let thinking = thinking ?? enableThinking {
             body["enable_thinking"] = .bool(thinking)
         }
-        // Always sent, whatever the setting or the per-step override. Without
-        // it the Qwen ChatML template drops the empty think blocks of earlier
-        // assistant turns once a new user message (the final request, a
-        // nudge) is last, and the whole cached prefix is missed. The server
-        // applies it to ChatML only.
-        body["preserve_thinking"] = .bool(true)
+        // Sent only when reasoning has to be replayed: the request thinks, so
+        // its reply carries `reasoning_content` that the next request sends
+        // back, or the history already holds some. The server then renders
+        // every earlier turn's reasoning, so the prompt is the tokens it
+        // generated and its cache matches (ChatML only; other families drop
+        // it). The flag is part of the cache's identity, so a run that
+        // thinks sends it on every request, the first included. A request
+        // with reasoning off and none in the history leaves it out: the
+        // server then continues a plain-text turn from its cache with a text
+        // bridge, which it does not do once the flag is set.
+        let thinks = (thinking ?? enableThinking) == true
+        if thinks || Self.replaysReasoning(messages) {
+            body["preserve_thinking"] = .bool(true)
+        }
         return .object(body)
+    }
+
+    /// Whether an assistant message in the history carries reasoning.
+    static func replaysReasoning(_ messages: [ResearchJSON]) -> Bool {
+        messages.contains { message in
+            message["role"]?.stringValue == "assistant"
+                && message["reasoning_content"]?.stringValue?.isEmpty == false
+        }
     }
 
     public func complete(messages: [ResearchJSON],

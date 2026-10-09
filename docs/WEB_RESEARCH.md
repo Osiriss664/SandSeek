@@ -17,8 +17,8 @@ tuff research "How does Apple container isolate each container?"
 The answer is printed as Markdown with numbered sources. `--output notes.md`
 also writes it to a new file. `--show-thinking` turns on the model's reasoning
 and prints it under each `[n] thinking…` line; it is not added to the report.
-The server returns that reasoning as `reasoning_content` on non-streaming
-replies; streams leave it out. With reasoning on, the research sends each
+The server returns that reasoning as `reasoning_content` (the research reads
+the non-streaming reply). With reasoning on, the research sends each
 step's reasoning back with its tool calls (and `preserve_thinking`), so a
 Qwen server renders the same prompt it already holds and its prompt cache
 is reused; older reasoning is dropped first when the prompt gets too long.
@@ -446,7 +446,10 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
   empty answer, the continuation of a cut-off answer and the revision below)
   keeps the tools in the prompt and sends `tool_choice` `auto`, because `none`
   makes the server drop the tools from the prompt and miss its prompt cache;
-  `preserve_thinking` is always sent so earlier turns render the same. The
+  `preserve_thinking` is sent only when reasoning is on or the history holds
+  reasoning to replay; with reasoning off and none in the history it is left
+  out, because the server continues a plain-text turn from its cache with a
+  text bridge only without it. The
   retry, the continuation and the revision ask with reasoning off, so with
   reasoning on they can still miss. A reply with tool calls is never used: the
   calls are not run. The turn stays in the conversation as the step loop

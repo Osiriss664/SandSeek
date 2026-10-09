@@ -128,13 +128,14 @@ private final class FakeServices: ResearchHTTPTransport, @unchecked Sendable {
 private func agent(_ services: FakeServices,
                    options: ResearchOptions = ResearchOptions(),
                    events: EventLog? = nil,
+                   enableThinking: Bool? = nil,
                    transport: (any ResearchHTTPTransport)? = nil) -> ResearchAgent {
     ResearchAgent(
         chat: ResearchChatClient(
             serverURL: URL(string: "http://127.0.0.1:8080")!,
             model: "default",
             maxTokens: 512,
-            enableThinking: nil,
+            enableThinking: enableThinking,
             transport: transport ?? services),
         sandbox: ResearchSandboxClient(
             baseURL: URL(string: "http://127.0.0.1:9000")!, transport: services),
@@ -559,8 +560,7 @@ struct ResearchAgentTests {
         _ = try await agent(services).run(question: "q")
         let request = try #require(services.modelRequests.first)
         let keys = Set(request.objectValue?.keys.map { $0 } ?? [])
-        #expect(keys == ["model", "messages", "max_tokens", "stream", "tools", "tool_choice",
-                         "preserve_thinking"])
+        #expect(keys == ["model", "messages", "max_tokens", "stream", "tools", "tool_choice"])
         #expect(request["tool_choice"] == .string("auto"))
         #expect(request["max_tokens"] == .integer(512))
         let names = request["tools"]?.arrayValue?.compactMap { $0["function"]?["name"]?.stringValue }
@@ -579,19 +579,57 @@ struct ResearchAgentTests {
         #expect(body["tool_choice"] == nil)
     }
 
-    @Test func preserveThinkingIsAlwaysSent() {
-        func body(_ enableThinking: Bool?, thinking: Bool? = nil) -> ResearchJSON {
+    @Test func preserveThinkingIsSentOnlyWhenReasoningIsReplayed() {
+        func body(_ enableThinking: Bool?, thinking: Bool? = nil,
+                  messages: [ResearchJSON] = []) -> ResearchJSON {
             ResearchChatClient(
                 serverURL: URL(string: "http://127.0.0.1:8080")!, model: "qwen36",
                 maxTokens: 100, enableThinking: enableThinking,
                 transport: FakeServices(modelReplies: []))
-                .requestBody(messages: [], tools: [], toolUse: .allowed, thinking: thinking)
+                .requestBody(messages: messages, tools: [], toolUse: .allowed, thinking: thinking)
         }
+        let withReasoning: [ResearchJSON] = [
+            .object(["role": .string("user"), "content": .string("q")]),
+            .object(["role": .string("assistant"), "content": .string("a"),
+                     "reasoning_content": .string("checked")]),
+        ]
+        let withoutReasoning: [ResearchJSON] = [
+            .object(["role": .string("assistant"), "content": .string("a"),
+                     "reasoning_content": .string("")]),
+            .object(["role": .string("assistant"), "content": .string("b")]),
+        ]
+        // Thinking on: every request, so the cache identity stays the same.
         #expect(body(true)["preserve_thinking"] == .bool(true))
-        #expect(body(true, thinking: false)["preserve_thinking"] == .bool(true))
-        #expect(body(false)["preserve_thinking"] == .bool(true))
-        #expect(body(nil)["preserve_thinking"] == .bool(true))
         #expect(body(nil, thinking: true)["preserve_thinking"] == .bool(true))
+        // Reasoning in the history is replayed whatever this request asks.
+        #expect(body(false, messages: withReasoning)["preserve_thinking"] == .bool(true))
+        #expect(body(true, thinking: false, messages: withReasoning)["preserve_thinking"]
+            == .bool(true))
+        // Thinking off and nothing to replay: not sent.
+        #expect(body(false)["preserve_thinking"] == nil)
+        #expect(body(nil)["preserve_thinking"] == nil)
+        #expect(body(true, thinking: false)["preserve_thinking"] == nil)
+        #expect(body(false, messages: withoutReasoning)["preserve_thinking"] == nil)
+    }
+
+    @Test func aRunWithThinkingOffNeverSendsPreserveThinking() async throws {
+        // The empty-answer retry, the cut-off continuation, the citation
+        // revision and a closed-tools round all follow plain-text or tool
+        // turns; none of them may carry the flag, or the server will not
+        // continue from its cache.
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"apple container"}"#)]),
+            FakeServices.answer("From the snippets [1][3]."),
+            FakeServices.calls([("b", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
+            FakeServices.answer("It runs each container in a VM [1]."),
+            FakeServices.answer("It runs each container in a VM [1]."),
+        ])
+        _ = try await agent(services, enableThinking: false).run(question: "q")
+        #expect(services.modelRequests.count >= 3)
+        for request in services.modelRequests {
+            #expect(request["preserve_thinking"] == nil)
+            #expect(request["enable_thinking"] == .bool(false))
+        }
     }
 
     @Test func answersFromSnippetsAloneAreSentBackOnce() async throws {
