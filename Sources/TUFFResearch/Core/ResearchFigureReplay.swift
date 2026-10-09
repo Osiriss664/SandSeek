@@ -58,47 +58,27 @@ public struct ResearchSavedPages: Codable, Equatable, Sendable {
     }
 }
 
-/// Runs the figure check on saved pages with the current and the candidate
-/// rules, and tells which points differ. It makes no network call.
+/// Runs the figure check on saved pages and prints its section. It makes no
+/// network call.
 public enum ResearchFigureReplay {
-    /// The points the check finds on the saved answer with `rules`.
-    static func check(_ saved: ResearchSavedPages,
-                      rules: ResearchFigureCheck.Rules) -> [ResearchUnverifiedFigure] {
+    /// The points the check finds on the saved answer.
+    static func check(_ saved: ResearchSavedPages) -> [ResearchUnverifiedFigure] {
         var texts: [Int: String] = [:]
         for page in saved.pages { texts[page.number] = page.text }
         return ResearchFigureCheck.unverified(
             answer: saved.answer, sourceTexts: texts, question: saved.question,
-            today: saved.date, rules: rules)
+            today: saved.date)
     }
 
-    /// The figure-check section for each rule set, then the points that only
-    /// one of them flags.
+    /// The figure-check section for the saved answer.
     public static func render(_ saved: ResearchSavedPages) -> String {
-        let current = check(saved, rules: .current)
-        let candidate = check(saved, rules: .candidate)
-        var text = ""
-        for (label, found) in [("current", current), ("candidate", candidate)] {
-            text += "# Figure check, \(label) rules (\(found.count))\n"
-            var report = ResearchReport(
-                question: saved.question, answer: saved.answer, sources: [], modelTurns: 0,
-                budgetExhausted: false)
-            report.unverifiedFigures = found
-            text += report.figureCheckSection.isEmpty
-                ? "\nnothing flagged\n" : report.figureCheckSection
-            text += "\n"
-        }
-        let onlyCurrent = current.filter { !candidate.contains($0) }
-        let onlyCandidate = candidate.filter { !current.contains($0) }
-        text += "# Differences\n\n"
-        if onlyCurrent.isEmpty, onlyCandidate.isEmpty {
-            text += "the same points with both rules\n"
-        }
-        for (label, items) in [("only with the current rules", onlyCurrent),
-                               ("only with the candidate rules", onlyCandidate)] {
-            guard !items.isEmpty else { continue }
-            text += "\(label) (\(items.count)):\n"
-            for item in items { text += "- \(ResearchReport.figureCheckLine(item))\n" }
-        }
+        let found = check(saved)
+        var report = ResearchReport(
+            question: saved.question, answer: saved.answer, sources: [], modelTurns: 0,
+            budgetExhausted: false)
+        report.unverifiedFigures = found
+        var text = "# Figure check (\(found.count))\n"
+        text += report.figureCheckSection.isEmpty ? "\nnothing flagged\n" : report.figureCheckSection
         return ResearchText.terminalSafe(text)
     }
 }

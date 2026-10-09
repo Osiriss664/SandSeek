@@ -74,9 +74,8 @@ public struct ResearchArguments: Equatable, Sendable {
                                finished reports are saved.
       --replay-figures <file.json>
                                Test aid: run the figure check again on a file
-                               from --save-pages, with the current and the
-                               candidate rules, and print both. Needs no
-                               question, server or sandbox.
+                               from --save-pages and print its section.
+                               Needs no question, server or sandbox.
       --quiet                  Do not print progress to standard error.
     """
 

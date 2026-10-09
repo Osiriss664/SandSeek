@@ -764,6 +764,10 @@ public struct ResearchAgent: Sendable {
     /// its continuation if it stopped at the token limit, then one revision.
     private func finalAnswer(from turn: ResearchAssistantTurn,
                              state: inout State) async throws -> (String, Bool) {
+        // From the first request for the answer on, the prompt is not
+        // shortened any more, so the retry, the continuation and the rewrite
+        // extend what the server cached (see `send`).
+        if state.sealedFrom == nil { state.sealedFrom = state.messages.count - 1 }
         let first = try await answer(from: turn, state: &state)
         let whole = try await continuingCutOff(first, from: turn, state: &state)
         // A rewrite of a continued answer would be cut off again and dropped.
@@ -1169,10 +1173,14 @@ public struct ResearchAgent: Sendable {
     /// removed afterwards, so every later request (the empty-answer retry, the
     /// citation rewrite) extends what the server cached instead of rewriting
     /// it: a note appended and removed again made the server miss twice.
-    /// Only if it calls a tool again is it told once more and asked with
-    /// `tool_choice=none`. Qwen went on calling tools there in a Bali run,
-    /// and the server refused the reply as an unknown tool, so that is the
-    /// last resort.
+    /// If it calls a tool again, the same is done and a user message is added
+    /// that says it cannot search or open pages any more and must write its
+    /// best answer from the pages above (Qwen went on calling tools after the
+    /// closed results alone, in a Bali run). Only if it still calls a tool is
+    /// that turn closed as well and the request sent with `tool_choice=none`,
+    /// the last resort: the tools then leave the prompt, and Qwen has called
+    /// one even then, which the server refuses as an unknown tool (see
+    /// `complete`).
     private func completeAnswer(_ state: inout State,
                                 thinking: Bool? = nil) async throws -> ResearchAssistantTurn {
         let turn = try await complete(&state, toolUse: .discouraged, thinking: thinking)
@@ -1183,6 +1191,14 @@ public struct ResearchAgent: Sendable {
         guard !again.toolCalls.isEmpty else { return again }
         try Task.checkCancellation()
         closeTools(after: again, state: &state)
+        state.messages.append(.object([
+            "role": .string("user"),
+            "content": .string(Self.noMoreToolsRequest),
+        ]))
+        let third = try await complete(&state, toolUse: .discouraged, thinking: false)
+        guard !third.toolCalls.isEmpty else { return third }
+        try Task.checkCancellation()
+        closeTools(after: third, state: &state)
         return try await complete(&state, toolUse: .off, thinking: false)
     }
 
@@ -1206,6 +1222,10 @@ public struct ResearchAgent: Sendable {
 
     static let toolsClosedNote = "Not run: the tools are closed now. Reply with text only, "
         + "as asked above."
+
+    static let noMoreToolsRequest = "You cannot search or open pages any more. Write the best "
+        + "answer you can now from the pages above, in plain text, and say what you could not "
+        + "verify."
 
     /// Sends the conversation. A turn with reasoning on that runs past the
     /// thinking limit (`thinkingMinutes`) or the request timeout is asked
@@ -1238,8 +1258,9 @@ public struct ResearchAgent: Sendable {
             if state.compact(toFit: promptBudget(state) / 2, overhead: Self.toolCharacters) {
                 onEvent(.shortenedOlderResults)
             }
-        } catch ResearchError.modelRequestFailed(let status, _, let code)
-                    where status >= 500 && !Self.answeredErrors.contains(code ?? "") {
+        } catch ResearchError.modelRequestFailed(let status, let message, let code)
+                    where status >= 500 && !Self.answeredErrors.contains(code ?? "")
+                        && !(toolUse == .off && Self.isRefusedToolCall(code: code, message: message)) {
             if thinks {
                 state.thinkingFailed = true
                 onEvent(.retryingAfterModelError)
@@ -1253,6 +1274,14 @@ public struct ResearchAgent: Sendable {
         // The only retry of this call: a second failure is thrown.
         return try await sendTurningThinkingOff(&state, toolUse: toolUse,
                                                 thinking: retryThinking)
+    }
+
+    /// The server refused the reply to a request with `tool_choice=none`
+    /// because the model wrote a tool call anyway (`unknown_tool`). The same
+    /// request would end the same way, so it is not sent again.
+    static func isRefusedToolCall(code: String?, message: String) -> Bool {
+        code == "unknown_tool" || code == "structured_output_failure"
+            || message.contains("unknown_tool")
     }
 
     /// Server errors that retrying without reasoning would not help.

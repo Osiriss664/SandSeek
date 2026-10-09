@@ -386,13 +386,10 @@ testing and are not in the app.
 | Option | What it does |
 | --- | --- |
 | `--save-pages <file.json>` | After a finished run, also writes the question, the answer as the figure check saw it, the date it used as today, and for every source its number, URL, title and the full page text the check used. It writes only this one file, only to a path that does not exist yet, and no file for a run that ended early. |
-| `--replay-figures <file.json>` | Runs the figure check again on such a file, with no model, sandbox or question, and prints its section twice, once with the current rules and once with the candidate rules, then the points only one of them flags. |
+| `--replay-figures <file.json>` | Runs the figure check again on such a file, with no model, sandbox or question, and prints its section. |
 
-The candidate rules (`ResearchFigureCheck.Rules`) are off in a normal run:
-a weak name may match one word by a shared prefix (at least 5 letters and 60%
-of the shorter word, so `Technologie` matches `Technik` but `Wasserstoff` does
-not match `Wasserkraft`), and a figure counts as next to a name only for
-proper names with no other number between them on the page.
+`--save-pages` cannot name the same file as `--output`, and `--replay-figures`
+takes no question and no other run option (only `--quiet`).
 
 ### Unit tests
 
@@ -457,16 +454,29 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
   answered with a tool result ("Not run: the tools are closed now. Reply with
   text only, as asked above."). The request is then sent again with
   `tool_choice` `auto` and reasoning off, and a progress line says the model
-  tried to call a tool. Only if that reply has tool calls as well is it kept
-  and answered the same way, and the request sent once more with `tool_choice`
-  `none` (Qwen once started a tool call even then, and the server answered
-  with an error). Nothing is removed afterwards: the conversation only grows,
-  so the citation rewrite that may follow extends what the server cached
-  instead of rewriting it (a removed note had made the server miss twice).
+  tried to call a tool. If that reply has tool calls as well, it is kept and
+  answered the same way and followed by a user message ("You cannot search or
+  open pages any more. Write the best answer you can now from the pages above,
+  in plain text, and say what you could not verify."), and the request is sent
+  again with `tool_choice` `auto`. Only if that reply still has tool calls is
+  it closed as well and the request sent once with `tool_choice` `none` (Qwen
+  once started a tool call even then; the server refuses that as an unknown
+  tool with a 500 `structured_output_failure`). That refusal is not retried:
+  an identical request would end the same way. For the final request or the
+  empty-answer retry, the run ends with the pages read, like any other failed
+  step; during the continuation or the rewrite, the earlier answer is kept.
+  The request after the user message and the `none` request do not reuse the
+  server's cache (the server only extends a cached tool-call turn with tool
+  results, and `none` changes the tool set). Nothing is removed afterwards: the
+  conversation only grows, so the citation rewrite that may follow extends
+  what the server cached instead of rewriting it (a removed note had made the
+  server miss twice).
   The server's cache is kept only when the tool-call reply has no text
-  before its calls; a reply with a preamble still misses once. From the
-  request that got the tool-call reply on, the prompt is not shortened again
-  (and keeps its reasoning), unless the server reports a context overflow.
+  before its calls; a reply with a preamble still misses once. From the first
+  request for the final answer on (also when the answer came from a normal
+  step), the prompt is not shortened again and keeps its reasoning, so the
+  empty-answer retry, the continuation and the rewrite extend the cached
+  history; only a context overflow or a timeout retry still shortens it.
 - An answer that stopped at the token limit (`finish_reason` `length`; the
   heat-pump answer did at 2048 tokens) is given back once, with reasoning off
   and the cut-off text as the assistant's message, with the request to
@@ -556,15 +566,20 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
     capital or an acronym followed by a number (`macOS 26`, with the
     capitalized words after it, such as `macOS Sequoia 26`). Other phrases
     are two or more capitalized words in a row, with linking words allowed
-    (`Bibliotheca Albertina`, `Bund der Kommunist:innen`), or a capitalized
+    (`Bibliotheca Albertina`, `Bund der Kommunist:innen`; not `und` or
+    `oder`, which join two nouns, as in `Preis und Auslaufverbot`), or a capitalized
     word before a number (`Staffel 3`; a year does not count). None starts
     at the sentence's first word or after a colon or a bar, unless it has an
     inner capital. Units such as `kWh` and `GmbH` and the currency codes are
     skipped, and so are headings, source lists and the labels of links. A
     phrase is flagged when one of its words is on none of the cited pages (no
     page word contains the word's stem, so the German compound
-    `Kommunistenbund` matches `Kommunist:innen`); for a sentence with no
-    citation, when it is on none of the pages read. To avoid noise from
+    `Kommunistenbund` matches `Kommunist:innen`). In the second kind of
+    phrase one missing word is accepted if a page word shares a prefix with it
+    (at least 5 letters and 60% of the shorter word, so `Technologie` matches
+    `Technik` but `Wasserstoff` does not match `Wasserkraft`) and stands within
+    30 characters of the phrase's other words on that page. In a sentence with no
+    citation, a word is flagged when it is on none of the pages read. To avoid noise from
     answers that translate, the second kind of phrase is only checked
     against cited pages in the answer's language (guessed from German and
     English function words; unclear counts as no match), and not at all in a
