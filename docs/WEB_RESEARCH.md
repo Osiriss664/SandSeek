@@ -19,7 +19,8 @@ also writes it to a new file. `--show-thinking` turns on the model's reasoning
 and prints it under each `[n] thinking…` line; it is not added to the report.
 The server returns that reasoning as `reasoning_content` (the research reads
 the non-streaming reply). With reasoning on, the research sends each
-step's reasoning back with its tool calls (and `preserve_thinking`), so a
+step's reasoning back with its tool calls (and `preserve_thinking`, see
+below), so a
 Qwen server renders the same prompt it already holds and its prompt cache
 is reused; older reasoning is dropped first when the prompt gets too long.
 `--max-steps <1...100>` sets how many search and read rounds the model may take
@@ -446,10 +447,17 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
   empty answer, the continuation of a cut-off answer and the revision below)
   keeps the tools in the prompt and sends `tool_choice` `auto`, because `none`
   makes the server drop the tools from the prompt and miss its prompt cache;
-  `preserve_thinking` is sent only when reasoning is on or the history holds
-  reasoning to replay; with reasoning off and none in the history it is left
-  out, because the server continues a plain-text turn from its cache with a
-  text bridge only without it. The
+  `preserve_thinking` is decided once per run and sent, or not sent, on every
+  request, because the server's prompt cache only matches a request whose flag
+  equals the cached one. It is sent when reasoning is on or the model keeps
+  reasoning in its chat history (Qwen, MiniMax, GPT-OSS; without it Qwen's
+  template drops the empty think blocks of earlier turns once a user message
+  comes last, and the cached prefix is missed). Only Gemma with reasoning off
+  leaves it out, which lets the server continue a plain-text turn from its
+  cache. The model is the `--model` name, or for `default` the single model
+  the server lists; an unknown model gets the flag. To measure on a Mac, set
+  `TUFF_RESEARCH_PRESERVE_THINKING=on|off|auto` (default `auto`, the rule
+  above) in the environment of `tuff research`; the app has no setting for it. The
   retry, the continuation and the revision ask with reasoning off, so with
   reasoning on they can still miss. A reply with tool calls is never used: the
   calls are not run. The turn stays in the conversation as the step loop

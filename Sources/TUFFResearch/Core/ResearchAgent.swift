@@ -38,6 +38,10 @@ public struct ResearchOptions: Equatable, Sendable {
     /// Whether a finished report also carries the page texts the figure check
     /// used, for `--save-pages`. A test aid; off otherwise.
     public var keepPageTexts = false
+    /// Whether the run sends `preserve_thinking`, decided once at its start.
+    /// A measuring aid: the command line reads it from the environment
+    /// (`TUFF_RESEARCH_PRESERVE_THINKING`), the app leaves it on `auto`.
+    public var preserveThinking: ResearchPreserveThinking = .auto
 
     /// The ranges the command line and the app accept. Limits that protect
     /// the Mac (the sandbox, its firewall, fetch sizes and the sandbox's own
@@ -469,11 +473,26 @@ public struct ResearchAgent: Sendable {
     private func research(_ state: inout State) async throws -> ResearchReport {
         try await sandbox.checkHealth()
         let question = state.question
+        // The list is asked for once. It gives the context window, and, for
+        // `default`, the model whose family decides `preserve_thinking`.
+        let needsFamily = options.preserveThinking == .auto && chat.enableThinking != true
+            && chat.model == "default"
+        var listed: [(id: String, contextTokens: Int?)] = []
+        if options.contextBudgetCharacters == nil || needsFamily {
+            listed = await chat.listedModels()
+        }
         if options.contextBudgetCharacters == nil {
-            state.contextWindows = await chat.contextWindows()
+            state.contextWindows = ResearchChatClient.windows(from: listed)
             state.contextTokens = ResearchChatClient.window(
                 for: chat.model, in: state.contextWindows)
         }
+        // `default` is the model selected in TUFF, which the list does not
+        // name; it is known only when the server lists a single model.
+        let modelID = chat.model == "default"
+            ? (listed.count == 1 ? listed[0].id : nil) : chat.model
+        state.preserveThinking = ResearchChatClient.preserveThinkingForRun(
+            mode: options.preserveThinking, enableThinking: chat.enableThinking,
+            modelID: modelID)
         state.messages = [
             .object(["role": .string("system"), "content": .string(systemPrompt())]),
             .object(["role": .string("user"), "content": .string(question)]),
@@ -1326,7 +1345,8 @@ public struct ResearchAgent: Sendable {
         do {
             turn = try await chat.complete(
                 messages: state.messages, tools: Self.tools, toolUse: toolUse,
-                thinking: thinking, timeout: limit)
+                thinking: thinking,
+                preserveThinking: state.preserveThinking, timeout: limit)
         } catch ResearchError.modelRequestFailed(_, _, "context_length_exceeded"?) {
             // The server's tokens hold fewer characters than estimated.
             state.charactersPerToken = max(
@@ -1338,7 +1358,8 @@ public struct ResearchAgent: Sendable {
             do {
                 turn = try await chat.complete(
                     messages: state.messages, tools: Self.tools, toolUse: toolUse,
-                    thinking: thinking, timeout: limit)
+                    thinking: thinking,
+                    preserveThinking: state.preserveThinking, timeout: limit)
             } catch ResearchError.modelRequestFailed(let status, let message,
                                                      "context_length_exceeded"?) {
                 guard state.compact(toFit: promptBudget(state) / 2,
@@ -1350,7 +1371,8 @@ public struct ResearchAgent: Sendable {
                 sent = state.size(overhead: Self.toolCharacters)
                 turn = try await chat.complete(
                     messages: state.messages, tools: Self.tools, toolUse: toolUse,
-                    thinking: thinking, timeout: limit)
+                    thinking: thinking,
+                    preserveThinking: state.preserveThinking, timeout: limit)
             }
         }
         state.calibrate(sentCharacters: sent, promptTokens: turn.promptTokens)
@@ -1358,11 +1380,26 @@ public struct ResearchAgent: Sendable {
         if let served = turn.model, let window = state.contextWindows[served] {
             state.contextTokens = window
         }
-        if let reasoning = turn.reasoning?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !reasoning.isEmpty {
+        // Shown without the tag that closes the thought; the history keeps the
+        // reasoning exactly as received, as the server's cache compares it
+        // byte for byte.
+        if let reasoning = Self.displayedReasoning(turn.reasoning) {
             onEvent(.reasoning(reasoning))
         }
         return turn
+    }
+
+    /// Reasoning for display: no trailing `</think>`, no surrounding
+    /// whitespace; nil when nothing is left.
+    static func displayedReasoning(_ reasoning: String?) -> String? {
+        guard var text = reasoning?.trimmingCharacters(in: .whitespacesAndNewlines) else {
+            return nil
+        }
+        if text.hasSuffix("</think>") {
+            text.removeLast("</think>".count)
+            text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return text.isEmpty ? nil : text
     }
 
     static func isJSONObject(_ text: String) -> Bool {
@@ -1691,6 +1728,10 @@ public struct ResearchAgent: Sendable {
         /// Every listed model's window, to pick again once a reply names
         /// the model that answered.
         var contextWindows: [String: Int] = [:]
+        /// Whether every request of the run sends `preserve_thinking`. Set at
+        /// the start and never changed: the server's prompt cache only
+        /// matches a request whose flag equals the cached one.
+        var preserveThinking = false
         /// A turn ran past the request timeout while reasoning, so the rest
         /// of the run asks without it.
         var thinkingTimedOut = false

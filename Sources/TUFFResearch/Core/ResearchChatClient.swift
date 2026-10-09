@@ -25,6 +25,13 @@ public struct ResearchAssistantTurn: Equatable, Sendable {
     public var model: String? = nil
 }
 
+/// How a run decides whether to send `preserve_thinking`. `auto` is the rule
+/// in `ResearchChatClient.preserveThinkingForRun`; `on` and `off` force it,
+/// for measuring the prompt cache on a Mac (`TUFF_RESEARCH_PRESERVE_THINKING`).
+public enum ResearchPreserveThinking: String, Equatable, Sendable {
+    case auto, on, off
+}
+
 /// Whether a request lets the model call tools. `.discouraged` is for an
 /// "answer now" request: the tools stay in the prompt with `tool_choice=auto`
 /// so the rendered tool block, which the server's prompt cache needs to
@@ -62,7 +69,8 @@ public struct ResearchChatClient: Sendable {
     func requestBody(messages: [ResearchJSON],
                      tools: [ResearchJSON],
                      toolUse: ResearchToolUse,
-                     thinking: Bool? = nil) -> ResearchJSON {
+                     thinking: Bool? = nil,
+                     preserveThinking: Bool = false) -> ResearchJSON {
         var body: [String: ResearchJSON] = [
             "model": .string(model),
             "messages": .array(messages),
@@ -76,38 +84,60 @@ public struct ResearchChatClient: Sendable {
         if let thinking = thinking ?? enableThinking {
             body["enable_thinking"] = .bool(thinking)
         }
-        // Sent only when reasoning has to be replayed: the request thinks, so
-        // its reply carries `reasoning_content` that the next request sends
-        // back, or the history already holds some. The server then renders
-        // every earlier turn's reasoning, so the prompt is the tokens it
-        // generated and its cache matches (ChatML only; other families drop
-        // it). The flag is part of the cache's identity, so a run that
-        // thinks sends it on every request, the first included. A request
-        // with reasoning off and none in the history leaves it out: the
-        // server then continues a plain-text turn from its cache with a text
-        // bridge, which it does not do once the flag is set.
-        let thinks = (thinking ?? enableThinking) == true
-        if thinks || Self.replaysReasoning(messages) {
+        // Decided once for the run (`preserveThinkingForRun`) and the same on
+        // every request: the server's prompt cache only matches a request
+        // whose flag equals the cached one. See `ResearchPreserveThinking`.
+        if preserveThinking {
             body["preserve_thinking"] = .bool(true)
         }
         return .object(body)
     }
 
-    /// Whether an assistant message in the history carries reasoning.
-    static func replaysReasoning(_ messages: [ResearchJSON]) -> Bool {
-        messages.contains { message in
-            message["role"]?.stringValue == "assistant"
-                && message["reasoning_content"]?.stringValue?.isEmpty == false
+    /// Whether the run sends `preserve_thinking`. The value is fixed for the
+    /// whole run, because the server's prompt cache only matches a request
+    /// whose flag equals the cached request's. In `auto` it is sent when
+    /// reasoning is on, or when the model family keeps reasoning in its chat
+    /// history (Qwen, MiniMax, GPT-OSS): without the flag, Qwen's template
+    /// drops the empty think blocks of earlier turns once a user message
+    /// comes last, and the cached prefix is missed. Only Gemma with
+    /// reasoning off leaves it out, which lets the server continue a
+    /// plain-text turn from its cache with a text bridge. `modelID` is the
+    /// model's id as the server lists it, or nil when it is not known; an
+    /// unknown model gets the flag.
+    public static func preserveThinkingForRun(mode: ResearchPreserveThinking,
+                                              enableThinking: Bool?,
+                                              modelID: String?) -> Bool {
+        switch mode {
+        case .on: return true
+        case .off: return false
+        case .auto: return enableThinking == true || keepsReasoning(modelID: modelID)
         }
+    }
+
+    /// False only for the Gemma family; true for every other model and for an
+    /// unknown one.
+    static func keepsReasoning(modelID: String?) -> Bool {
+        guard let modelID, !modelID.isEmpty else { return true }
+        let lowered = modelID.lowercased()
+        if let descriptor = TUFFModelCatalog.all.first(where: {
+            $0.selector.lowercased() == lowered || $0.apiModelID.lowercased() == lowered
+                || $0.aliases.contains { $0.lowercased() == lowered }
+        }) {
+            return descriptor.family != .gemma4
+        }
+        if ["qwen", "minimax", "gpt-oss"].contains(where: { lowered.contains($0) }) { return true }
+        return !lowered.contains("gemma")
     }
 
     public func complete(messages: [ResearchJSON],
                          tools: [ResearchJSON],
                          toolUse: ResearchToolUse = .allowed,
                          thinking: Bool? = nil,
+                         preserveThinking: Bool = false,
                          timeout: TimeInterval? = nil) async throws -> ResearchAssistantTurn {
         let body = try requestBody(messages: messages, tools: tools, toolUse: toolUse,
-                                   thinking: thinking).encoded()
+                                   thinking: thinking,
+                                   preserveThinking: preserveThinking).encoded()
         let response: ResearchHTTPResponse
         do {
             response = try await transport.send(
@@ -145,20 +175,32 @@ public struct ResearchChatClient: Sendable {
                                      model: reply?["model"]?.stringValue)
     }
 
-    /// The context window of each model TUFF lists in `/v1/models`, in
-    /// tokens. Empty when the server does not say.
-    public func contextWindows() async -> [String: Int] {
+    /// The models TUFF lists in `/v1/models`, with each one's context window
+    /// in tokens when it says. Empty when the server does not answer.
+    public func listedModels() async -> [(id: String, contextTokens: Int?)] {
         guard let response = try? await transport.send(
                 method: "GET", url: endpoint.deletingLastPathComponent()
                     .deletingLastPathComponent().appendingPathComponent("models"),
                 body: nil),
               response.status == 200,
               let models = (try? ResearchJSON.decode(response.body))?["data"]?.arrayValue
-        else { return [:] }
+        else { return [] }
+        return models.compactMap { entry -> (id: String, contextTokens: Int?)? in
+            guard let id = entry["id"]?.stringValue else { return nil }
+            let tokens = entry["context_length"]?.intValue
+            return (id: id, contextTokens: tokens.flatMap { $0 > 0 ? $0 : nil })
+        }
+    }
+
+    /// The context window of each model TUFF lists in `/v1/models`, in
+    /// tokens. Empty when the server does not say.
+    public func contextWindows() async -> [String: Int] {
+        Self.windows(from: await listedModels())
+    }
+
+    static func windows(from models: [(id: String, contextTokens: Int?)]) -> [String: Int] {
         let windows = models.compactMap { entry -> (String, Int)? in
-            guard let id = entry["id"]?.stringValue,
-                  let tokens = entry["context_length"]?.intValue, tokens > 0 else { return nil }
-            return (id, tokens)
+            entry.contextTokens.map { (entry.id, $0) }
         }
         return Dictionary(windows, uniquingKeysWith: min)
     }

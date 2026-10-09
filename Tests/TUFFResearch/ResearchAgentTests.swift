@@ -129,11 +129,12 @@ private func agent(_ services: FakeServices,
                    options: ResearchOptions = ResearchOptions(),
                    events: EventLog? = nil,
                    enableThinking: Bool? = nil,
+                   model: String = "default",
                    transport: (any ResearchHTTPTransport)? = nil) -> ResearchAgent {
     ResearchAgent(
         chat: ResearchChatClient(
             serverURL: URL(string: "http://127.0.0.1:8080")!,
-            model: "default",
+            model: model,
             maxTokens: 512,
             enableThinking: enableThinking,
             transport: transport ?? services),
@@ -560,7 +561,9 @@ struct ResearchAgentTests {
         _ = try await agent(services).run(question: "q")
         let request = try #require(services.modelRequests.first)
         let keys = Set(request.objectValue?.keys.map { $0 } ?? [])
-        #expect(keys == ["model", "messages", "max_tokens", "stream", "tools", "tool_choice"])
+        // `default` with no model list is an unknown family, which gets the flag.
+        #expect(keys == ["model", "messages", "max_tokens", "stream", "tools", "tool_choice",
+                         "preserve_thinking"])
         #expect(request["tool_choice"] == .string("auto"))
         #expect(request["max_tokens"] == .integer(512))
         let names = request["tools"]?.arrayValue?.compactMap { $0["function"]?["name"]?.stringValue }
@@ -579,57 +582,134 @@ struct ResearchAgentTests {
         #expect(body["tool_choice"] == nil)
     }
 
-    @Test func preserveThinkingIsSentOnlyWhenReasoningIsReplayed() {
-        func body(_ enableThinking: Bool?, thinking: Bool? = nil,
-                  messages: [ResearchJSON] = []) -> ResearchJSON {
-            ResearchChatClient(
-                serverURL: URL(string: "http://127.0.0.1:8080")!, model: "qwen36",
-                maxTokens: 100, enableThinking: enableThinking,
-                transport: FakeServices(modelReplies: []))
-                .requestBody(messages: messages, tools: [], toolUse: .allowed, thinking: thinking)
+    @Test func preserveThinkingIsDecidedByThinkingAndModelFamily() {
+        func decide(_ mode: ResearchPreserveThinking = .auto, thinking: Bool?,
+                    model: String?) -> Bool {
+            ResearchChatClient.preserveThinkingForRun(
+                mode: mode, enableThinking: thinking, modelID: model)
         }
-        let withReasoning: [ResearchJSON] = [
-            .object(["role": .string("user"), "content": .string("q")]),
-            .object(["role": .string("assistant"), "content": .string("a"),
-                     "reasoning_content": .string("checked")]),
-        ]
-        let withoutReasoning: [ResearchJSON] = [
-            .object(["role": .string("assistant"), "content": .string("a"),
-                     "reasoning_content": .string("")]),
-            .object(["role": .string("assistant"), "content": .string("b")]),
-        ]
-        // Thinking on: every request, so the cache identity stays the same.
-        #expect(body(true)["preserve_thinking"] == .bool(true))
-        #expect(body(nil, thinking: true)["preserve_thinking"] == .bool(true))
-        // Reasoning in the history is replayed whatever this request asks.
-        #expect(body(false, messages: withReasoning)["preserve_thinking"] == .bool(true))
-        #expect(body(true, thinking: false, messages: withReasoning)["preserve_thinking"]
-            == .bool(true))
-        // Thinking off and nothing to replay: not sent.
-        #expect(body(false)["preserve_thinking"] == nil)
-        #expect(body(nil)["preserve_thinking"] == nil)
-        #expect(body(true, thinking: false)["preserve_thinking"] == nil)
-        #expect(body(false, messages: withoutReasoning)["preserve_thinking"] == nil)
+        // Thinking on: always.
+        #expect(decide(thinking: true, model: "gemma-4-e4b-it"))
+        // Families that keep reasoning: whatever the thinking setting.
+        for model in ["qwen36", "qwen3.6-35b-a3b", "Qwen3-X", "minimax-m2.7", "gpt-oss-20b",
+                      "gpt-oss-120b", "some-minimax-build"] {
+            #expect(decide(thinking: false, model: model), "\(model)")
+            #expect(decide(thinking: nil, model: model), "\(model)")
+        }
+        // Gemma with thinking off or unset: not sent.
+        for model in ["gemma4-e2b", "gemma-4-e2b-it", "gemma-4-26b-a4b-it", "GEMMA-custom"] {
+            #expect(!decide(thinking: false, model: model), "\(model)")
+            #expect(!decide(thinking: nil, model: model), "\(model)")
+        }
+        // An unknown model gets the flag.
+        #expect(decide(thinking: false, model: nil))
+        #expect(decide(thinking: false, model: "something-else"))
+        // The override.
+        #expect(decide(.on, thinking: false, model: "gemma4-e2b"))
+        #expect(!decide(.off, thinking: true, model: "qwen36"))
     }
 
-    @Test func aRunWithThinkingOffNeverSendsPreserveThinking() async throws {
-        // The empty-answer retry, the cut-off continuation, the citation
-        // revision and a closed-tools round all follow plain-text or tool
-        // turns; none of them may carry the flag, or the server will not
-        // continue from its cache.
-        let services = FakeServices(modelReplies: [
+    @Test func requestBodySendsPreserveThinkingOnlyWhenTold() {
+        func body(_ preserve: Bool?) -> ResearchJSON {
+            let client = ResearchChatClient(
+                serverURL: URL(string: "http://127.0.0.1:8080")!, model: "qwen36",
+                maxTokens: 100, enableThinking: false,
+                transport: FakeServices(modelReplies: []))
+            return preserve.map {
+                client.requestBody(messages: [], tools: [], toolUse: .allowed, preserveThinking: $0)
+            } ?? client.requestBody(messages: [], tools: [], toolUse: .allowed)
+        }
+        #expect(body(true)["preserve_thinking"] == .bool(true))
+        #expect(body(false)["preserve_thinking"] == nil)
+        #expect(body(nil)["preserve_thinking"] == nil)
+    }
+
+    /// Scripted replies for a run that searches, answers early, reads a page,
+    /// and then needs a revision pass: many requests, some after tool results
+    /// and some after plain-text turns.
+    private func longRunReplies() -> [ResearchHTTPResponse] {
+        [
             FakeServices.calls([("a", "web_search", #"{"query":"apple container"}"#)]),
             FakeServices.answer("From the snippets [1][3]."),
             FakeServices.calls([("b", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
             FakeServices.answer("It runs each container in a VM [1]."),
             FakeServices.answer("It runs each container in a VM [1]."),
-        ])
-        _ = try await agent(services, enableThinking: false).run(question: "q")
+        ]
+    }
+
+    @Test func aRunWithGemmaAndThinkingOffNeverSendsPreserveThinking() async throws {
+        let services = FakeServices(modelReplies: longRunReplies())
+        _ = try await agent(services, enableThinking: false, model: "gemma-4-e2b-it").run(question: "q")
         #expect(services.modelRequests.count >= 3)
         for request in services.modelRequests {
             #expect(request["preserve_thinking"] == nil)
             #expect(request["enable_thinking"] == .bool(false))
         }
+    }
+
+    @Test func preserveThinkingNeverChangesWithinARun() async throws {
+        // Qwen with thinking off: sent from the first request on, though
+        // there is no reasoning in the history yet.
+        let qwen = FakeServices(modelReplies: longRunReplies())
+        _ = try await agent(qwen, enableThinking: false, model: "qwen36").run(question: "q")
+        #expect(qwen.modelRequests.count >= 3)
+        #expect(qwen.modelRequests.allSatisfy { $0["preserve_thinking"] == .bool(true) })
+
+        // Gemma with thinking on, with reasoning arriving mid-run and a step
+        // that asks for thinking off: still one value for every request.
+        let gemma = FakeServices(modelReplies: [
+            FakeServices.cutOff(),
+        ] + longRunReplies())
+        _ = try await agent(gemma, enableThinking: true, model: "gemma4-e4b").run(question: "q")
+        #expect(gemma.modelRequests.count >= 3)
+        #expect(gemma.modelRequests.allSatisfy { $0["preserve_thinking"] == .bool(true) })
+        #expect(gemma.modelRequests.contains { $0["enable_thinking"] == .bool(true) })
+        #expect(gemma.modelRequests.contains { $0["enable_thinking"] == .bool(false) })
+
+        // The override forces the value for the whole run.
+        var options = ResearchOptions()
+        options.preserveThinking = .off
+        let off = FakeServices(modelReplies: longRunReplies())
+        _ = try await agent(off, options: options, enableThinking: true, model: "qwen36")
+            .run(question: "q")
+        #expect(off.modelRequests.allSatisfy { $0["preserve_thinking"] == nil })
+    }
+
+    @Test func defaultModelUsesTheOnlyListedModelForItsFamily() async throws {
+        func listing(_ id: String) -> FakeServices {
+            FakeServices(modelReplies: longRunReplies(), sandbox: { path, body in
+                path == "/v1/models"
+                    ? FakeServices.json(200, .object(["data": .array([
+                        .object(["id": .string(id)])])]))
+                    : FakeServices.webPages(path, body)
+            })
+        }
+        let gemma = listing("gemma-4-e2b-it")
+        _ = try await agent(gemma, enableThinking: false).run(question: "q")
+        #expect(gemma.modelRequests.allSatisfy { $0["preserve_thinking"] == nil })
+        let qwen = listing("qwen3.6-35b-a3b")
+        _ = try await agent(qwen, enableThinking: false).run(question: "q")
+        #expect(qwen.modelRequests.allSatisfy { $0["preserve_thinking"] == .bool(true) })
+    }
+
+    @Test func theEnvironmentOverridesPreserveThinking() throws {
+        let name = ResearchArguments.preserveThinkingVariable
+        #expect(name == "TUFF_RESEARCH_PRESERVE_THINKING")
+        #expect(try ResearchArguments.parse(["q"], environment: [:]).options.preserveThinking == .auto)
+        for (text, mode) in [("on", ResearchPreserveThinking.on), ("OFF", .off), ("auto", .auto)] {
+            let parsed = try ResearchArguments.parse(["q"], environment: [name: text])
+            #expect(parsed.options.preserveThinking == mode)
+        }
+        #expect(throws: ResearchArgumentError.self) {
+            try ResearchArguments.parse(["q"], environment: [name: "maybe"])
+        }
+    }
+
+    @Test func displayedReasoningDropsTheClosingTag() {
+        #expect(ResearchAgent.displayedReasoning("Search first.\n</think>\n\n") == "Search first.")
+        #expect(ResearchAgent.displayedReasoning("  A </think> B  ") == "A </think> B")
+        #expect(ResearchAgent.displayedReasoning("\n</think>") == nil)
+        #expect(ResearchAgent.displayedReasoning(nil) == nil)
     }
 
     @Test func answersFromSnippetsAloneAreSentBackOnce() async throws {

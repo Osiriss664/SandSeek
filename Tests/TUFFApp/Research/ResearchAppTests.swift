@@ -811,25 +811,44 @@ private final class MemorySettings: ResearchSettingsStore {
 }
 
 @Suite @MainActor struct ResearchModelServerControllerTests {
+    private static let executable = URL(fileURLWithPath: "/Applications/TUFF.app/Contents/MacOS/TUFF")
+    /// Where the server executable is looked up; a real symlink is tested
+    /// separately, so this is the binary itself.
+    private static let serverPath = executable
+
     private func server(listedModels: [String]?,
                         stateDirectory: URL = temporaryDirectory(),
-                        processName: @escaping (pid_t) -> String? = { _ in nil })
+                        serverExecutable: URL? = nil,
+                        processInfo: @escaping (pid_t) -> ResearchProcessInfo? = { _ in nil })
         -> ResearchModelServerController {
         ResearchModelServerController(
             backgroundAPI: backgroundAPI(),
             transport: FakeResearchServices(listedModels: listedModels),
-            serverExecutable: nil, modelsRoot: nil,
+            serverExecutable: serverExecutable, modelsRoot: nil,
             logURL: temporaryDirectory().appendingPathComponent("server.log"),
             stateDirectory: stateDirectory,
-            processName: processName)
+            processInfo: processInfo)
+    }
+
+    private func port() -> Int { backgroundAPI().settings.port }
+
+    /// The server as the system shows it: the multi-call binary, started
+    /// under the name TUFFServer with the port.
+    private func runningServer(start: Int64 = 1_700_000_000_000_000,
+                               arguments: [String]? = nil) -> ResearchProcessInfo {
+        ResearchProcessInfo(
+            name: "TUFF", startMicroseconds: start, path: Self.executable.path,
+            arguments: arguments ?? ["TUFFServer", "--port", String(port())])
     }
 
     @Test func aServerLeftFromACrashIsTakenOver() async throws {
         let state = temporaryDirectory()
         try FileManager.default.createDirectory(at: state, withIntermediateDirectories: true)
-        try Data("4242".utf8).write(to: state.appendingPathComponent("server.pid"))
+        try Data("4242 1700000000000000".utf8).write(to: state.appendingPathComponent("server.pid"))
+        let info = runningServer()
         let controller = server(listedModels: ["gemma-4-e4b-it"], stateDirectory: state,
-                                processName: { $0 == 4242 ? "TUFFServer" : nil })
+                                serverExecutable: Self.serverPath,
+                                processInfo: { $0 == 4242 ? info : nil })
         #expect(controller.adoptedFromLastRun)
         await controller.refresh()
         #expect(controller.owner == .app)
@@ -839,16 +858,126 @@ private final class MemorySettings: ResearchSettingsStore {
         let state = temporaryDirectory()
         try FileManager.default.createDirectory(at: state, withIntermediateDirectories: true)
         let marker = state.appendingPathComponent("server.pid")
-        try Data("4242".utf8).write(to: marker)
+        try Data("4242 1700000000000000".utf8).write(to: marker)
+        let safari = ResearchProcessInfo(
+            name: "Safari", startMicroseconds: 1_700_000_000_000_000,
+            path: "/Applications/Safari.app/Contents/MacOS/Safari", arguments: ["Safari"])
         let controller = server(listedModels: nil, stateDirectory: state,
-                                processName: { _ in "Safari" })
+                                serverExecutable: Self.serverPath,
+                                processInfo: { _ in safari })
         #expect(!controller.adoptedFromLastRun)
         #expect(!FileManager.default.fileExists(atPath: marker.path))
     }
 
-    @Test func readsTheNameOfARunningProcess() {
-        #expect(ResearchModelServerController.processName(getpid()) != nil)
-        #expect(ResearchModelServerController.processName(999_999) == nil)
+    @Test func anOldMarkerWithoutAStartTimeIsNotOurs() throws {
+        let state = temporaryDirectory()
+        try FileManager.default.createDirectory(at: state, withIntermediateDirectories: true)
+        let marker = state.appendingPathComponent("server.pid")
+        try Data("4242".utf8).write(to: marker)
+        let info = runningServer()
+        let controller = server(listedModels: nil, stateDirectory: state,
+                                serverExecutable: Self.serverPath,
+                                processInfo: { _ in info })
+        #expect(!controller.adoptedFromLastRun)
+        #expect(!FileManager.default.fileExists(atPath: marker.path))
+    }
+
+    @Test func theMarkerHoldsTheProcessIdAndStartTime() {
+        let marker = ResearchServerMarker(pid: 4242, startMicroseconds: 1_700_000_000_123_456)
+        #expect(marker.text == "4242 1700000000123456")
+        #expect(ResearchServerMarker.parse(marker.text) == marker)
+        #expect(ResearchServerMarker.parse("4242 1700000000123456\n") == marker)
+        // Old format, and anything malformed, is not a marker.
+        #expect(ResearchServerMarker.parse("4242") == nil)
+        #expect(ResearchServerMarker.parse("") == nil)
+        #expect(ResearchServerMarker.parse("1 1700000000123456") == nil)
+        #expect(ResearchServerMarker.parse("4242 0") == nil)
+        #expect(ResearchServerMarker.parse("4242 abc") == nil)
+        #expect(ResearchServerMarker.parse("4242 1 2") == nil)
+    }
+
+    @Test func onlyTheServerThisAppStartedIsNamed() {
+        let marker = ResearchServerMarker(pid: 4242, startMicroseconds: 1_700_000_000_000_000)
+        let port = port()
+        func names(_ info: ResearchProcessInfo?, executable: URL? = Self.serverPath) -> Bool {
+            marker.names(info, executable: executable, port: port, processID: 1)
+        }
+        #expect(names(runningServer()))
+        #expect(names(nil) == false)
+        // Another process that reused the id has another start time.
+        #expect(!names(runningServer(start: 1_700_000_000_000_001)))
+        // The app itself: the same binary, but not started as TUFFServer.
+        #expect(!names(runningServer(arguments: ["/Applications/TUFF.app/Contents/MacOS/TUFF"])))
+        // The launch agent: started as TUFFServer --background.
+        #expect(!names(runningServer(arguments: ["TUFFServer", "--background"])))
+        #expect(!names(runningServer(arguments: ["TUFFServer", "--background", "--port", String(port)])))
+        // Another port, no port, or no arguments at all.
+        #expect(!names(runningServer(arguments: ["TUFFServer", "--port", String(port + 1)])))
+        #expect(!names(runningServer(arguments: ["TUFFServer"])))
+        #expect(!names(runningServer(arguments: [])))
+        // Another executable, or none known.
+        var elsewhere = runningServer()
+        elsewhere.path = "/usr/bin/python3"
+        #expect(!names(elsewhere))
+        elsewhere.path = nil
+        #expect(!names(elsewhere))
+        #expect(!names(runningServer(), executable: nil))
+        // This very process is never named.
+        #expect(!marker.names(runningServer(), executable: Self.serverPath, port: port,
+                              processID: 4242))
+        // A development build runs its own TUFFServer binary.
+        var development = runningServer()
+        development.path = "/repo/.build/debug/TUFFServer"
+        #expect(marker.names(development,
+                             executable: URL(fileURLWithPath: "/repo/.build/debug/TUFFServer"),
+                             port: port, processID: 1))
+    }
+
+    @Test func theSymlinkedServerExecutableIsFollowedToTheBinary() throws {
+        let directory = temporaryDirectory()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let binary = directory.appendingPathComponent("TUFF")
+        let link = directory.appendingPathComponent("TUFFServer")
+        try Data("x".utf8).write(to: binary)
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: binary)
+        let marker = ResearchServerMarker(pid: 4242, startMicroseconds: 1_700_000_000_000_000)
+        var info = runningServer()
+        // The system reports the resolved path of the running binary.
+        info.path = binary.resolvingSymlinksInPath().path
+        #expect(marker.names(info, executable: link, port: port(), processID: 1))
+        #expect(!marker.names(info, executable: directory.appendingPathComponent("other"),
+                              port: port(), processID: 1))
+    }
+
+    @Test func parsesTheProcessArgumentsOfASysctlBuffer() {
+        func buffer(count: Int32, path: String, arguments: [String], environment: [String]) -> [UInt8] {
+            var bytes = withUnsafeBytes(of: count) { Array($0) }
+            bytes += Array(path.utf8) + [0, 0, 0]
+            for argument in arguments { bytes += Array(argument.utf8) + [0] }
+            for entry in environment { bytes += Array(entry.utf8) + [0] }
+            return bytes
+        }
+        let parsed = ResearchProcessInfo.parseProcessArguments(buffer(
+            count: 3, path: "/Applications/TUFF.app/Contents/MacOS/TUFF",
+            arguments: ["TUFFServer", "--port", "8080"], environment: ["PATH=/usr/bin"]))
+        #expect(parsed?.executablePath == "/Applications/TUFF.app/Contents/MacOS/TUFF")
+        #expect(parsed?.arguments == ["TUFFServer", "--port", "8080"])
+        // Fewer arguments than the count says, and a buffer too short.
+        #expect(ResearchProcessInfo.parseProcessArguments(buffer(
+            count: 4, path: "/x", arguments: ["a"], environment: [])) == nil)
+        #expect(ResearchProcessInfo.parseProcessArguments([1, 0]) == nil)
+        #expect(ResearchProcessInfo.parseProcessArguments([]) == nil)
+        #expect(ResearchProcessInfo.parseProcessArguments(buffer(
+            count: -1, path: "/x", arguments: [], environment: [])) == nil)
+    }
+
+    @Test func readsARunningProcess() {
+        let info = ResearchProcessInfo.read(getpid())
+        #expect(info?.name.isEmpty == false)
+        #expect((info?.startMicroseconds ?? 0) > 0)
+        #expect(info?.path?.isEmpty == false)
+        #expect(info?.arguments?.isEmpty == false)
+        #expect(ResearchProcessInfo.read(999_999) == nil)
     }
 
     private func backgroundAPI() -> AppBackgroundAPIController {

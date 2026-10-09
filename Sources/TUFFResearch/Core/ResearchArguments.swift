@@ -81,8 +81,23 @@ public struct ResearchArguments: Equatable, Sendable {
 
     public init() {}
 
-    public static func parse(_ arguments: [String]) throws -> ResearchArguments {
+    /// The environment variable that overrides the `preserve_thinking` rule,
+    /// for measuring the prompt cache: `on`, `off` or `auto` (the default).
+    /// Not an option and not shown in the app.
+    public static let preserveThinkingVariable = "TUFF_RESEARCH_PRESERVE_THINKING"
+
+    public static func parse(_ arguments: [String],
+                             environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws -> ResearchArguments {
         var parsed = ResearchArguments()
+        if let text = environment[preserveThinkingVariable], !text.isEmpty {
+            guard let mode = ResearchPreserveThinking(
+                rawValue: text.lowercased()) else {
+                throw ResearchArgumentError(
+                    "\(preserveThinkingVariable) must be on, off or auto")
+            }
+            parsed.options.preserveThinking = mode
+        }
         var words: [String] = []
         var index = 0
         var maxTokensGiven = false

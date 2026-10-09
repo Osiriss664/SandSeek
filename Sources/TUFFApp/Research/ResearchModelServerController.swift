@@ -56,10 +56,11 @@ public final class ResearchModelServerController {
     private let serverExecutable: URL?
     private let modelsRoot: URL?
     private var process: Process?
-    /// A server this screen started in an earlier session, by process id.
-    private var adoptedPID: pid_t?
+    /// A server this screen started in an earlier session, by the marker it
+    /// left (process id and start time).
+    private var adoptedMarker: ResearchServerMarker?
     private let stateDirectory: URL
-    private let processName: (pid_t) -> String?
+    private let processInfo: (pid_t) -> ResearchProcessInfo?
 
     static let markerName = "server.pid"
 
@@ -69,10 +70,10 @@ public final class ResearchModelServerController {
                 modelsRoot: URL? = ResearchModelServerController.preferredModelsRoot(),
                 logURL: URL = ResearchModelServerController.defaultLogURL(),
                 stateDirectory: URL = ResearchSandboxController.defaultStateDirectory(),
-                processName: @escaping (pid_t) -> String? = ResearchModelServerController.processName) {
+                processInfo: @escaping (pid_t) -> ResearchProcessInfo? = ResearchProcessInfo.read) {
         self.backgroundAPI = backgroundAPI
         self.stateDirectory = stateDirectory
-        self.processName = processName
+        self.processInfo = processInfo
         backgroundAPIWasOn = backgroundAPI.isAvailable && backgroundAPI.settings.enabled
         self.transport = transport
         self.serverExecutable = serverExecutable
@@ -80,12 +81,14 @@ public final class ResearchModelServerController {
         self.logURL = logURL
         // A crash or force-quit skips the cleanup at quit. The marker names
         // the server it left behind, which is taken over only if that
-        // process is still a TUFFServer.
+        // process is still that server (see `ResearchServerMarker.names`); a
+        // marker without a start time is from an older version and is not.
         let marker = stateDirectory.appendingPathComponent(Self.markerName)
         if let text = try? String(contentsOf: marker, encoding: .utf8),
-           let pid = pid_t(text.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 1,
-           processName(pid) == "TUFFServer" {
-            adoptedPID = pid
+           let named = ResearchServerMarker.parse(text),
+           named.names(processInfo(named.pid), executable: serverExecutable,
+                       port: backgroundAPI.settings.port) {
+            adoptedMarker = named
             adoptedFromLastRun = true
         } else {
             try? FileManager.default.removeItem(at: marker)
@@ -96,21 +99,14 @@ public final class ResearchModelServerController {
 
     private var appServerIsRunning: Bool {
         if process?.isRunning == true { return true }
-        guard let adoptedPID else { return false }
-        return processName(adoptedPID) == "TUFFServer"
+        return adoptedServerIsRunning
     }
 
-    /// The short name of a running process, or nil when there is none.
-    public nonisolated static func processName(_ pid: pid_t) -> String? {
-        var info = kinfo_proc()
-        var size = MemoryLayout<kinfo_proc>.stride
-        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
-        guard sysctl(&mib, u_int(mib.count), &info, &size, nil, 0) == 0, size > 0 else {
-            return nil
-        }
-        return withUnsafeBytes(of: info.kp_proc.p_comm) { bytes in
-            String(decoding: bytes.prefix { $0 != 0 }, as: UTF8.self)
-        }
+    /// Whether the server taken over from an earlier session is still running.
+    private var adoptedServerIsRunning: Bool {
+        guard let adoptedMarker else { return false }
+        return adoptedMarker.names(processInfo(adoptedMarker.pid),
+                                   executable: serverExecutable, port: port)
     }
 
     public var port: Int { backgroundAPI.settings.port }
@@ -143,8 +139,8 @@ public final class ResearchModelServerController {
             models = []
             owner = .none
             if state == .ready { state = .off }
-            if let adoptedPID, processName(adoptedPID) != "TUFFServer" {
-                self.adoptedPID = nil
+            if adoptedMarker != nil, !adoptedServerIsRunning {
+                adoptedMarker = nil
                 adoptedFromLastRun = false
                 try? FileManager.default.removeItem(at: markerURL)
             }
@@ -257,10 +253,16 @@ public final class ResearchModelServerController {
         }
         try process.run()
         self.process = process
-        adoptedPID = nil
+        adoptedMarker = nil
         adoptedFromLastRun = false
         try? FileManager.default.createDirectory(at: stateDirectory, withIntermediateDirectories: true)
-        try? Data(String(process.processIdentifier).utf8).write(to: markerURL, options: .atomic)
+        // Without a start time the marker would never be trusted, so none is
+        // written if the process cannot be read.
+        if let started = processInfo(process.processIdentifier)?.startMicroseconds {
+            let marker = ResearchServerMarker(
+                pid: process.processIdentifier, startMicroseconds: started)
+            try? Data(marker.text.utf8).write(to: markerURL, options: .atomic)
+        }
     }
 
     private func processEnded() {
@@ -274,10 +276,12 @@ public final class ResearchModelServerController {
     }
 
     private func stopProcess() {
-        if let adoptedPID, processName(adoptedPID) == "TUFFServer" {
-            kill(adoptedPID, SIGTERM)
+        // Only a process that is checked to be that server is signalled; never
+        // this app, which runs the same binary, nor the launch agent.
+        if let adoptedMarker, adoptedServerIsRunning {
+            kill(adoptedMarker.pid, SIGTERM)
         }
-        adoptedPID = nil
+        adoptedMarker = nil
         adoptedFromLastRun = false
         try? FileManager.default.removeItem(at: markerURL)
         guard let process, process.isRunning else {
