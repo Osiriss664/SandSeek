@@ -25,7 +25,9 @@ struct ResearchWorkspaceView: View {
                         columns: [GridItem(.adaptive(minimum: 420), spacing: 18, alignment: .top)],
                         alignment: .leading, spacing: 18
                     ) {
-                        ConnectionCard(server: workspace.server)
+                        ConnectionCard(
+                            server: workspace.server, locked: running,
+                            promptBudget: workspace.presets.llamaPromptBudget)
                         SandboxCard(workspace: workspace)
                     }
                     questionCard
@@ -41,9 +43,14 @@ struct ResearchWorkspaceView: View {
             while !Task.isCancelled {
                 await workspace.refresh()
                 pickModelIfNeeded()
-                do { try await Task.sleep(for: .seconds(3)) } catch { return }
+                // Ten seconds: a ready server is asked only its cheap status
+                // route (see ResearchServerController.refresh).
+                do { try await Task.sleep(for: .seconds(10)) } catch { return }
             }
         }
+        // The model list changes on Check and on the reload button, and the
+        // picked model must be one of them at once.
+        .onChange(of: workspace.server.models) { pickModelIfNeeded() }
     }
 
     // MARK: - Question
@@ -88,6 +95,14 @@ struct ResearchWorkspaceView: View {
                 }
                 .fixedSize()
                 .disabled(workspace.server.models.isEmpty || running)
+                Button {
+                    Task { await workspace.server.refreshModels() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .help("Ask the model server for its models again")
+                .accessibilityLabel("Reload models")
+                .disabled(running || workspace.server.state.isBusy)
                 Picker("Mode", selection: $presetID) {
                     ForEach(ResearchPresetID.allCases) { preset in
                         Text(preset.title).tag(preset)
@@ -123,8 +138,8 @@ struct ResearchWorkspaceView: View {
     private var presetSummary: String {
         let preset = workspace.presets.preset(presetID)
         return "Up to \(preset.maxSteps) steps, at least \(preset.minimumPages) pages read, "
-            + "\(preset.searchResults) results per search, thinking "
-            + (preset.thinking ? "on" : "off") + "."
+            + "\(preset.searchResults) results per search, thinking: "
+            + preset.thinking.title.lowercased() + "."
     }
 
     /// Why the Research button is off, in a few words.

@@ -1,5 +1,6 @@
 import AppKit
 import SandSeekAppLogic
+import SandSeekCore
 import SwiftUI
 
 /// The model server: which kind, where it listens, whether it answers, which
@@ -7,13 +8,21 @@ import SwiftUI
 /// model server; it only connects to one that runs.
 struct ConnectionCard: View {
     let server: ResearchServerController
+    /// True while a question runs: the type, the address and Check stay as
+    /// they are, so the card cannot flip to "Not running" under the run.
+    let locked: Bool
+    /// The prompt budget set in Settings for a llama.cpp server that does not
+    /// say how large its context is.
+    let promptBudget: Int?
     /// What is typed in the address field. It is taken over on Return or
     /// Check, so a half-typed address is not looked at.
     @State private var draft: String
     @State private var copied = false
 
-    init(server: ResearchServerController) {
+    init(server: ResearchServerController, locked: Bool, promptBudget: Int?) {
         self.server = server
+        self.locked = locked
+        self.promptBudget = promptBudget
         _draft = State(initialValue: server.addressText)
     }
 
@@ -33,16 +42,18 @@ struct ConnectionCard: View {
                 }
                 .pickerStyle(.menu)
                 .fixedSize()
+                .disabled(locked)
                 TextField("127.0.0.1:8080", text: $draft)
                     .textFieldStyle(.roundedBorder)
                     .font(.body.monospaced())
                     .onSubmit(commitAddress)
                     .accessibilityLabel("Server address")
+                    .disabled(locked)
                 Button("Check") {
                     commitAddress()
                     Task { await server.check() }
                 }
-                .disabled(server.state.isBusy || draftProblem != nil)
+                .disabled(locked || server.state.isBusy || draftProblem != nil)
             }
             if let problem = draftProblem {
                 Text(problem)
@@ -57,6 +68,12 @@ struct ConnectionCard: View {
                 }
                 .buttonStyle(.link)
                 .font(.caption)
+                .disabled(locked)
+            }
+            if locked {
+                Text("The server is busy with your question. It can be changed when the question is done.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             detail
             if server.serverType == .llamacpp {
@@ -104,6 +121,12 @@ struct ConnectionCard: View {
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
+            if server.needsPromptBudget {
+                Text(budgetText)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         case .problem(let message):
             Text(message)
                 .font(.callout)
@@ -137,7 +160,18 @@ struct ConnectionCard: View {
         if let version = server.connection?.version, !version.isEmpty { text += " " + version }
         text += " answers. Models: "
         text += server.models.map(\.displayName).joined(separator: ", ") + "."
+        if let window = server.connection?.contextTokens {
+            text += " Context window: \(window.formatted()) tokens."
+        }
         return text
+    }
+
+    private var budgetText: String {
+        let characters = promptBudget ?? ResearchOptions.fallbackBudgetCharacters
+        let source = promptBudget == nil ? "a small default" : "the budget from Settings"
+        return "The server did not say how large its context window is, so questions use "
+            + source + " (\(characters.formatted()) characters of prompt). "
+            + "Settings has a Prompt budget to change it."
     }
 
     private var llamaCommand: some View {
@@ -163,7 +197,7 @@ struct ConnectionCard: View {
                             copied = false
                         }
                     }
-                    .help("The command holds the key SandSeek sends; paste it into Terminal only.")
+                    .help("The command names the key file; it holds no key.")
                 }
             }
             Text(ResearchServerController.keyNote)

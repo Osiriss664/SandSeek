@@ -27,7 +27,7 @@ struct MainView: View {
                     selection = .research
                 }
             case .settings:
-                SettingsScreen(presets: workspace.presets)
+                SettingsScreen(presets: workspace.presets, server: workspace.server)
             }
         }
     }

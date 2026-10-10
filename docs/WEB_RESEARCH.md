@@ -31,18 +31,19 @@ option.
 
 ## Settings
 
-The same settings exist on the command line and in the app (Research screen,
-**More Options**), with the same defaults. The app keeps them between
-launches; **Restore Defaults** resets them.
+The same settings exist on the command line and, with the same ranges, in the
+app's two presets (Settings: **Quick answer** and **Thorough**, each with
+**Restore Defaults**). The app keeps what you changed between launches. The
+"App" column names the preset field.
 
 | Command line | App | Default | What it does |
 | --- | --- | --- | --- |
 | `--max-steps <1...100>` | Steps | 8 | Search and read rounds before the model must answer. |
-| `--thinking on\|off` | Thinking | model's own | Reasoning on or off. Show thinking (`--show-thinking`) turns it on unless it is off; in the app, Show thinking is on by default. |
-| `--max-tokens <64...32768>` | Token limit per step | 2048, or 8192 with reasoning | Tokens the model may write per step. |
+| `--thinking on\|off` | Thinking | server default | Reasoning on or off. Show thinking (`--show-thinking`) turns it on unless it is off. The app sends no thinking setting unless Thinking is set to On or Off. |
+| `--max-tokens <64...32768>` | Tokens per step (thinking on: its own) | 2048, or 8192 with reasoning on | Tokens the model may write per step. |
 | `--page-chars <500...20000>` | Page text per read | 3000 | Characters one page read returns. |
 | `--passages on\|off` | Read the passages that best match the question first | off | `open_page` returns the best matching paragraphs of a page first, then the next best on a later read, instead of the page front to back (see [Relevant passages](#relevant-passages)). A read is then 2000 characters unless `--page-chars` is given. |
-| `--context-chars <2000...1000000>` | Prompt budget | from the model | How long the conversation may grow before older results are shortened. |
+| `--context-chars <2000...1000000>` | Prompt budget (llama.cpp without a context size) | from the model | How long the conversation may grow before older results are shortened. |
 | `--search-results <1...10>` | Results per search | 5 | Results each search returns. |
 | `--tool-calls <1...8>` | Tool calls per step | 4 | Searches and page reads the model may ask for in one step. |
 | `--min-pages <1...12>` | Pages to read | 3 | Pages the model is asked to read; the research opens top results to reach it. |
@@ -58,48 +59,57 @@ The model is chosen with `--model` or the app's model menu. Limits that
 protect the Mac are not settings: the sandbox, its firewall, the loopback-only
 addresses, the fetch size and time limits and the report rules stay fixed.
 
-## In the TUFF app
+## In the SandSeek app
 
-The **Research** screen (Command-2) does the same without Terminal. **Start
-Both** starts the model server and a fresh sandbox VM, **Run Safety Check**
-runs the `selftest` below, **Steps** sets the same limit as `--max-steps`
-(default 8), and each question shows its searches, page reads
-and, with **Show thinking**, the model's reasoning as it works. Elapsed times
-show as seconds, or minutes and seconds ("14 min 5 s"). Finished
-reports are listed in the sidebar and saved as Markdown and JSON in
-`~/Library/Application Support/TUFF/Research Reports`.
+`Scripts/package_app.sh` builds `build/SandSeek.app`. Its window does the same
+as the command without Terminal; see the README for the details.
 
-The screen runs `Scripts/research_sandbox.sh` from the checkout the app was
-built from, so build and run the app from a clone:
+- **Model server card.** Choose TUFF (127.0.0.1:8080) or llama.cpp
+  (127.0.0.1:8081), and edit the address (loopback only, with a port). SandSeek
+  never starts a model server. A ready server is asked only its status route
+  every ten seconds (TUFF `/tuff/v1/status`, llama.cpp `/health`); the model
+  list is fetched on **Check**, when that route changes, and from the reload
+  button beside the model picker. For llama.cpp the card identifies the server
+  by `/props` (sent with the key), reads the context window from
+  `default_generation_settings.n_ctx`, and offers a start command with
+  `--api-key-file` and the path of the key file SandSeek made. The key is never
+  on a command line or in the clipboard. When the context size is not given,
+  Settings has a **Prompt budget**.
+- **Sandbox card.** **Start Sandbox** runs `Scripts/research_sandbox.sh` in
+  place from `SandSeek.app/Contents/Resources/sandbox`; **Security check**
+  runs the `selftest` below. The first start builds the sandbox image, and it
+  is rebuilt when anything in `Sandbox/` changes. `SANDSEEK_SOURCE_DIR` points
+  a debug build, or a bare `swift run`, at a checkout instead.
+- **Question.** Pick the model and **Quick answer** or **Thorough**. Each
+  question shows its searches, page reads and, when the server sends it, the
+  model's reasoning as it works. **Stop** ends it. Finished reports are listed
+  in the sidebar and saved as Markdown and JSON in
+  `~/Library/Application Support/SandSeek/Reports`; reports TUFF's research
+  screen saved are copied once each from `~/Library/Application Support/TUFF/Research Reports`
+  (the originals stay).
 
-```sh
-swift build -c release
-.build/release/TUFF
-```
-
-The first start builds the sandbox image, and it is rebuilt when anything in
-`Sandbox/web-research` changes. Without the packaged app's Background API, the
-screen starts the `TUFFServer` built beside the app and stops it when TUFF
-quits; its log is `~/Library/Logs/TUFF/research-server.log`. A server already
-running on the same port, such as one started in Terminal, is used as it is.
-
-After every start, and again before each question, the screen checks from
-outside the VM that the sandbox firewall is loaded with TUFF's rules (outbound
+After every start, and again before each question, the app checks from outside
+the VM that the sandbox firewall is loaded with SandSeek's rules (outbound
 traffic dropped unless allowed, the private ranges refused, and nothing
 allowed ahead of them but loopback, replies and the DNS or SearXNG
 exceptions) and that the web server runs as the unprivileged user with no
-capabilities. Questions stay off until that passes. The app runs the `Scripts/research_sandbox.sh` of the folder it
-uses, so choose only your own checkout when it asks for one. If TUFF crashes
-or is force-quit, the next launch takes over the sandbox and model server it
-had started and stops them when it quits.
+capabilities. Questions stay off until that passes. If SandSeek crashes or is
+force-quit, the next launch takes over the sandbox it had started and stops it
+when it quits.
 
 The last question you typed is kept in the app's preferences, and reports,
 including the model's thinking, are saved as plain files. Delete a report from
-the sidebar to move it to the Trash.
+the Reports screen to move it to the Trash.
 
 The app shows web text as plain text only. Links in an answer do nothing,
 images are never loaded, and a source opens in your browser only after you
 confirm its full address.
+
+For a llama.cpp server started with `--api-key-file`, give the command the
+same file: `sandseek --server-type llamacpp --server http://127.0.0.1:8081
+--api-key-file <path> "question"`. The key is read from the file and sent as a
+Bearer token to the loopback server only; there is no option that takes the
+key itself.
 
 ## Requirements
 

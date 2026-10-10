@@ -6,6 +6,7 @@ import SwiftUI
 /// The two presets, which can be changed, and the safety rules, which cannot.
 struct SettingsScreen: View {
     @Bindable var presets: ResearchPresetStore
+    let server: ResearchServerController
 
     var body: some View {
         ScrollView {
@@ -15,6 +16,9 @@ struct SettingsScreen: View {
                     subtitle: "What each mode asks of the model, and the rules that are always on.")
                 PresetEditor(id: .quick, preset: $presets.quick)
                 PresetEditor(id: .thorough, preset: $presets.thorough)
+                if server.needsPromptBudget {
+                    PromptBudgetCard(presets: presets)
+                }
                 SecurityTable()
             }
             .frame(maxWidth: 900, alignment: .leading)
@@ -65,13 +69,13 @@ private struct PresetEditor: View {
                     Stepper(value: $preset.tokensPerStep, in: ResearchOptions.maxTokensRange, step: 256) {
                         Text("Tokens per step: \(preset.tokensPerStep)").font(.body.monospacedDigit())
                     }
-                    .help("What the model may write per step with thinking off.")
+                    .help("What the model may write per step, unless thinking is turned on. 2,048 is the sandseek command's default.")
                 }
                 GridRow {
                     Stepper(value: $preset.tokensPerStepWithThinking, in: ResearchOptions.maxTokensRange, step: 256) {
-                        Text("Tokens per step, thinking: \(preset.tokensPerStepWithThinking)").font(.body.monospacedDigit())
+                        Text("Tokens per step, thinking on: \(preset.tokensPerStepWithThinking)").font(.body.monospacedDigit())
                     }
-                    .help("With thinking on, the reasoning shares this limit.")
+                    .help("Used when thinking is turned on here; the reasoning shares the limit.")
                     Stepper(value: $preset.stepLimitMinutes, in: ResearchOptions.stepTimeoutMinutesRange) {
                         Text("Step time limit: \(preset.stepLimitMinutes) min").font(.body.monospacedDigit())
                     }
@@ -82,8 +86,13 @@ private struct PresetEditor: View {
                         Text("Thinking time limit: \(preset.thinkingLimitMinutes) min").font(.body.monospacedDigit())
                     }
                     .help("A step with thinking on that takes longer is asked again without thinking, which stays off for the rest of the question.")
-                    Toggle("Thinking", isOn: $preset.thinking)
-                        .help("Turns the model's reasoning on and shows it with the progress. It is never added to the report.")
+                    Picker("Thinking", selection: $preset.thinking) {
+                        ForEach(ResearchThinkingMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                    .fixedSize()
+                    .help("Server default sends no thinking setting, as the sandseek command does. On and Off ask the model explicitly. Thinking is shown with the progress and never added to the report.")
                 }
                 GridRow {
                     Toggle("Open top results when too few pages are read", isOn: $preset.autoOpenPages)
@@ -94,6 +103,31 @@ private struct PresetEditor: View {
                         .help("Also keeps the check of figures against the pages on.")
                 }
             }
+        }
+        .cardStyle()
+    }
+}
+
+/// How much prompt a llama.cpp server that does not say its context size
+/// gets. Shown only then.
+private struct PromptBudgetCard: View {
+    @Bindable var presets: ResearchPresetStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Prompt budget").font(.headline)
+            Text("The llama.cpp server did not say how large its context window is. Older results are shortened once the conversation passes this budget. Set it below the context size you started llama-server with (-c).")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Picker("Prompt budget", selection: $presets.llamaPromptBudget) {
+                Text("Small default (\(ResearchOptions.fallbackBudgetCharacters.formatted()) characters)")
+                    .tag(Int?.none)
+                ForEach([8_000, 16_000, 32_000, 46_000, 64_000], id: \.self) { size in
+                    Text("\(size.formatted()) characters").tag(Int?.some(size))
+                }
+            }
+            .fixedSize()
         }
         .cardStyle()
     }

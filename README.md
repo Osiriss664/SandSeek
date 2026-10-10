@@ -47,35 +47,51 @@ progress and answer side by side. Stop is visible while a question runs.
 
 - **Model server.** Pick TUFF (127.0.0.1:8080) or llama.cpp (127.0.0.1:8081);
   Ollama and LM Studio are listed as "later". The address can be edited but
-  must be on this Mac's loopback interface. The card checks the server every
-  few seconds (and with the Check button) and lists its models from
-  `/v1/models`. For llama.cpp it offers a start command with a key SandSeek
-  made once and stores in `~/Library/Application Support/SandSeek/State`; the
-  key is sent as a Bearer token. Whether llama-server enforces `--api-key` is
-  checked on the Mac in step 2b. On a Mac with 16 GB, run only one model
-  server with a loaded model at a time.
+  must be on this Mac's loopback interface, with a port (not the sandbox's
+  9100). A ready server is asked only its status route every ten seconds
+  (TUFF `/tuff/v1/status`, llama.cpp `/health`); the model list (`/v1/models`)
+  is fetched on Check, when the status changes, and from the reload button
+  beside the model picker. The type, address and Check are locked while a
+  question runs. For llama.cpp the card identifies the server with `/props`
+  (sent with the key: a 401 means the key was refused, a JSON object with
+  `default_generation_settings` means llama.cpp, anything else is shown as
+  "not llama.cpp") and reads the context window from `n_ctx`. It offers a
+  start command with `--api-key-file '<path>'`: SandSeek makes a random key
+  once and keeps it in `~/Library/Application Support/SandSeek/State` (file
+  0600, folder 0700). The key is sent as a Bearer token and is never on a
+  command line, in the clipboard text or in a log. The `sandseek` command has
+  `--api-key-file <path>` too. On a Mac with 16 GB, run only one model server
+  with a loaded model at a time. If the server gives no context size, Settings
+  shows a Prompt budget and the card says so.
 - **Sandbox files.** The app carries `Scripts/research_sandbox.sh` and
-  `Sandbox/` in `Contents/Resources/sandbox`. On first use, and whenever they
-  differ from the copy (compared by a hash of every file), they are copied to
-  `~/Library/Application Support/SandSeek/Sandbox`, and the script runs from
-  that copy. For development, `SANDSEEK_SOURCE_DIR=/path/to/checkout` uses
-  that checkout's files in place. The files are put into the bundle by the
-  script and not declared as SwiftPM resources, because the sandbox script
-  needs them as a plain folder laid out like a checkout (it builds the image
-  from `../Sandbox`), and the app hashes and copies exactly that folder.
+  `Sandbox/` in `Contents/Resources/sandbox` and runs the script from there, in
+  place: the folder is part of the signed bundle, and neither the script nor
+  `container build` writes into it, so no copy in a writable folder is needed.
+  The image is rebuilt when a hash of the `Sandbox/` files changes.
+  `SANDSEEK_SOURCE_DIR=/path/to/checkout` uses a checkout's files instead, but
+  only in debug builds or when the app has no files of its own (`swift run`);
+  a release app ignores it. The script always gets
+  `SANDSEEK_SANDBOX_PORT=9100`, whatever the environment says. The files are
+  put into the bundle by `Scripts/package_app.sh` and not declared as SwiftPM
+  resources, because the sandbox script needs them as a plain folder laid out
+  like a checkout (it builds the image from `../Sandbox`).
 - **Reports.** Saved in `~/Library/Application Support/SandSeek/Reports`
   (JSON and Markdown; the format is unchanged, a report only gains the
-  optional `serverKind`). Once per report id, the app copies the reports TUFF's
-  research screen saved in `~/Library/Application Support/TUFF/Research
-  Reports`. The originals are only read, never moved or deleted, and a report
-  you delete in SandSeek does not come back.
+  optional `serverKind`). Each time the app starts, it copies the reports
+  TUFF's research screen saved in `~/Library/Application Support/TUFF/Research
+  Reports` that it has not taken over before (once per report id). The
+  originals are only read, never moved or deleted, and a report you delete in
+  SandSeek does not come back.
 - **Presets.** Quick answer: 8 steps, at least 3 pages, 5 results per search.
-  Thorough: 30 steps, at least 10 pages, 8 results per search, thinking on.
-  Both: 4 tool calls per step, 3,000 characters of page text, 2,048 tokens per
-  step (8,192 with thinking), step limit 30 minutes, thinking limit 3 minutes,
-  auto-open, nudges and rewrite on. Settings edits them within the ranges the
-  command accepts. The Thorough values are not tested yet; they are measured
-  in step 2c.
+  Thorough: 30 steps, at least 6 pages, 8 results per search. Both: 4 tool
+  calls per step, 3,000 characters of page text, 2,048 tokens per step (8,192
+  when thinking is turned on), step limit 30 minutes, thinking limit 3 minutes,
+  auto-open, nudges and rewrite on, and thinking left to the server (no
+  setting is sent, like the `sandseek` command; Settings can turn it on or
+  off). Settings edits the numbers within the ranges the command accepts, and
+  stores only what differs from the defaults. The Thorough values are not
+  tested yet; they are measured in step 2c (the mock-up said 10 pages; 6 is
+  what the top-up that opens search results can reach).
 - **Safety rules** (shown in Settings, not editable): two tools only, a
   firewall in the VM, no root in the sandbox, a check before every question,
   and links open only after you confirm the full address.
@@ -110,9 +126,16 @@ To record real streams from a running server for test fixtures, use
 - Nothing in the app was compiled or run where it was written (no Swift
   toolchain there). Expect a few compile fixes on the first `swift build` on
   the Mac, and run `swift test` for `SandSeekAppLogicTests`.
-- llama.cpp: plain (non-streaming) requests, and the `--api-key` behaviour of
-  llama-server is checked in step 2b. Ollama and LM Studio come later.
+- llama.cpp: plain (non-streaming) requests. That llama-server has
+  `--api-key-file`, enforces it, and answers `/props` and `/health` as assumed
+  is confirmed by the probe on the Mac (step 2b). Ollama and LM Studio come
+  later.
+- Whether the ten-second status poll resets TUFF's idle unload is checked on
+  the Mac.
 - Thorough preset values are a first guess (step 2c measures them).
+- The pre-question check does not yet verify mounts or that port 9100 is
+  published by `sandseek-sandbox` (planned for step 4).
+- The model transport follows HTTP redirects from the loopback server.
 - Model names in the picker are the ids the server lists; there is no table of
   display names.
 - The Quick answer / Thorough switch is labelled in English like the rest of

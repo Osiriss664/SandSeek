@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Builds SandSeek.app from this checkout.
 #
-#   Scripts/package_app.sh [output-directory]        (default: ./build)
+#   Scripts/package_app.sh [output-directory]    (default: <repo>/build)
+#
+# The output directory must be <repo>/build or a folder inside it, because the
+# script deletes an earlier SandSeek.app there before it builds a new one.
 #
 # 1. builds the SandSeekApp executable in release mode,
 # 2. puts it in an app bundle with an Info.plist,
@@ -12,10 +15,11 @@
 # The sandbox files are copied by this script and not declared as SwiftPM
 # resources on purpose: the app needs them as a plain folder that looks like a
 # checkout (Scripts/research_sandbox.sh next to Sandbox/, because the script
-# builds the image from ../Sandbox), so that it can hash that folder, copy it
-# to ~/Library/Application Support/SandSeek/Sandbox and run the script from
-# there. SwiftPM resources would arrive in a separate Bundle.module bundle with
-# a layout and a lookup path of SwiftPM's choosing.
+# builds the image from ../Sandbox), so that it can run the script from
+# Contents/Resources/sandbox in place: the folder is sealed by the bundle's
+# signature, and the script and `container build` only read it. SwiftPM
+# resources would arrive in a separate Bundle.module bundle with a layout and a
+# lookup path of SwiftPM's choosing.
 #
 # Not done here: Sparkle updates and notarization.
 set -euo pipefail
@@ -30,7 +34,24 @@ fi
 
 script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd -- "$script_directory/.." && pwd)"
-output="${1:-$root/build}"
+build_directory="$root/build"
+# A relative output directory is relative to where the command was run.
+requested="${1:-$build_directory}"
+case "$requested" in
+    /*) output="$requested" ;;
+    *) output="$PWD/$requested" ;;
+esac
+output="${output%/}"
+case "/$output/" in
+    */../*|*/./*)
+        echo "The output directory must not contain . or .. parts: $output" >&2
+        exit 1
+        ;;
+esac
+if [[ "$output" != "$build_directory" && "$output" != "$build_directory"/* ]]; then
+    echo "The output directory must be $build_directory or a folder inside it: $output" >&2
+    exit 1
+fi
 app="$output/SandSeek.app"
 
 for needed in "$root/Scripts/research_sandbox.sh" "$root/Sandbox/Containerfile"; do
@@ -51,6 +72,11 @@ if [[ ! -x "$executable" ]]; then
 fi
 
 echo "Assembling $app ..."
+# Only a SandSeek.app inside <repo>/build is ever removed.
+if [[ "$app" != "$build_directory"/*"/SandSeek.app" && "$app" != "$build_directory/SandSeek.app" ]]; then
+    echo "Refusing to remove $app" >&2
+    exit 1
+fi
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/sandbox/Scripts" "$app/Contents/Resources/sandbox/Sandbox"
 cp "$executable" "$app/Contents/MacOS/SandSeek"
