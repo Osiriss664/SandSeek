@@ -4,6 +4,10 @@ public struct ResearchArguments: Equatable, Sendable {
     public var question: String = ""
     public var model: String = "default"
     public var serverURL: URL = URL(string: "http://127.0.0.1:8080")!
+    /// A file holding the model server's key (`--api-key-file`). The command
+    /// reads it and sends it as a Bearer token to the server, which is on
+    /// loopback.
+    public var apiKeyFile: String?
     public var sandboxURL: URL = URL(string: "http://127.0.0.1:9100")!
     /// Which kind of model server `serverURL` is; `auto` asks it.
     public var serverType: ResearchServerChoice = .auto
@@ -48,6 +52,12 @@ public struct ResearchArguments: Equatable, Sendable {
                                route is asked too: a server that does not
                                answer at all ends the run (exit code 1), one
                                that answers something else gives a warning.
+      --api-key-file <path>    File with the key of a model server that asks
+                               for one (llama-server --api-key-file). The key
+                               is sent as a Bearer token to the server, which
+                               is on this Mac, and is never printed. Keep the
+                               key off the command line: it would show in
+                               `ps` and in your shell history.
       --stream on|off          Read each model reply as a stream (default on
                                for TUFF). Streaming lets Stop and the time
                                limits make TUFF stop generating; with off,
@@ -186,6 +196,8 @@ public struct ResearchArguments: Equatable, Sendable {
                     throw ResearchArgumentError("--server-type must be tuff, llamacpp or auto")
                 }
                 parsed.serverType = choice
+            case "--api-key-file":
+                parsed.apiKeyFile = try value(argument)
             case "--stream":
                 parsed.stream = try onOff(argument)
             case "--sandbox":

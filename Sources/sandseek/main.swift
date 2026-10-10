@@ -59,6 +59,15 @@ if let path = arguments.savePagesPath, FileManager.default.fileExists(atPath: pa
 // off a slow page fetch.
 let transport = URLSessionResearchTransport(
     timeout: TimeInterval(arguments.stepTimeoutMinutes * 60))
+// The key of a model server that asks for one. It is read from a file so that
+// it is not on the command line, and goes only into the chat requests.
+let authorization: String?
+do {
+    authorization = try arguments.apiKeyFile.map(ResearchAPIKeyFile.authorization(atPath:))
+} catch {
+    writeError("error: \(error)")
+    exit(2)
+}
 let sandboxTransport = URLSessionResearchTransport()
 let quiet = arguments.quiet
 
@@ -87,6 +96,7 @@ let agent = ResearchAgent(
         maxTokens: arguments.maxTokens,
         enableThinking: arguments.enableThinking,
         streaming: connection.streaming,
+        authorization: authorization,
         transport: transport),
     sandbox: ResearchSandboxClient(baseURL: arguments.sandboxURL, transport: sandboxTransport),
     options: arguments.options,

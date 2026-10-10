@@ -56,6 +56,11 @@ public struct ResearchOptions: Equatable, Sendable {
     /// the room the reply needs, and from how many characters the server's
     /// tokens turn out to hold.
     public var contextBudgetCharacters: Int? = nil
+    /// The model's context window in tokens when the caller knows it and the
+    /// server's model list does not say (llama.cpp lists no `context_length`;
+    /// its `/props` has `n_ctx`). Used only when the list has no window for
+    /// the model and `contextBudgetCharacters` is not fixed.
+    public var knownContextTokens: Int? = nil
     /// The budget when the server does not say how large the context is.
     public static let fallbackBudgetCharacters = 16_000
     public var currentDate: String = ResearchOptions.today()
@@ -699,7 +704,7 @@ public struct ResearchAgent: Sendable {
         if options.contextBudgetCharacters == nil {
             state.contextWindows = ResearchChatClient.windows(from: listed)
             state.contextTokens = ResearchChatClient.window(
-                for: chat.model, in: state.contextWindows)
+                for: chat.model, in: state.contextWindows) ?? options.knownContextTokens
         }
         // `default` is the model selected in TUFF, which the list does not
         // name; it is known only when the server lists a single model.

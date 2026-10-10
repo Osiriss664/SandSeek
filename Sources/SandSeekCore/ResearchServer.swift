@@ -43,13 +43,19 @@ public struct ResearchServerConnection: Equatable, Sendable {
     /// Something the run should say before it starts, such as a server that
     /// was named as TUFF but did not answer TUFF's status route.
     public let warning: String?
+    /// The model's context window in tokens when the server says it outside
+    /// the model list: llama.cpp's `/props` (`default_generation_settings.n_ctx`).
+    /// Nil when it is not known; the run then follows the model list, or its
+    /// small fallback budget.
+    public let contextTokens: Int?
 
     public init(kind: ResearchServerKind, version: String?, streaming: Bool,
-                warning: String? = nil) {
+                warning: String? = nil, contextTokens: Int? = nil) {
         self.kind = kind
         self.version = version
         self.streaming = streaming
         self.warning = warning
+        self.contextTokens = contextTokens
     }
 
     /// The one progress line a run prints before it starts.
