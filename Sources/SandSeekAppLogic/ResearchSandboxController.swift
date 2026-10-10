@@ -80,8 +80,8 @@ public struct ResearchSelfTestResult: Equatable, Sendable {
 }
 
 /// Starts and stops the web sandbox VM with the same commands as
-/// `Scripts/research_sandbox.sh`, which it runs from the copy of the app's
-/// sandbox files in Application Support (see `SandboxResources`). The script
+/// `Scripts/research_sandbox.sh`, which it runs in place from the app's own
+/// sandbox files (see `SandboxResources`). The script
 /// holds every security option for the VM, so the app never builds its own
 /// `container run` command.
 @MainActor @Observable
@@ -164,7 +164,7 @@ public final class ResearchSandboxController {
         self.runner = runner
         self.transport = transport
         self.defaults = defaults
-        self.environment = environment
+        self.environment = Self.scriptEnvironment(environment)
         self.resources = resources
         // Set directly: didSet observers do not run in an initializer.
         startedByApp = FileManager.default.fileExists(atPath: markerURL.path)
@@ -179,6 +179,20 @@ public final class ResearchSandboxController {
         return support.appendingPathComponent("SandSeek/State", isDirectory: true)
     }
 
+    /// The environment the script and `container` run with. The script takes
+    /// its port from `SANDSEEK_SANDBOX_PORT`; the app looks for the sandbox on
+    /// `port` and checks the VM by name, so a value exported for command line
+    /// work must not move the VM to another port. The port is therefore
+    /// pinned, and every other `SANDSEEK_SANDBOX_*` name and the source
+    /// folder override (which the app resolves itself) are removed.
+    static func scriptEnvironment(_ base: [String: String]) -> [String: String] {
+        var environment = base.filter {
+            !$0.key.hasPrefix("SANDSEEK_SANDBOX_") && $0.key != SandboxResources.overrideVariable
+        }
+        environment["SANDSEEK_SANDBOX_PORT"] = String(port)
+        return environment
+    }
+
     private var markerURL: URL { stateDirectory.appendingPathComponent(Self.markerName) }
 
     private func writeMarker() {
@@ -190,11 +204,10 @@ public final class ResearchSandboxController {
         }
     }
 
-    /// Makes the files the script runs from ready: copies the app's files
-    /// when this is the first use or they changed (or the copy was altered),
-    /// or takes the checkout named by `SANDSEEK_SOURCE_DIR`. Sets the state
-    /// to a failure with the reason when `reportFailure` is set and the files
-    /// are not available.
+    /// Finds the files the script runs from: the app's own, in place in the
+    /// bundle, or the checkout named by `SANDSEEK_SOURCE_DIR` where that is
+    /// allowed (see `SandboxResources`). Sets the state to a failure with the
+    /// reason when `reportFailure` is set and the files are not available.
     @discardableResult
     private func prepareFiles(reportFailure: Bool) -> SandboxFiles? {
         do {

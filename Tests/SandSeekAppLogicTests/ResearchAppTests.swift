@@ -617,8 +617,9 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
         #expect(sandbox.files == nil)
 
         await sandbox.start()
-        #expect(sandbox.files?.origin == .installedCopy)
-        // The script runs from the copy, not from the files in the app.
+        #expect(sandbox.files?.origin == .bundled)
+        // The script runs in place from the files in the app.
+        #expect(sandbox.files?.root.standardizedFileURL.path == root.standardizedFileURL.path)
         #expect(runner.commands.contains { $0.contains(sandbox.files?.script.path ?? "-") })
         #expect(sandbox.state == .ready)
         #expect(sandbox.protection == .verified)
@@ -861,9 +862,7 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
         let sandbox = ResearchSandboxController(
             runner: runner, transport: FakeResearchServices(sandboxHealthy: false),
             defaults: defaults(), environment: [:],
-            resources: SandboxResources(
-                bundledRoot: nil, installRoot: temporaryDirectory("SandSeekInstall"),
-                environment: [:]),
+            resources: SandboxResources(bundledRoot: nil, environment: [:], allowsOverride: false),
             stateDirectory: temporaryDirectory())
         await sandbox.start()
         guard case .failed(let message) = sandbox.state else {
@@ -876,14 +875,14 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
 
     @Test func aSandboxStartedWithADeveloperCheckoutRunsItsScriptInPlace() async throws {
         let checkout = try fakeSandboxBundle()
-        let install = temporaryDirectory("SandSeekInstall")
         let runner = FakeProcessRunner()
         let sandbox = ResearchSandboxController(
             runner: runner, transport: FakeResearchServices(), defaults: defaults(),
             environment: [:],
             resources: SandboxResources(
-                bundledRoot: nil, installRoot: install,
-                environment: [SandboxResources.overrideVariable: checkout.path]),
+                bundledRoot: nil,
+                environment: [SandboxResources.overrideVariable: checkout.path],
+                allowsOverride: true),
             stateDirectory: temporaryDirectory())
         await sandbox.start()
         #expect(sandbox.state == .ready)
@@ -891,26 +890,27 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
         #expect(runner.commands.contains {
             $0.contains(checkout.appendingPathComponent("Scripts/research_sandbox.sh").path)
         })
-        // Nothing was copied.
-        #expect(!FileManager.default.fileExists(atPath: install.path))
     }
 
-    @Test func aScriptThatWasAlteredAfterTheCopyIsReplacedBeforeItRuns() async throws {
-        let bundle = try fakeSandboxBundle()
-        let install = temporaryDirectory("SandSeekInstall")
+    @Test func theScriptAlwaysGetsTheFixedPortAndNoSourceFolder() async throws {
         let runner = FakeProcessRunner()
         let sandbox = ResearchSandboxController(
             runner: runner, transport: FakeResearchServices(), defaults: defaults(),
-            environment: [:],
-            resources: try testResources(bundle: bundle, install: install),
-            stateDirectory: temporaryDirectory())
+            environment: ["PATH": "/usr/bin", "SANDSEEK_SANDBOX_PORT": "9555",
+                          "SANDSEEK_SANDBOX_NAME": "other", "SANDSEEK_SOURCE_DIR": "/tmp/x",
+                          "SANDSEEK_DNS": "1.1.1.1"],
+            resources: try testResources(), stateDirectory: temporaryDirectory())
         await sandbox.start()
-        await sandbox.stop()
-        let script = install.appendingPathComponent("Scripts/research_sandbox.sh")
-        try Data("#!/bin/bash\necho tampered\n".utf8).write(to: script)
-        await sandbox.start()
-        #expect(try String(contentsOf: script, encoding: .utf8) == "#!/bin/bash\n")
-        #expect(sandbox.files?.didCopy == true)
+        let environments = runner.environments
+        #expect(!environments.isEmpty)
+        for environment in environments {
+            #expect(environment["SANDSEEK_SANDBOX_PORT"] == "9100")
+            #expect(environment["SANDSEEK_SANDBOX_NAME"] == nil)
+            #expect(environment["SANDSEEK_SOURCE_DIR"] == nil)
+            // Other settings the script reads are left alone.
+            #expect(environment["SANDSEEK_DNS"] == "1.1.1.1")
+            #expect(environment["PATH"] == "/usr/bin")
+        }
     }
 
     @Test func pathIncludesWhereContainerInstalls() {

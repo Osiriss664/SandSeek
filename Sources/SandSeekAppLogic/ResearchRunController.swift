@@ -216,7 +216,7 @@ public final class ResearchRunController {
         startedAt = started
         phase = .running
 
-        let options = settings.options
+        let options = Self.runOptions(settings: settings, connection: connection)
         // The step timeout is for the model; sandbox calls keep the default,
         // far above the sandbox's own limits.
         let transport = self.transport
@@ -259,6 +259,16 @@ public final class ResearchRunController {
             self?.finish(outcome, runID: id, started: started, model: settings.model,
                          serverKind: connection.kind)
         }
+    }
+
+    /// The loop options of a run: the settings', and the context window the
+    /// server gave outside its model list (llama.cpp's `/props`), which the
+    /// loop uses unless the settings fix a prompt budget.
+    static func runOptions(settings: ResearchRunSettings,
+                           connection: ResearchServerConnection) -> ResearchOptions {
+        var options = settings.options
+        options.knownContextTokens = connection.contextTokens
+        return options
     }
 
     /// Stops the run. Its model request is cancelled, which closes the

@@ -64,6 +64,14 @@ public enum ResearchServerType: String, CaseIterable, Identifiable, Sendable {
 public protocol ResearchKeyStoring {
     func loadKey() -> String?
     func saveKey(_ key: String) throws
+    /// The file that holds the key, when it is kept in one. llama-server is
+    /// started with `--api-key-file` and this path, so the key itself is on no
+    /// command line.
+    var keyFilePath: String? { get }
+}
+
+public extension ResearchKeyStoring {
+    var keyFilePath: String? { nil }
 }
 
 /// The key in a file only the person can read (mode 0600, in a folder with
@@ -82,6 +90,8 @@ public struct FileKeyStore: ResearchKeyStoring {
         return support.appendingPathComponent("SandSeek/State/llamacpp-api-key")
     }
 
+    public var keyFilePath: String? { url.path }
+
     public func loadKey() -> String? {
         guard let data = try? Data(contentsOf: url) else { return nil }
         let key = String(decoding: data, as: UTF8.self)
@@ -90,20 +100,24 @@ public struct FileKeyStore: ResearchKeyStoring {
     }
 
     public func saveKey(_ key: String) throws {
+        let folder = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(
-            at: url.deletingLastPathComponent(), withIntermediateDirectories: true,
+            at: folder, withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700])
+        // A folder that existed before keeps its mode, so set it.
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: folder.path)
         guard FileManager.default.createFile(
             atPath: url.path, contents: Data(key.utf8),
             attributes: [.posixPermissions: 0o600]) else {
             throw CocoaError(.fileWriteUnknown)
         }
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
     }
 }
 
 /// The model server a question is sent to. SandSeek never starts or stops a
 /// server: it connects to one that already runs, on this Mac's loopback
-/// address only. This controller holds the chosen type and address, checks
+/// address only. This controller holds the chosen type and address, looks at
 /// the server now and then, lists its models, and says how to start one.
 @MainActor @Observable
 public final class ResearchServerController {
@@ -122,19 +136,39 @@ public final class ResearchServerController {
         public var isBusy: Bool { self == .checking }
     }
 
-    /// What one look at the server found.
+    /// What one full look at the server found.
     enum Outcome: Equatable, Sendable {
-        case ready(models: [ResearchServedModel], version: String?)
+        case ready(models: [ResearchServedModel], version: String?, contextTokens: Int?)
         case off(String)
         case problem(String)
+    }
+
+    /// What the cheap look found: the server's status route only.
+    enum QuickLook: Equatable, Sendable {
+        /// It answers as before.
+        case alive
+        /// It does not answer.
+        case gone(String)
+        /// It answers differently than a ready server does (not TUFF any
+        /// more, llama.cpp still loading its model): look at it in full.
+        case changed
     }
 
     public static let memoryNote =
         "On a Mac with 16 GB, run only one model server with a loaded model at a time."
     public static let keyNote =
-        "The key was made by SandSeek and is sent with every request as a Bearer token. "
-        + "That llama-server enforces --api-key (and so refuses requests without it) is "
-        + "checked on the Mac in step 2b."
+        "SandSeek made a key for llama.cpp and keeps it in a file only you can read. "
+        + "Start llama-server with that file (--api-key-file) so that it asks for the key; "
+        + "SandSeek sends it with every request."
+
+    /// Seconds a request to the server may take before it is reported as not
+    /// answering. The transport's own limit is longer, so this one is the one
+    /// the message names: a busy server is not reported as gone after 3 s.
+    nonisolated static let requestTimeout: TimeInterval = 8
+    /// The sandbox listens here. A model server at this port is refused, so
+    /// the llama.cpp key can never be sent to the sandbox. Kept equal to
+    /// `ResearchSandboxController.port` (a test checks it).
+    nonisolated static let sandboxPort = 9100
 
     static let typeKey = "ResearchServerType"
     static func addressKey(_ type: ResearchServerType) -> String {
@@ -152,8 +186,11 @@ public final class ResearchServerController {
     public private(set) var lastChecked: Date?
     /// Set when the llama.cpp key could not be written to disk.
     public private(set) var keyProblem: String?
-    /// The key SandSeek sends to llama.cpp.
+    /// The key SandSeek sends to llama.cpp. It is used in one request header
+    /// and is never shown, copied, logged or put into a command.
     public let apiKey: String
+    /// The file that holds `apiKey`, for the start command.
+    public let keyFilePath: String?
 
     private let defaults: any ResearchSettingsStore
     private let transport: any ResearchHTTPTransport
@@ -166,11 +203,12 @@ public final class ResearchServerController {
 
     public init(defaults: any ResearchSettingsStore = UserDefaults.standard,
                 keyStore: any ResearchKeyStoring = FileKeyStore(),
-                transport: any ResearchHTTPTransport = URLSessionResearchTransport(timeout: 3),
+                transport: any ResearchHTTPTransport = URLSessionResearchTransport(timeout: 10),
                 tuffStreaming: Bool = true) {
         self.defaults = defaults
         self.transport = transport
         self.tuffStreaming = tuffStreaming
+        keyFilePath = keyStore.keyFilePath
         let saved = defaults.savedString(forKey: Self.typeKey)
             .flatMap(ResearchServerType.init(rawValue:))
         let type = saved.flatMap { $0.isAvailable ? $0 : nil } ?? .tuff
@@ -234,9 +272,10 @@ public final class ResearchServerController {
         offReason = nil
     }
 
-    /// The server address as an URL, only if it is an http address on this
-    /// Mac's loopback interface. `127.0.0.1:8080` without a scheme is read as
-    /// `http://127.0.0.1:8080`. A path other than `/v1` is refused.
+    /// The server address as an URL, only if it is an http address with a
+    /// port on this Mac's loopback interface, and not the sandbox's port.
+    /// `127.0.0.1:8080` without a scheme is read as `http://127.0.0.1:8080`. A
+    /// path other than `/v1` is refused.
     public nonisolated static func parseAddress(_ text: String) throws -> URL {
         var text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if !text.contains("://") { text = "http://" + text }
@@ -245,6 +284,14 @@ public final class ResearchServerController {
             throw ResearchError.invalidEndpoint(
                 "The server address must not have a path; use the address alone, such as "
                     + "http://127.0.0.1:8080")
+        }
+        guard let port = url.port else {
+            throw ResearchError.invalidEndpoint(
+                "The server address needs a port, such as http://127.0.0.1:8080")
+        }
+        guard port != sandboxPort else {
+            throw ResearchError.invalidEndpoint(
+                "Port \(sandboxPort) is the web sandbox's. Give the model server another port.")
         }
         return url
     }
@@ -274,14 +321,27 @@ public final class ResearchServerController {
 
     // MARK: - How to start a server
 
-    /// The command that starts a llama.cpp server SandSeek can use. It holds
-    /// the key, so it is shown only on the connection card and copied on
-    /// request. The port follows the address.
+    /// The command that starts a llama.cpp server SandSeek can use. It names
+    /// the key file and holds no key, so it can be shown and copied: the key
+    /// itself would show in `ps` for every user of this Mac and stay in the
+    /// shell history. The port follows the address.
+    ///
+    /// `--api-key-file` is the flag the plan assumes; the llama.cpp probe on
+    /// the Mac confirms that llama-server has it and enforces it.
     public var startCommand: String? {
         guard serverType == .llamacpp else { return nil }
-        let port = serverURL?.port ?? 8081
-        return "llama-server -m <model.gguf> --alias <name> --host 127.0.0.1 --port \(port) "
-            + "-c 16384 -np 1 --jinja --api-key \(apiKey)"
+        let url = serverURL
+        let port = url?.port ?? 8081
+        let host = url?.host == "::1" ? "::1" : "127.0.0.1"
+        return "llama-server -m <model.gguf> --alias <name> --host \(host) --port \(port) "
+            + "-c 16384 -np 1 --jinja --api-key-file "
+            + Self.shellQuoted(keyFilePath ?? "<key file>")
+    }
+
+    /// `text` in single quotes for a shell; a path with a space stays one word.
+    nonisolated static func shellQuoted(_ text: String) -> String {
+        guard text.hasPrefix("<") == false else { return text }
+        return "'" + text.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     /// The hint for the chosen type, for when the server is off.
@@ -298,6 +358,13 @@ public final class ResearchServerController {
         }
     }
 
+    /// True for llama.cpp when the server did not say how large its context
+    /// window is (or is not looked at yet): the run then uses a small prompt
+    /// budget, which Settings can replace.
+    public var needsPromptBudget: Bool {
+        serverType == .llamacpp && connection?.contextTokens == nil
+    }
+
     // MARK: - Looking at the server
 
     /// Looks at the server now and shows that it is looking. For the Check button.
@@ -305,11 +372,53 @@ public final class ResearchServerController {
         await look(showProgress: true)
     }
 
-    /// Looks at the server again without changing what the card shows until
-    /// the answer is in. For the periodic refresh.
-    public func refresh() async {
+    /// Asks the server for its model list again, without changing what the
+    /// card shows until the answer is in. For the button beside the model
+    /// picker.
+    public func refreshModels() async {
         guard state != .checking else { return }
         await look(showProgress: false)
+    }
+
+    /// The periodic look. A server that is ready is asked only its status
+    /// route (TUFF `/tuff/v1/status`, llama.cpp `/health`), which costs
+    /// nothing; the model list is fetched again only when that route says
+    /// something changed, on Check, or from the model picker's button. Any
+    /// other state is looked at in full, since the server may have come up.
+    ///
+    /// TUFF unloads its model after a time without requests. Whether this
+    /// route counts as a request, so that an open window would keep the model
+    /// in memory, is checked on the Mac (the idle-unload check of step 3).
+    public func refresh() async {
+        guard let kind = serverType.kind, let url = serverURL else {
+            await look(showProgress: false)
+            return
+        }
+        switch state {
+        case .checking:
+            return
+        case .notChecked, .problem:
+            await look(showProgress: false)
+        case .ready, .off:
+            let mine = generation
+            let quick = await Self.quickLook(kind: kind, url: url, transport: transport)
+            // The person changed the type or address meanwhile: this answer is old.
+            guard mine == generation else { return }
+            lastChecked = Date()
+            switch (quick, state) {
+            case (.alive, .ready):
+                return
+            case (.gone(let reason), _):
+                if state != .off || offReason != reason {
+                    models = []
+                    connection = nil
+                    offReason = reason
+                    state = .off
+                }
+            default:
+                await look(showProgress: false)
+            }
+        }
     }
 
     private func look(showProgress: Bool) async {
@@ -319,6 +428,8 @@ public final class ResearchServerController {
             state = .problem("\(type.displayName) support comes later.")
             return
         }
+        // Whatever was still on its way is old from here on.
+        generation += 1
         let url: URL
         do {
             url = try Self.parseAddress(text)
@@ -329,7 +440,6 @@ public final class ResearchServerController {
             return
         }
         if showProgress { state = .checking }
-        generation += 1
         let mine = generation
         let outcome = await Self.inspect(
             kind: kind, url: url, authorization: Self.authorization(for: kind, key: apiKey),
@@ -338,10 +448,11 @@ public final class ResearchServerController {
         guard mine == generation else { return }
         lastChecked = Date()
         switch outcome {
-        case .ready(let listed, let version):
+        case .ready(let listed, let version, let contextTokens):
             models = listed
             connection = ResearchServerConnection(
-                kind: kind, version: version, streaming: kind == .tuff && tuffStreaming)
+                kind: kind, version: version, streaming: kind == .tuff && tuffStreaming,
+                contextTokens: contextTokens)
             offReason = nil
             state = .ready
         case .off(let reason):
@@ -357,21 +468,115 @@ public final class ResearchServerController {
         }
     }
 
+    /// `/v1/models` and `/props` live at the server's root, whether the
+    /// address ends in `/v1` or not.
+    nonisolated static func endpoint(_ url: URL, _ path: String) -> URL? {
+        var base = url.absoluteString
+        if base.hasSuffix("/v1") { base.removeLast(3) }
+        return URL(string: base + path)
+    }
+
+    nonisolated static func describe(_ error: any Error) -> String {
+        if let error = error as? URLError, error.code == .timedOut {
+            return "no answer within \(Int(requestTimeout)) seconds"
+        }
+        return error.localizedDescription
+    }
+
+    /// The cheap look: TUFF's status route, llama.cpp's `/health` (which
+    /// llama-server answers without a key, 503 while it loads its model).
+    nonisolated static func quickLook(kind: ResearchServerKind,
+                                      url: URL,
+                                      transport: any ResearchHTTPTransport) async -> QuickLook {
+        switch kind {
+        case .tuff:
+            switch await ResearchServerConnection.probe(
+                serverURL: url, transport: transport, timeout: requestTimeout) {
+            case .tuff: return .alive
+            case .unreachable(let reason): return .gone(reason)
+            case .other: return .changed
+            }
+        case .llamacpp:
+            guard let health = endpoint(url, "/health") else { return .changed }
+            do {
+                let response = try await transport.send(
+                    method: "GET", url: health, body: nil, timeout: requestTimeout)
+                // A key refusal is found by the full look, not here.
+                return [200, 401, 403].contains(response.status) ? .alive : .changed
+            } catch {
+                return .gone(describe(error))
+            }
+        }
+    }
+
+    /// What llama.cpp's `/props` said.
+    enum Props: Equatable, Sendable {
+        /// Looks like llama.cpp; `n_ctx` when it is there.
+        case llamacpp(contextTokens: Int?)
+        case keyRefused(Int)
+        case notLlamaCpp(String)
+        case off(String)
+    }
+
+    /// Asks `/props` with the key. The shapes below are what recent
+    /// llama-server builds answer; the check is tolerant (any JSON object
+    /// with `default_generation_settings` is llama.cpp, `n_ctx` is optional)
+    /// because the llama.cpp probe on the Mac confirms them.
+    nonisolated static func props(url: URL,
+                                  authorization: String?,
+                                  transport: any ResearchHTTPTransport) async -> Props {
+        guard let propsURL = endpoint(url, "/props") else {
+            return .notLlamaCpp("the server address cannot be extended to /props")
+        }
+        let response: ResearchHTTPResponse
+        do {
+            response = try await transport.send(
+                method: "GET", url: propsURL, body: nil, timeout: requestTimeout,
+                authorization: authorization)
+        } catch {
+            return .off(describe(error))
+        }
+        switch response.status {
+        case 200:
+            break
+        case 401, 403:
+            return .keyRefused(response.status)
+        default:
+            return .notLlamaCpp("HTTP \(response.status) from /props")
+        }
+        guard let json = try? ResearchJSON.decode(response.body), json.objectValue != nil,
+              let settings = json["default_generation_settings"], settings.objectValue != nil
+        else {
+            return .notLlamaCpp("no default_generation_settings in /props")
+        }
+        let window = settings["n_ctx"]?.intValue
+        return .llamacpp(contextTokens: window.flatMap { $0 > 0 ? $0 : nil })
+    }
+
+    nonisolated static func keyRefusedMessage(_ status: Int) -> String {
+        "The server refused the key (HTTP \(status)). Start llama-server again with the "
+            + "command below, so that it uses the key file SandSeek sends."
+    }
+
     /// Asks the server who it is and which models it lists. The chosen type
     /// must match what answers: a TUFF address that does not answer TUFF's
-    /// status route, or a llama.cpp address that does, is reported as it is.
+    /// status route, or a llama.cpp address that answers it or whose `/props`
+    /// does not look like llama.cpp, is reported as it is.
     nonisolated static func inspect(kind: ResearchServerKind,
                                     url: URL,
                                     authorization: String?,
                                     transport: any ResearchHTTPTransport) async -> Outcome {
-        let probe = await ResearchServerConnection.probe(serverURL: url, transport: transport)
+        let probe = await ResearchServerConnection.probe(
+            serverURL: url, transport: transport, timeout: requestTimeout)
         var version: String?
+        var contextTokens: Int?
         switch (kind, probe) {
         case (_, .unreachable(let reason)):
             return .off(reason)
         case (.tuff, .other(let status)):
             return .problem("A server answers at \(url.absoluteString), but not as TUFF "
-                + "(HTTP \(status) from /tuff/v1/status). If it is llama.cpp, choose llama.cpp.")
+                + "(HTTP \(status) from /tuff/v1/status). TUFF older than 8.3.1 has no status "
+                + "route. If it is llama.cpp, choose llama.cpp.")
         case (.llamacpp, .tuff):
             return .problem("A TUFF server answers at \(url.absoluteString), not llama.cpp. "
                 + "Choose TUFF, or give llama.cpp another port.")
@@ -380,25 +585,36 @@ public final class ResearchServerController {
         default:
             break
         }
-        var base = url.absoluteString
-        if base.hasSuffix("/v1") { base.removeLast(3) }
-        guard let modelsURL = URL(string: base + "/v1/models") else {
+        if kind == .llamacpp {
+            switch await props(url: url, authorization: authorization, transport: transport) {
+            case .llamacpp(let window):
+                contextTokens = window
+            case .keyRefused(let status):
+                return .problem(keyRefusedMessage(status))
+            case .notLlamaCpp(let detail):
+                return .problem("A server answers at \(url.absoluteString), but it does not "
+                    + "look like llama.cpp (\(detail)). If it is TUFF, choose TUFF. Ollama and "
+                    + "LM Studio are not supported yet.")
+            case .off(let reason):
+                return .off(reason)
+            }
+        }
+        guard let modelsURL = endpoint(url, "/v1/models") else {
             return .problem("The server address cannot be extended to /v1/models.")
         }
         let response: ResearchHTTPResponse
         do {
             response = try await transport.send(
-                method: "GET", url: modelsURL, body: nil, timeout: 5, authorization: authorization)
+                method: "GET", url: modelsURL, body: nil, timeout: requestTimeout,
+                authorization: authorization)
         } catch {
-            return .off(error.localizedDescription)
+            return .off(describe(error))
         }
         switch response.status {
         case 200:
             break
         case 401, 403:
-            return .problem("The server refused the key (HTTP \(response.status)). Start "
-                + "llama-server again with the command below, so its --api-key is the one "
-                + "SandSeek sends.")
+            return .problem(keyRefusedMessage(response.status))
         default:
             return .problem("The server answered /v1/models with HTTP \(response.status).")
         }
@@ -412,6 +628,10 @@ public final class ResearchServerController {
         guard !list.data.isEmpty else {
             return .problem("The server is running but lists no model. Load one first.")
         }
-        return .ready(models: list.data.map { ResearchServedModel(id: $0.id) }, version: version)
+        // The same id twice would collide in the picker.
+        var seen = Set<String>()
+        let listed = list.data.map(\.id).filter { seen.insert($0).inserted }
+            .map { ResearchServedModel(id: $0) }
+        return .ready(models: listed, version: version, contextTokens: contextTokens)
     }
 }

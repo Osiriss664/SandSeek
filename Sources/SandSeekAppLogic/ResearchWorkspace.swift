@@ -55,9 +55,11 @@ public final class ResearchWorkspace {
         sandbox.adoptedFromLastRun || lastUsedStart == sandbox.freshStarts
     }
 
-    /// Looks at both services. The model server is left alone while a
-    /// question runs: it is busy with that question, and a slow answer to a
-    /// status check must not look like a server that went away.
+    /// Looks at both services (the model server only by its status route
+    /// while it is ready; see `ResearchServerController.refresh`). The model
+    /// server is left alone while a question runs: it is busy with that
+    /// question, and a slow answer to a status check must not look like a
+    /// server that went away.
     public func refresh() async {
         if run.isRunning {
             await sandbox.refresh()
@@ -106,11 +108,26 @@ public final class ResearchWorkspace {
         selectedReportID = nil
         run.start(
             question: question,
-            settings: settings,
+            settings: Self.applyingPromptBudget(
+                to: settings, connection: connection, budget: presets.llamaPromptBudget),
             serverURL: serverURL,
             sandboxURL: sandbox.baseURL,
             connection: connection,
             authorization: server.authorization)
+    }
+
+    /// A llama.cpp server that does not say how large its context is gets the
+    /// budget set in Settings, if there is one; otherwise the loop's small
+    /// fallback applies. A budget already in the settings is kept.
+    static func applyingPromptBudget(to settings: ResearchRunSettings,
+                                     connection: ResearchServerConnection,
+                                     budget: Int?) -> ResearchRunSettings {
+        var settings = settings
+        if connection.kind == .llamacpp, connection.contextTokens == nil,
+           settings.contextCharacters == nil {
+            settings.contextCharacters = budget
+        }
+        return settings
     }
 
     /// The report to show: the run's own while it is the latest thing done,

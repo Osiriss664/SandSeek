@@ -10,6 +10,47 @@ private final class NothingListens: ResearchHTTPTransport, @unchecked Sendable {
     }
 }
 
+/// Answers like TUFF, but holds every request until `release()`, so a test can
+/// change the address while a look is under way.
+private final class SlowServices: ResearchHTTPTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private var asked = false
+    private var released = false
+    private let inner = FakeResearchServices()
+
+    func waitUntilAsked() async {
+        while !lock.withLock({ asked }) { try? await Task.sleep(for: .milliseconds(5)) }
+    }
+
+    func release() { lock.withLock { released = true } }
+
+    func send(method: String, url: URL, body: Data?) async throws -> ResearchHTTPResponse {
+        lock.withLock { asked = true }
+        while !lock.withLock({ released }) { try await Task.sleep(for: .milliseconds(5)) }
+        return try await inner.send(method: method, url: url, body: body)
+    }
+}
+
+/// A server whose every request runs out of time.
+private final class TimedOutServices: ResearchHTTPTransport, @unchecked Sendable {
+    func send(method: String, url: URL, body: Data?) async throws -> ResearchHTTPResponse {
+        throw URLError(.timedOut)
+    }
+}
+
+/// A server that is not TUFF and answers `/props` with a fixed text.
+private final class FixedPropsServices: ResearchHTTPTransport, @unchecked Sendable {
+    let text: String
+
+    init(body text: String) { self.text = text }
+
+    func send(method: String, url: URL, body: Data?) async throws -> ResearchHTTPResponse {
+        url.path == "/props"
+            ? ResearchHTTPResponse(status: 200, body: Data(text.utf8))
+            : ResearchHTTPResponse(status: 404, body: Data())
+    }
+}
+
 @Suite @MainActor struct ResearchServerControllerTests {
     private func controller(
         services: any ResearchHTTPTransport = FakeResearchServices(),
@@ -93,6 +134,20 @@ private final class NothingListens: ResearchHTTPTransport, @unchecked Sendable {
             == "http://127.0.0.1:8080")
     }
 
+    @Test func anAddressNeedsAPortAndNotTheSandboxsPort() {
+        #expect(throws: ResearchError.self) {
+            _ = try ResearchServerController.parseAddress("http://127.0.0.1")
+        }
+        #expect(throws: ResearchError.self) {
+            _ = try ResearchServerController.parseAddress("localhost")
+        }
+        // The key would go to the sandbox, which reaches the internet.
+        #expect(throws: ResearchError.self) {
+            _ = try ResearchServerController.parseAddress("http://127.0.0.1:9100")
+        }
+        #expect(ResearchServerController.sandboxPort == ResearchSandboxController.port)
+    }
+
     @Test func otherAddressesAreRefused() {
         for text in ["http://192.168.1.5:8080", "http://10.0.0.2:8080", "http://example.com",
                      "https://127.0.0.1:8080", "http://127.0.0.1.example.com:8080",
@@ -173,10 +228,95 @@ private final class NothingListens: ResearchHTTPTransport, @unchecked Sendable {
         let server = controller(services: services)
         await server.refresh()
         #expect(server.state == .ready)
-        // Same address, nothing there any more.
-        let gone = controller(services: NothingListens())
-        await gone.refresh()
-        #expect(gone.state == .off)
+        #expect(!server.models.isEmpty)
+
+        services.setDown(true)
+        await server.refresh()
+        #expect(server.state == .off)
+        #expect(server.offReason != nil)
+        #expect(server.models.isEmpty)
+        #expect(server.connection == nil)
+
+        // It comes back: the next refresh looks at it in full.
+        services.setDown(false)
+        await server.refresh()
+        #expect(server.state == .ready)
+        #expect(!server.models.isEmpty)
+    }
+
+    @Test func aReadyServerIsOnlyAskedItsStatusRouteWhenPolled() async {
+        let services = FakeResearchServices()
+        let server = controller(services: services)
+        await server.check()
+        #expect(server.state == .ready)
+        services.clearPaths()
+
+        await server.refresh()
+        await server.refresh()
+        #expect(services.paths == ["/tuff/v1/status", "/tuff/v1/status"])
+        #expect(server.state == .ready)
+
+        // The model list is fetched again on request only.
+        await server.refreshModels()
+        #expect(services.paths.contains("/v1/models"))
+    }
+
+    @Test func aReadyLlamaCppServerIsOnlyAskedHealthWhenPolled() async {
+        let services = FakeResearchServices(
+            tuffStatus: false, requiredKey: "test-key", llamaContext: 8192)
+        let server = controller(services: services)
+        server.select(.llamacpp)
+        await server.check()
+        #expect(server.state == .ready)
+        services.clearPaths()
+
+        await server.refresh()
+        #expect(services.paths == ["/health"])
+        #expect(server.state == .ready)
+    }
+
+    @Test func aServerThatChangedUnderAReadyCardIsLookedAtInFull() async {
+        let services = FakeResearchServices()
+        let server = controller(services: services)
+        await server.check()
+        #expect(server.state == .ready)
+        // The status route now answers something that is not TUFF's.
+        services.setTuffStatus(false)
+        await server.refresh()
+        guard case .problem(let message) = server.state else {
+            Issue.record("expected a problem, got \(server.state)")
+            return
+        }
+        #expect(message.contains("not as TUFF"))
+        #expect(server.models.isEmpty)
+        // A problem is looked at in full again on each refresh, so it clears.
+        services.setTuffStatus(true)
+        await server.refresh()
+        #expect(server.state == .ready)
+    }
+
+    @Test func aStaleAnswerIsDroppedAfterTheAddressChanged() async {
+        let services = SlowServices()
+        let server = controller(services: services)
+        let look = Task { await server.check() }
+        await services.waitUntilAsked()
+        // The person gives another address while the first look is under way.
+        server.setAddress("http://127.0.0.1:8090")
+        services.release()
+        await look.value
+        #expect(server.state == .notChecked)
+        #expect(server.models.isEmpty)
+        #expect(server.connection == nil)
+        #expect(server.addressText == "http://127.0.0.1:8090")
+    }
+
+    @Test func theTimeoutsAreAlignedAndTheMessageNamesThem() async {
+        #expect(ResearchServerController.requestTimeout == 8)
+        let slow = TimedOutServices()
+        let server = controller(services: slow)
+        await server.check()
+        #expect(server.state == .off)
+        #expect(server.offReason == "no answer within 8 seconds")
     }
 
     @Test func aRunningServerWithoutModelsIsAProblem() async {
@@ -203,7 +343,8 @@ private final class NothingListens: ResearchHTTPTransport, @unchecked Sendable {
 
     @Test func llamaCppIsAskedWithTheKeyAndStaysNonStreaming() async {
         let services = FakeResearchServices(
-            listedModels: ["bonsai"], tuffStatus: false, requiredKey: "test-key")
+            listedModels: ["bonsai"], tuffStatus: false, requiredKey: "test-key",
+            llamaContext: 16_384)
         let server = controller(services: services)
         server.select(.llamacpp)
         await server.check()
@@ -213,12 +354,18 @@ private final class NothingListens: ResearchHTTPTransport, @unchecked Sendable {
         #expect(server.connection?.streaming == false)
         #expect(server.authorization == "Bearer test-key")
         #expect(services.authorizations.contains {
+            $0.path == "/props" && $0.value == "Bearer test-key"
+        })
+        #expect(services.authorizations.contains {
             $0.path == "/v1/models" && $0.value == "Bearer test-key"
         })
+        #expect(server.connection?.contextTokens == 16_384)
+        #expect(!server.needsPromptBudget)
     }
 
-    @Test func aRefusedKeyIsExplained() async {
-        let services = FakeResearchServices(tuffStatus: false, requiredKey: "another-key")
+    @Test func aWrongKeyIsRefusedEvenThoughTheModelListIsPublic() async {
+        let services = FakeResearchServices(
+            tuffStatus: false, requiredKey: "another-key", llamaContext: 8192)
         let server = controller(services: services)
         server.select(.llamacpp)
         await server.check()
@@ -227,8 +374,53 @@ private final class NothingListens: ResearchHTTPTransport, @unchecked Sendable {
             return
         }
         #expect(message.contains("refused the key"))
-        #expect(message.contains("--api-key"))
+        #expect(message.contains("key file"))
         #expect(!message.contains("test-key"))
+        #expect(server.models.isEmpty)
+        #expect(server.connection == nil)
+    }
+
+    @Test func aServerWithoutLlamaCppsPropsIsNotAcceptedAsLlamaCpp() async {
+        // Answers /v1/models and everything else like an OpenAI-compatible
+        // server, but has no /props: Ollama, LM Studio, a second TUFF.
+        let services = FakeResearchServices(tuffStatus: false, llamaContext: nil)
+        let server = controller(services: services)
+        server.select(.llamacpp)
+        await server.check()
+        guard case .problem(let message) = server.state else {
+            Issue.record("expected a problem, got \(server.state)")
+            return
+        }
+        #expect(message.contains("does not look like llama.cpp"))
+        #expect(server.models.isEmpty)
+        #expect(server.connection == nil)
+        #expect(server.state != .ready)
+    }
+
+    @Test func aPropsAnswerWithoutTheExpectedShapeIsNotLlamaCpp() async {
+        let props = FixedPropsServices(body: #"{"hello":"world"}"#)
+        let server = controller(services: props)
+        server.select(.llamacpp)
+        await server.check()
+        guard case .problem(let message) = server.state else {
+            Issue.record("expected a problem, got \(server.state)")
+            return
+        }
+        #expect(message.contains("default_generation_settings"))
+    }
+
+    @Test func llamaCppWithoutAContextSizeAsksForAPromptBudget() async {
+        let services = FakeResearchServices(tuffStatus: false, llamaContext: .some(nil))
+        let server = controller(services: services)
+        server.select(.llamacpp)
+        #expect(server.needsPromptBudget)
+        await server.check()
+        #expect(server.state == .ready)
+        #expect(server.connection?.contextTokens == nil)
+        #expect(server.needsPromptBudget)
+        // TUFF never needs one: its model list gives the window.
+        server.select(.tuff)
+        #expect(!server.needsPromptBudget)
     }
 
     @Test func aTuffServerAtTheLlamaCppAddressIsNamed() async {
@@ -242,17 +434,31 @@ private final class NothingListens: ResearchHTTPTransport, @unchecked Sendable {
         #expect(message.contains("TUFF server answers"))
     }
 
-    @Test func theStartCommandHasTheKeyAndFollowsThePort() {
-        let server = controller(keys: MemoryKeyStore(key: "abc123"))
+    @Test func theStartCommandNamesTheKeyFileAndNeverHoldsTheKey() {
+        let path = "/Users/me/Library/Application Support/SandSeek/State/llamacpp-api-key"
+        let server = controller(keys: MemoryKeyStore(key: "abc123", filePath: path))
         #expect(server.startCommand == nil)
         server.select(.llamacpp)
         #expect(server.startCommand
             == "llama-server -m <model.gguf> --alias <name> --host 127.0.0.1 --port 8081 "
-            + "-c 16384 -np 1 --jinja --api-key abc123")
+            + "-c 16384 -np 1 --jinja --api-key-file "
+            + "'/Users/me/Library/Application Support/SandSeek/State/llamacpp-api-key'")
+        #expect(server.startCommand?.contains("abc123") == false)
+        #expect(server.startCommand?.contains("--api-key ") == false)
         server.setAddress("http://localhost:9191")
         #expect(server.startCommand?.contains("--port 9191") == true)
         // The command always binds loopback, whatever name the address used.
         #expect(server.startCommand?.contains("--host 127.0.0.1") == true)
+        server.setAddress("http://[::1]:9191")
+        #expect(server.startCommand?.contains("--host ::1") == true)
+    }
+
+    @Test func aPathWithAQuoteIsQuotedForTheShell() {
+        #expect(ResearchServerController.shellQuoted("/a b/it's") == "'/a b/it'\\''s'")
+        let server = controller(keys: MemoryKeyStore(key: "k"))
+        server.select(.llamacpp)
+        // No file: a placeholder, still not the key.
+        #expect(server.startCommand?.hasSuffix("--api-key-file <key file>") == true)
     }
 
     @Test func hintsNameHowToStartEachType() {
@@ -264,8 +470,13 @@ private final class NothingListens: ResearchHTTPTransport, @unchecked Sendable {
         #expect(server.startHint.contains("command below"))
         #expect(ResearchServerController.memoryNote.contains("one model server"))
         #expect(ResearchServerController.memoryNote.contains("16 GB"))
-        #expect(ResearchServerController.keyNote.contains("2b"))
-        #expect(ResearchServerController.keyNote.contains("--api-key"))
+        #expect(ResearchServerController.keyNote.contains("--api-key-file"))
+        // No plan jargon in text people read.
+        for text in [ResearchServerController.keyNote, ResearchServerController.memoryNote,
+                     server.startHint] {
+            #expect(!text.contains("2b"))
+            #expect(!text.contains("Abschnitt"))
+        }
     }
 
     @Test func theKeyIsMadeOnceAndKept() {
@@ -299,5 +510,22 @@ private final class NothingListens: ResearchHTTPTransport, @unchecked Sendable {
         let folder = try FileManager.default.attributesOfItem(
             atPath: url.deletingLastPathComponent().path)
         #expect((folder[.posixPermissions] as? NSNumber)?.intValue == 0o700)
+        #expect(store.keyFilePath == url.path)
+    }
+
+    @Test func aFolderThatExistedWithOpenPermissionsIsClosed() throws {
+        let folder = temporaryDirectory().appendingPathComponent("State", isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: folder, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o755])
+        let store = FileKeyStore(url: folder.appendingPathComponent("llamacpp-api-key"))
+        try store.saveKey("secret-value")
+        let attributes = try FileManager.default.attributesOfItem(atPath: folder.path)
+        #expect((attributes[.posixPermissions] as? NSNumber)?.intValue == 0o700)
+        // Saving again over an existing file keeps it private.
+        try store.saveKey("another-value")
+        let file = try FileManager.default.attributesOfItem(
+            atPath: folder.appendingPathComponent("llamacpp-api-key").path)
+        #expect((file[.posixPermissions] as? NSNumber)?.intValue == 0o600)
     }
 }

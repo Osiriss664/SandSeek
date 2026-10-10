@@ -11,27 +11,43 @@ final class FakeResearchServices: ResearchHTTPTransport, @unchecked Sendable {
     private var listedModels: [String]?
     private var tuffStatus: Bool
     private var requiredKey: String?
+    private var llamaContext: Int??
+    private var isDown = false
+    private var chatRequests: [ResearchJSON] = []
     private(set) var paths: [String] = []
     /// The `Authorization` value of each request, by path, in order.
     private var seenAuthorization: [(path: String, value: String?)] = []
 
     /// `tuffStatus`: whether `/tuff/v1/status` answers like TUFF. A
-    /// `requiredKey` makes `/v1/models` answer 401 unless the request carries
-    /// `Authorization: Bearer <key>`, as llama-server does with `--api-key`.
+    /// `requiredKey` makes `/props` answer 401 unless the request carries
+    /// `Authorization: Bearer <key>`; `/v1/models` and `/health` stay public,
+    /// as in recent llama-server builds (the Mac's llama.cpp probe confirms
+    /// that). `llamaContext` makes `/props` answer like llama.cpp, with that
+    /// `n_ctx` (`.some(nil)`: llama.cpp without `n_ctx`); nil leaves `/props`
+    /// unanswered (404), as TUFF and others do.
     init(modelReplies: [ResearchHTTPResponse] = [],
          sandboxHealthy: Bool = true,
          listedModels: [String]? = ["gemma-4-e4b-it"],
          tuffStatus: Bool = true,
-         requiredKey: String? = nil) {
+         requiredKey: String? = nil,
+         llamaContext: Int?? = nil) {
         self.modelReplies = modelReplies
         self.sandboxHealthy = sandboxHealthy
         self.listedModels = listedModels
         self.tuffStatus = tuffStatus
         self.requiredKey = requiredKey
+        self.llamaContext = llamaContext
     }
 
     func setSandboxHealthy(_ healthy: Bool) { lock.withLock { sandboxHealthy = healthy } }
     func setListedModels(_ models: [String]?) { lock.withLock { listedModels = models } }
+    /// While set, every request fails as if nothing listened.
+    func setTuffStatus(_ answers: Bool) { lock.withLock { tuffStatus = answers } }
+    func setDown(_ down: Bool) { lock.withLock { isDown = down } }
+    func clearPaths() { lock.withLock { paths = [] } }
+
+    /// The decoded body of each chat request, in order.
+    var chatBodies: [ResearchJSON] { lock.withLock { chatRequests } }
 
     var authorizations: [(path: String, value: String?)] { lock.withLock { seenAuthorization } }
 
@@ -48,23 +64,33 @@ final class FakeResearchServices: ResearchHTTPTransport, @unchecked Sendable {
     private func respond(url: URL, body: Data?,
                          authorization: String?) async throws -> ResearchHTTPResponse {
         let json = try body.map { try ResearchJSON.decode($0) }
+        if lock.withLock({ isDown }) { throw URLError(.cannotConnectToHost) }
         return lock.withLock {
             paths.append(url.path)
             switch url.path {
+            case "/props":
+                if let requiredKey, authorization != "Bearer " + requiredKey {
+                    return ResearchHTTPResponse(status: 401, body: Data(
+                        #"{"error":{"message":"Invalid API Key","type":"authentication_error","code":401}}"#.utf8))
+                }
+                guard let llamaContext else { return ResearchHTTPResponse(status: 404, body: Data()) }
+                var settings: [String: ResearchJSON] = ["temperature": .number(0.8)]
+                if let window = llamaContext { settings["n_ctx"] = .integer(window) }
+                return Self.json(.object([
+                    "default_generation_settings": .object(settings),
+                    "total_slots": .integer(1),
+                ]))
             case "/tuff/v1/status":
                 return tuffStatus
                     ? Self.json(.object(["version": .string("8.3.1")]))
                     : ResearchHTTPResponse(status: 404, body: Data())
             case "/v1/chat/completions":
+                if let json { chatRequests.append(json) }
                 guard !modelReplies.isEmpty else {
                     return ResearchHTTPResponse(status: 500, body: Data("no reply scripted".utf8))
                 }
                 return modelReplies.removeFirst()
             case "/v1/models":
-                if let requiredKey, authorization != "Bearer " + requiredKey {
-                    return ResearchHTTPResponse(status: 401, body: Data(
-                        #"{"error":{"message":"Invalid API Key","type":"authentication_error","code":401}}"#.utf8))
-                }
                 guard let listedModels else { return ResearchHTTPResponse(status: 404, body: Data()) }
                 return Self.json(.object([
                     "object": .string("list"),
@@ -131,6 +157,7 @@ final class FakeProcessRunner: ResearchProcessRunning, @unchecked Sendable {
     private let lock = NSLock()
     private let reply: @Sendable ([String]) -> ResearchProcessResult
     private var recorded: [[String]] = []
+    private var recordedEnvironments: [[String: String]] = []
 
     /// By default every command succeeds, and the in-VM privilege check
     /// reports the unprivileged user the sandbox should run as.
@@ -139,6 +166,8 @@ final class FakeProcessRunner: ResearchProcessRunning, @unchecked Sendable {
     }
 
     var commands: [[String]] { lock.withLock { recorded } }
+    /// The environment each command ran with, in order.
+    var environments: [[String: String]] { lock.withLock { recordedEnvironments } }
 
     @Sendable static func healthy(_ command: [String]) -> ResearchProcessResult {
         if command.contains("python3") { return ResearchProcessResult(status: 0, output: "10001 none\n") }
@@ -198,7 +227,10 @@ final class FakeProcessRunner: ResearchProcessRunning, @unchecked Sendable {
              environment: [String: String],
              timeout: TimeInterval) async throws -> ResearchProcessResult {
         let command = [executable.lastPathComponent] + arguments
-        lock.withLock { recorded.append(command) }
+        lock.withLock {
+            recorded.append(command)
+            recordedEnvironments.append(environment)
+        }
         return reply(command)
     }
 }
@@ -233,12 +265,11 @@ func fakeSandboxBundle() throws -> URL {
     return root
 }
 
-/// Sandbox files from `bundle` (a new fake one when none is given), copied
-/// to a new install folder; no developer override.
-func testResources(bundle: URL? = nil,
-                   install: URL = temporaryDirectory("SandSeekInstall")) throws -> SandboxResources {
-    SandboxResources(bundledRoot: try bundle ?? fakeSandboxBundle(), installRoot: install,
-                     environment: [:])
+/// Sandbox files from `bundle` (a new fake one when none is given), run in
+/// place; no developer override.
+func testResources(bundle: URL? = nil) throws -> SandboxResources {
+    SandboxResources(bundledRoot: try bundle ?? fakeSandboxBundle(), environment: [:],
+                     allowsOverride: false)
 }
 
 /// Settings kept in memory, so tests never touch real preferences.
@@ -260,10 +291,12 @@ final class MemoryKeyStore: ResearchKeyStoring {
     private let lock = NSLock()
     private var key: String?
     private let failsToSave: Bool
+    let keyFilePath: String?
 
-    init(key: String? = nil, failsToSave: Bool = false) {
+    init(key: String? = nil, failsToSave: Bool = false, filePath: String? = nil) {
         self.key = key
         self.failsToSave = failsToSave
+        keyFilePath = filePath
     }
 
     var stored: String? { lock.withLock { key } }
