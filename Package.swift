@@ -37,12 +37,20 @@ let package = Package(
 #if os(macOS)
 package.products += [
     .library(name: "SandSeekAppLogic", targets: ["SandSeekAppLogic"]),
+    .executable(name: "SandSeekApp", targets: ["SandSeekApp"]),
 ]
 package.targets += [
     .target(
         name: "SandSeekAppLogic",
         dependencies: ["SandSeekCore"],
         path: "Sources/SandSeekAppLogic"
+    ),
+    // The window. The `@main` struct is in SandSeekApplication.swift, not in a
+    // main.swift. `Scripts/package_app.sh` builds this into SandSeek.app.
+    .executableTarget(
+        name: "SandSeekApp",
+        dependencies: ["SandSeekAppLogic", "SandSeekCore"],
+        path: "Sources/SandSeekApp"
     ),
     .testTarget(
         name: "SandSeekAppLogicTests",
