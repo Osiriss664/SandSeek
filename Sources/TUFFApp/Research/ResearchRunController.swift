@@ -11,6 +11,8 @@ public struct ResearchRunSettings: Equatable, Sendable {
     public var showThinking: Bool
     public var maxSteps: Int
     public var pageCharacters: Int
+    /// Passages that best match the question first, as `--passages`.
+    public var passages: Bool
     /// Reasoning on or off, as `--thinking`; nil leaves it to Show thinking
     /// and otherwise to the model.
     public var thinking: Bool?
@@ -32,6 +34,7 @@ public struct ResearchRunSettings: Equatable, Sendable {
                 showThinking: Bool = true,
                 maxSteps: Int = 8,
                 pageCharacters: Int = 3_000,
+                passages: Bool = ResearchOptions().passages,
                 thinking: Bool? = nil,
                 maxTokensLimit: Int? = nil,
                 contextCharacters: Int? = nil,
@@ -47,6 +50,7 @@ public struct ResearchRunSettings: Equatable, Sendable {
         self.showThinking = showThinking
         self.maxSteps = maxSteps
         self.pageCharacters = pageCharacters
+        self.passages = passages
         self.thinking = thinking
         self.maxTokensLimit = maxTokensLimit
         self.contextCharacters = contextCharacters
@@ -78,6 +82,12 @@ public struct ResearchRunSettings: Equatable, Sendable {
         options.maxSteps = maxSteps.clamped(to: ResearchOptions.maxStepsRange)
         options.pageSliceCharacters = pageCharacters.clamped(
             to: ResearchOptions.pageCharactersRange)
+        options.passages = passages
+        // The page size setting still says 3,000 unless the person changed
+        // it; only a changed one overrides the smaller passage read.
+        if pageCharacters != ResearchOptions().pageSliceCharacters {
+            options.passageSliceCharacters = options.pageSliceCharacters
+        }
         options.contextBudgetCharacters = contextCharacters?.clamped(
             to: ResearchOptions.contextCharactersRange)
         options.searchResults = searchResults.clamped(to: ResearchOptions.searchResultsRange)

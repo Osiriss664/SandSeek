@@ -39,6 +39,7 @@ launches; **Restore Defaults** resets them.
 | `--thinking on\|off` | Thinking | model's own | Reasoning on or off. Show thinking (`--show-thinking`) turns it on unless it is off; in the app, Show thinking is on by default. |
 | `--max-tokens <64...32768>` | Token limit per step | 2048, or 8192 with reasoning | Tokens the model may write per step. |
 | `--page-chars <500...20000>` | Page text per read | 3000 | Characters one page read returns. |
+| `--passages on\|off` | Read the passages that best match the question first | off | `open_page` returns the best matching paragraphs of a page first, then the next best on a later read, instead of the page front to back (see [Relevant passages](#relevant-passages)). A read is then 2000 characters unless `--page-chars` is given. |
 | `--context-chars <2000...1000000>` | Prompt budget | from the model | How long the conversation may grow before older results are shortened. |
 | `--search-results <1...10>` | Results per search | 5 | Results each search returns. |
 | `--tool-calls <1...8>` | Tool calls per step | 4 | Searches and page reads the model may ask for in one step. |
@@ -127,7 +128,7 @@ The loop gives the model two tools and no others:
 | Tool | What it does |
 | --- | --- |
 | `web_search(query)` | Searches the web. Uses DuckDuckGo's HTML results, or a SearXNG instance when `SEARXNG_URL` is set for the sandbox. |
-| `open_page(url, offset)` | Reads a page as extracted text, in slices of `--page-chars` characters. |
+| `open_page(url, offset)` | Reads a page as extracted text, in slices of `--page-chars` characters. With `--passages on` it returns the best matching passages instead (see [Relevant passages](#relevant-passages)), and `offset` counts passages. |
 
 An `open_page` call whose URL is not http or https (a bare host name, `file:`)
 is not sent to the sandbox. The model gets a tool error, and the progress
@@ -429,6 +430,67 @@ comes from OpenAI simple-evals (MIT); see the notice at the top of the script.
 python3 -m unittest Sandbox/web-research/test_server.py   # sandbox policy, no network
 Scripts/test.sh --filter TUFFResearch                     # loop, with fake services
 ```
+
+## Relevant passages
+
+`--passages on` (the app: **Read the passages that best match the question
+first**) changes what one `open_page` call returns. It is off by default, so a
+run can be compared with and without it.
+
+- **Ranking happens in the sandbox.** The Mac sends the URL, the offset, the
+  size and a query; the sandbox splits the extracted page text into
+  paragraphs (a line is a paragraph; a heading or other line under 60
+  characters is joined with the lines after it; a paragraph over 600
+  characters is cut after a sentence), scores them with BM25 in pure Python
+  (no new dependency, words cut to six letters so `Zeitungen` finds
+  `Zeitung`, numbers matched whole, German and English stop words left out
+  of the query), and returns the best ones that fit. Equal scores keep page
+  order and a query with no usable word reads the page from the start, so
+  the same request always gets the same answer. The Mac still only receives
+  text.
+- **The query** is the user's question plus the model's search query whose
+  results held the page (the latest search when none did). It is fixed at the
+  first read of a page, so reading on continues the same order. `open_page`
+  has no reason field, so nothing else is added.
+- **The result** lists the passages in page order, each behind a line
+  `[characters 3000-3048]` with its place in the page, and a line `[...]`
+  between passages that did not stand next to each other on the page. The
+  sandbox numbers the paragraphs of a page in page order (`index`); two
+  passages whose numbers differ by one are neighbours and get no `[...]`. A
+  page line that looks like `[...]` or `[characters 1-2]` is changed to start
+  with `(`, so a page cannot fake the loop's lines. The header reads `Passages 1-3 of 24. Best matches for
+  the question first, shown in page order; …` and, when more are left,
+  `More passages: call open_page with offset 3.` Here `offset` is the number
+  of passages already given, best first, not a character position. The
+  passages are inside the same untrusted block as any page text, cleaned the
+  same way.
+- **Repeats.** The duplicate check keys on the URL and the `Passages 1-3 of
+  24` range, as it does on `Characters X-Y` otherwise: the same passages of a
+  page are refused, the next ones are a new read.
+- **Size.** One read is 2000 characters, not 3000. The best-ranked passages
+  come first, so the characters after the first 2000 are mostly weaker text,
+  and a step's tool result shrinks by a third (the live22 Berlin run added a
+  median of 3,484 characters per step, at most 9,911, and shortened older
+  results once the conversation outgrew its budget). `--page-chars` sets the
+  size for both modes. In the app the page size setting overrides it only
+  when it differs from the default of 3000.
+- **Figure check.** The check still runs against the page text that was read:
+  the passages, in page order. Passages that were next to each other on the
+  page are joined by a line break; passages that were not are separated by
+  more empty lines than the check's 300-character window (neighbours are
+  decided by the same `index`), so a name at the
+  end of one passage is never taken to stand near a figure in the next. The
+  position markers and the `[...]` lines are not part of that text.
+- **Reading past the end.** An `offset` beyond the last passage returns a
+  note that offset counts passages and makes no source.
+- **Older sandbox.** The sandbox's `/health` answers `"passages": true`. With
+  `--passages on`, the start-up health check fails at once when that is
+  missing: "The web sandbox is older than this TUFF and cannot rank passages.
+  Rebuild it (`Scripts/research_sandbox.sh build`), or turn off 'Read the
+  passages that best match the question first' (`--passages off`)." A read
+  that comes back as characters gives the same message.
+- **In the report.** A run with passages on says so in its report ("Pages
+  were read as passages … `--passages on`").
 
 ## Limits
 

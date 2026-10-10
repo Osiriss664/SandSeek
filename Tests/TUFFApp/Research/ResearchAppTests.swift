@@ -492,6 +492,14 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
         #expect(wild.stepTimeout == 3_600)
         #expect(options.thinkingMinutes == 60)
         #expect(ResearchRunSettings(model: "m", thinkingMinutes: 0).options.thinkingMinutes == 1)
+
+        // Passages are off unless asked for; a read is then 2,000 characters,
+        // or the page size the person set.
+        #expect(!ResearchRunSettings(model: "m").options.passages)
+        let passages = ResearchRunSettings(model: "m", passages: true).options
+        #expect(passages.passages && passages.readCharacters == 2_000)
+        let sized = ResearchRunSettings(model: "m", pageCharacters: 1_200, passages: true).options
+        #expect(sized.readCharacters == 1_200)
     }
 }
 

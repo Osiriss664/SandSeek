@@ -25,6 +25,7 @@ struct ResearchWorkspaceView: View {
     @AppStorage("ResearchSearchResults") private var searchResults = ResearchOptions().searchResults
     @AppStorage("ResearchToolCalls") private var toolCalls = ResearchOptions().maxToolCallsPerTurn
     @AppStorage("ResearchMinimumPages") private var minimumPages = ResearchOptions().minimumPagesRead
+    @AppStorage("ResearchPassages") private var passages = ResearchOptions().passages
     @AppStorage("ResearchAutoOpenPages") private var autoOpenPages = true
     @AppStorage("ResearchNudges") private var nudges = true
     @AppStorage("ResearchRewrite") private var rewrite = true
@@ -218,6 +219,10 @@ struct ResearchWorkspaceView: View {
             GridRow {
                 Toggle("Rewrite answers that cite unread pages", isOn: $rewrite)
                     .help("As --rewrite.")
+                Toggle("Read the passages that best match the question first", isOn: $passages)
+                    .help("A page read returns its best matching paragraphs (2,000 characters unless the page size above was changed), then the next best ones, instead of the page from front to back, as --passages.")
+            }
+            GridRow {
                 Button("Restore Defaults", action: restoreDefaultOptions)
                     .buttonStyle(.link)
             }
@@ -228,6 +233,7 @@ struct ResearchWorkspaceView: View {
         let defaults = ResearchOptions()
         maxSteps = defaults.maxSteps
         pageCharacters = defaults.pageSliceCharacters
+        passages = defaults.passages
         showThinking = true
         thinking = "auto"
         maxTokens = 0
@@ -255,6 +261,7 @@ struct ResearchWorkspaceView: View {
             showThinking: showThinking,
             maxSteps: maxSteps,
             pageCharacters: pageCharacters,
+            passages: passages,
             thinking: thinking == "on" ? true : thinking == "off" ? false : nil,
             maxTokensLimit: maxTokens > 0 ? maxTokens : nil,
             contextCharacters: contextCharacters > 0 ? contextCharacters : nil,

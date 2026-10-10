@@ -358,6 +358,196 @@ href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fdoc&amp;rut=1">Exampl
 <div class="result"><a class="result__a" href="javascript:alert(1)">Bad</a></div>"""
 
 
+class PassageTests(unittest.TestCase):
+    """BM25 passages: `fetch(..., passages=True, query=...)`."""
+
+    FILLER = ("Dies ist ein langer Absatz ohne Bezug zur Frage, er erzaehlt nur von "
+              "Wetter, Wegen und allerlei Dingen am Rand der Stadt. ")
+
+    def paragraphs(self):
+        return [
+            "Einleitung zur Seite " + self.FILLER * 2,
+            "Die Waermepumpe kostet im Einbau etwa 350 Euro pro Quadratmeter Wohnflaeche, "
+            "sagt die Verbraucherzentrale in ihrer Waermepumpe Uebersicht.",
+            "Anderes Thema " + self.FILLER * 3,
+            "Foerderung der Waermepumpe: bis zu 70 Prozent Zuschuss.",
+            "Noch mehr Fuelltext " + self.FILLER * 4,
+        ]
+
+    def tools(self, text):
+        resolve = resolver({"example.com": ["93.184.216.34"]})
+        transport = FakeTransport(
+            {"https://example.com/p": page(text, content_type="text/plain")})
+        return WebTools(resolver=resolve, transport=transport, searxng_url="")
+
+    def text(self):
+        return "\n".join(self.paragraphs())
+
+    def test_split_gives_exact_non_overlapping_slices_in_page_order(self):
+        text = self.text()
+        spans = server.split_passages(text)
+        self.assertEqual(spans, sorted(spans))
+        for (_, end), (start, _) in zip(spans, spans[1:]):
+            self.assertLessEqual(end, start)
+        for start, end in spans:
+            self.assertLessEqual(end - start, server.MAX_PASSAGE_CHARS)
+            self.assertEqual(text[start:end], text[start:end].strip())
+            self.assertTrue(text[start:end])
+
+    def test_split_cuts_long_paragraphs_after_a_sentence(self):
+        text = "Erster Satz hier. " * 80
+        spans = server.split_passages(text)
+        self.assertGreater(len(spans), 1)
+        for start, end in spans:
+            self.assertTrue(text[start:end].endswith("."), text[start:end][-20:])
+
+    def test_split_cuts_text_without_spaces_at_the_limit(self):
+        spans = server.split_passages("x" * 1500)
+        self.assertEqual([end - start for start, end in spans], [600, 600, 300])
+
+    def test_split_keeps_a_short_heading_with_its_section(self):
+        text = "Preise\n" + "Die Preise liegen bei 350 Euro und steigen im Winter an. " * 2
+        spans = server.split_passages(text)
+        self.assertEqual(len(spans), 1)
+        self.assertTrue(text[spans[0][0]:spans[0][1]].startswith("Preise\n"))
+
+    def test_split_of_empty_and_blank_text(self):
+        self.assertEqual(server.split_passages(""), [])
+        self.assertEqual(server.split_passages(" \n\n  \n"), [])
+
+    def test_ranking_puts_the_matching_paragraph_first(self):
+        text = self.text()
+        ranked = server.rank_passages(text, "Was kostet eine Waermepumpe pro Quadratmeter?")
+        start, end = ranked[0]
+        self.assertIn("350 Euro", text[start:end])
+        # Every passage is ranked exactly once.
+        self.assertEqual(sorted(ranked), server.split_passages(text))
+
+    def test_ranking_is_deterministic(self):
+        text = self.text()
+        runs = {tuple(server.rank_passages(text, "Waermepumpe Foerderung")) for _ in range(5)}
+        self.assertEqual(len(runs), 1)
+
+    def test_stems_match_inflections_and_numbers_match_whole(self):
+        text = "Politische Lage im Land und viele Zeitungen.\n" + "Nichts. " * 20 + "\n" \
+            + "Im Jahr 2350 gab es 350 Sitze im Parlament ohne weitere Angaben dazu hier."
+        self.assertIn("politi", server.query_terms("Politics"))
+        ranked = server.rank_passages(text, "Zeitung 350")
+        first = text[ranked[0][0]:ranked[0][1]]
+        self.assertTrue("Zeitungen" in first or " 350 Sitze" in first)
+        self.assertNotIn("350", server.passage_terms("2350"))
+
+    def test_query_without_usable_words_keeps_page_order(self):
+        text = self.text()
+        for query in ("", "was wie der die das ist", "!!!"):
+            self.assertEqual(server.rank_passages(text, query), server.split_passages(text))
+
+    def test_query_terms_drop_stop_words_and_repeat_words(self):
+        self.assertEqual(server.query_terms("Wie hoch ist die Foerderung Foerderung?"),
+                         ["hoch", "foerde"])
+
+    def test_first_read_returns_best_passages_in_page_order_with_positions(self):
+        text = self.text()
+        result = self.tools(text).fetch(
+            "https://example.com/p", 0, 700, passages=True, query="Waermepumpe Quadratmeter 350")
+        self.assertEqual(result["mode"], "passages")
+        parts = result["passages"]
+        self.assertIn("350 Euro", "".join(part["text"] for part in parts))
+        for part in parts:
+            self.assertEqual(text[part["start"]:part["end"]], part["text"])
+        self.assertEqual([p["start"] for p in parts], sorted(p["start"] for p in parts))
+        self.assertLessEqual(len(result["text"]), 700)
+        self.assertEqual(result["total_chars"], len(text.strip()))
+
+    def test_passages_are_joined_by_the_separator(self):
+        result = self.tools(self.text()).fetch(
+            "https://example.com/p", 0, 1000, passages=True, query="Waermepumpe")
+        self.assertGreater(len(result["passages"]), 1)
+        parts = result["passages"]
+        expected = parts[0]["text"]
+        for before, part in zip(parts, parts[1:]):
+            neighbours = part["index"] == before["index"] + 1
+            expected += ("\n" if neighbours else server.PASSAGE_SEPARATOR) + part["text"]
+        self.assertEqual(result["text"], expected)
+        self.assertIn(server.PASSAGE_SEPARATOR, result["text"])
+        self.assertTrue(server.PASSAGE_SEPARATOR.startswith("\n"))
+        self.assertTrue(server.PASSAGE_SEPARATOR.endswith("\n"))
+
+    def test_continuing_gives_the_next_best_passages_until_all_are_read(self):
+        tools = self.tools(self.text())
+        seen, offset, reads = [], 0, 0
+        while offset is not None:
+            result = tools.fetch("https://example.com/p", offset, 700, passages=True,
+                                 query="Waermepumpe Foerderung")
+            self.assertEqual(result["offset"], offset)
+            seen += [(p["start"], p["end"]) for p in result["passages"]]
+            offset = result["next_offset"]
+            reads += 1
+            self.assertLess(reads, 50)
+        self.assertEqual(len(seen), len(set(seen)))
+        self.assertEqual(sorted(seen), server.split_passages(self.text()))
+        first = tools.fetch("https://example.com/p", 0, 700, passages=True,
+                            query="Waermepumpe Foerderung")
+        later = tools.fetch("https://example.com/p", first["next_offset"], 700, passages=True,
+                            query="Waermepumpe Foerderung")
+        self.assertTrue(set((p["start"], p["end"]) for p in first["passages"]).isdisjoint(
+            (p["start"], p["end"]) for p in later["passages"]))
+
+    def test_passages_carry_their_page_order_index(self):
+        text = self.text()
+        spans = server.split_passages(text)
+        result = self.tools(text).fetch(
+            "https://example.com/p", 0, 5000, passages=True, query="Waermepumpe")
+        self.assertEqual(len(result["passages"]), len(spans))
+        for part in result["passages"]:
+            self.assertEqual(spans[part["index"]], (part["start"], part["end"]))
+        self.assertEqual([p["index"] for p in result["passages"]], list(range(len(spans))))
+        # Everything is neighbours here, so no separator appears.
+        self.assertNotIn(server.PASSAGE_SEPARATOR, result["text"])
+
+    def test_offset_past_the_end_is_empty(self):
+        result = self.tools(self.text()).fetch(
+            "https://example.com/p", 999, 700, passages=True, query="x")
+        self.assertEqual((result["passages"], result["text"], result["next_offset"]), ([], "", None))
+
+    def test_same_request_gives_the_same_answer(self):
+        tools = self.tools(self.text())
+        answers = [tools.fetch("https://example.com/p", 0, 900, passages=True,
+                               query="Waermepumpe 350") for _ in range(3)]
+        self.assertEqual(answers[0], answers[1])
+        self.assertEqual(answers[1], answers[2])
+
+    def test_one_passage_is_always_returned_and_cut_to_a_tiny_limit(self):
+        result = self.tools(self.text()).fetch(
+            "https://example.com/p", 0, 50, passages=True, query="Waermepumpe 350")
+        self.assertEqual(len(result["passages"]), 1)
+        self.assertLessEqual(len(result["passages"][0]["text"]), 50)
+
+    def test_off_keeps_the_character_slice(self):
+        tools = self.tools(self.text())
+        plain = tools.fetch("https://example.com/p", 5, 100, query="ignored")
+        self.assertNotIn("passages", plain)
+        self.assertEqual((plain["offset"], plain["next_offset"]), (5, 105))
+        self.assertEqual(plain["text"], self.text()[5:105])
+
+    def test_passage_text_is_cleaned_like_other_page_text(self):
+        # clean_text runs before the page is cached, so passages inherit it.
+        text = "Waermepumpe\x1b[2J kostet \u200b350 Euro und das ist ein ganzer Satz hier.\n"
+        result = self.tools(text).fetch(
+            "https://example.com/p", 0, 700, passages=True, query="Waermepumpe")
+        for part in result["passages"]:
+            self.assertNotIn("\x1b", part["text"])
+            self.assertNotIn("\u200b", part["text"])
+
+    def test_invalid_arguments(self):
+        tools = self.tools("text")
+        for kwargs in ({"passages": "yes"}, {"query": 5}, {"query": "x" * 4001},
+                       {"passages": 1}):
+            with self.assertRaises(ToolError) as caught:
+                tools.fetch("https://example.com/p", 0, 700, **kwargs)
+            self.assertEqual(caught.exception.code, "invalid_argument")
+
+
 class SearchTests(unittest.TestCase):
     def test_parses_duckduckgo_results_and_drops_ads(self):
         results = server.parse_duckduckgo(DDG)
@@ -568,7 +758,18 @@ class HTTPAPITests(unittest.TestCase):
         return response.status, payload
 
     def test_health(self):
-        self.assertEqual(self.call("GET", "/health"), (200, {"status": "ok"}))
+        self.assertEqual(self.call("GET", "/health"),
+                         (200, {"status": "ok", "passages": True}))
+
+    def test_fetch_passages_round_trip(self):
+        status, payload = self.call("POST", "/v1/fetch", {
+            "url": "https://example.com/a", "passages": True, "query": "cache bounded"})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["mode"], "passages")
+        self.assertIn("bounded", payload["text"])
+        status, payload = self.call("POST", "/v1/fetch", {
+            "url": "https://example.com/a", "passages": "yes"})
+        self.assertEqual(status, 422)
 
     def test_fetch_round_trip(self):
         status, payload = self.call("POST", "/v1/fetch", {"url": "https://example.com/a"})

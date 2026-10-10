@@ -39,6 +39,12 @@ public struct ResearchArguments: Equatable, Sendable {
       --max-tokens <n>         Completion tokens per model turn, 64...32768
                                (default 2048, or 8192 with reasoning on).
       --page-chars <n>         Page text per read, 500...20000 (default 3000).
+      --passages on|off        Let open_page return the passages of a page that
+                               best match the question first (BM25, ranked in
+                               the sandbox), and the next best ones on a later
+                               read, instead of the page from front to back.
+                               With it on a read is 2000 characters unless
+                               --page-chars says otherwise (default off).
       --context-chars <n>      Prompt budget before old results are shortened,
                                2000...1000000 (default: from the model's
                                context window, or 16000 when not listed).
@@ -146,8 +152,11 @@ public struct ResearchArguments: Equatable, Sendable {
                 parsed.maxTokens = try integer(argument, ResearchOptions.maxTokensRange)
                 maxTokensGiven = true
             case "--page-chars":
-                parsed.options.pageSliceCharacters = try integer(
-                    argument, ResearchOptions.pageCharactersRange)
+                let characters = try integer(argument, ResearchOptions.pageCharactersRange)
+                parsed.options.pageSliceCharacters = characters
+                parsed.options.passageSliceCharacters = characters
+            case "--passages":
+                parsed.options.passages = try onOff(argument)
             case "--context-chars":
                 parsed.options.contextBudgetCharacters = try integer(
                     argument, ResearchOptions.contextCharactersRange)

@@ -10,7 +10,8 @@ control characters removed.
 Endpoints (JSON in, JSON out):
   GET  /health
   POST /v1/search  {"query": str, "max_results": int?}
-  POST /v1/fetch   {"url": str, "offset": int?, "max_chars": int?}
+  POST /v1/fetch   {"url": str, "offset": int?, "max_chars": int?,
+                    "passages": bool?, "query": str?}
 
 Fetches refuse anything but http(s) on ports 80 and 443, and refuse every
 address that is not globally routable. The resolved address is the one
@@ -36,6 +37,7 @@ import html
 import http.client
 import ipaddress
 import json
+import math
 import multiprocessing
 import os
 import re
@@ -46,7 +48,7 @@ import threading
 import time
 import urllib.parse
 import zlib
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -80,6 +82,14 @@ DEFAULT_SLICE_CHARS = 6000
 MAX_SLICE_CHARS = 20000
 MAX_SEARCH_RESULTS = 10
 PAGE_CACHE_SIZE = 32
+# Passage mode (`passages: true`): the page is split into paragraphs, ranked
+# against the query with BM25, and a read returns the best ones that fit.
+MAX_PASSAGE_CHARS = 600
+MIN_PASSAGE_CHARS = 60
+MAX_QUERY_CHARS = 4000
+PASSAGE_SEPARATOR = "\n[...]\n"
+BM25_K1 = 1.5
+BM25_B = 0.75
 ALLOWED_PORTS = {"http": 80, "https": 443}
 TEXT_TYPES = ("text/html", "application/xhtml+xml", "text/plain")
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
@@ -466,6 +476,119 @@ def extract_text_bounded(markup: str, url: str, timeout: float | None = None,
     return fallback_text(markup)
 
 
+# --- Passages ---------------------------------------------------------------
+
+# Words that say nothing about a page's topic, in German and English. They are
+# left out of the query only; a page may use them freely.
+PASSAGE_STOP_WORDS = frozenset("""
+der die das den dem des ein und ist im in am an auf aus bei für fuer zu um als es er sie wir ihr
+the and are for was not but can has how who
+aber alle allem allen aller alles also auch dass dein deine denn dies diese
+dieser dieses doch durch eine einem einen einer eines etwa gibt habe haben hier
+ihre ihrem ihren ihrer jetzt kann kein keine koennen können machen mehr mich mit
+nach nicht noch oder ohne sehr sein seine sich sind soll sollen über unter viel
+vom von war waren wann warum was welche welcher welches wenn wer wie wieder wird
+wir wurde wurden zum zur zwischen
+about after also been being does from have into more only over such than that
+their them then there these they this very were what when where which while will
+with would your
+""".split())
+
+
+def passage_stem(word: str) -> str:
+    """A word cut to its first six characters, so "Zeitungen" finds "Zeitung"
+    and "political" finds "politics". Digits stay whole."""
+    return word if word.isdigit() else word[:6]
+
+
+def passage_terms(text: str) -> list[str]:
+    return [passage_stem(word) for word in re.findall(r"[^\W_]+", text.lower())]
+
+
+def query_terms(query: str) -> list[str]:
+    """The distinct stems of a query in first-seen order, without stop words
+    and one-letter words."""
+    terms: list[str] = []
+    for word in re.findall(r"[^\W_]+", query.lower()):
+        if word in PASSAGE_STOP_WORDS or (len(word) < 3 and not word.isdigit()):
+            continue
+        stem = passage_stem(word)
+        if stem not in terms:
+            terms.append(stem)
+    return terms
+
+
+def split_passages(text: str) -> list[tuple[int, int]]:
+    """Paragraphs of a page as (start, end) character positions in `text`.
+
+    A line is a paragraph. A line shorter than MIN_PASSAGE_CHARS (a heading, a
+    date) is joined with the lines after it, so it stays with its section.
+    A paragraph longer than MAX_PASSAGE_CHARS is cut after a sentence, or at a
+    space when no sentence ends in its first part. The pieces are exact slices
+    of `text`, in page order, and do not overlap.
+    """
+    lines = [(m.start(), m.end()) for m in re.finditer(r"[^\n]*\S[^\n]*", text)]
+    paragraphs: list[tuple[int, int]] = []
+    index = 0
+    while index < len(lines):
+        start, end = lines[index]
+        index += 1
+        while index < len(lines) and len(text[start:end].strip()) < MIN_PASSAGE_CHARS:
+            end = lines[index][1]
+            index += 1
+        paragraphs.append((start, end))
+    pieces: list[tuple[int, int]] = []
+    for start, end in paragraphs:
+        while True:
+            # Trim blanks so a piece starts and ends on text.
+            while start < end and text[start].isspace():
+                start += 1
+            while end > start and text[end - 1].isspace():
+                end -= 1
+            if start >= end:
+                break
+            if end - start <= MAX_PASSAGE_CHARS:
+                pieces.append((start, end))
+                break
+            window = text[start:start + MAX_PASSAGE_CHARS]
+            cut = max((window.rfind(mark) + 1 for mark in (". ", "! ", "? ", ".\n", "!\n", "?\n")
+                       if window.rfind(mark) >= MAX_PASSAGE_CHARS // 4), default=0)
+            if not cut:
+                cut = window.rfind(" ")
+                if cut < MAX_PASSAGE_CHARS // 4:
+                    cut = MAX_PASSAGE_CHARS
+            pieces.append((start, start + cut))
+            start += cut
+    return pieces
+
+
+def rank_passages(text: str, query: str) -> list[tuple[int, int]]:
+    """The passages of `text` best first by BM25 against `query`. Passages
+    with the same score keep page order, and passages with no query word
+    follow the others in page order, so a query with no match reads the page
+    from the start. The same text and query always give the same order."""
+    pieces = split_passages(text)
+    terms = query_terms(query)
+    if not terms:
+        return pieces
+    counts = [Counter(passage_terms(text[start:end])) for start, end in pieces]
+    lengths = [sum(count.values()) for count in counts]
+    average = (sum(lengths) / len(lengths)) or 1.0
+    scores = [0.0] * len(pieces)
+    for term in terms:
+        holding = sum(1 for count in counts if term in count)
+        if not holding:
+            continue
+        idf = math.log(1 + (len(pieces) - holding + 0.5) / (holding + 0.5))
+        for position, count in enumerate(counts):
+            frequency = count.get(term, 0)
+            if frequency:
+                norm = frequency + BM25_K1 * (1 - BM25_B + BM25_B * lengths[position] / average)
+                scores[position] += idf * frequency * (BM25_K1 + 1) / norm
+    order = sorted(range(len(pieces)), key=lambda position: (-scores[position], position))
+    return [pieces[position] for position in order]
+
+
 # --- Tools ------------------------------------------------------------------
 
 @dataclass
@@ -536,13 +659,21 @@ class WebTools:
                 self.cache.popitem(last=False)
         return page
 
-    def fetch(self, url: str, offset: int = 0, max_chars: int = DEFAULT_SLICE_CHARS) -> dict:
-        if not isinstance(offset, int) or offset < 0:
+    def fetch(self, url: str, offset: int = 0, max_chars: int = DEFAULT_SLICE_CHARS,
+              passages: bool = False, query: str = "") -> dict:
+        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0:
             raise ToolError("offset must be a non-negative integer", "invalid_argument")
         if not isinstance(max_chars, int) or not 1 <= max_chars <= MAX_SLICE_CHARS:
             raise ToolError(f"max_chars must be between 1 and {MAX_SLICE_CHARS}", "invalid_argument")
+        if not isinstance(passages, bool):
+            raise ToolError("passages must be true or false", "invalid_argument")
+        if not isinstance(query, str) or len(query) > MAX_QUERY_CHARS:
+            raise ToolError(f"query must be text of at most {MAX_QUERY_CHARS} characters",
+                            "invalid_argument")
         page = self.load_page(url)
         total = len(page.text)
+        if passages:
+            return self._passage_slice(page, offset, max_chars, query)
         start = min(offset, total)
         end = min(start + max_chars, total)
         return {
@@ -552,6 +683,52 @@ class WebTools:
             "offset": start,
             "next_offset": end if end < total else None,
             "total_chars": total,
+        }
+
+    def _passage_slice(self, page: Page, offset: int, max_chars: int, query: str) -> dict:
+        """The next best passages that fit `max_chars`. Here `offset` counts
+        passages already given, best first, so a read that continues an
+        earlier one passes that read's `next_offset`. The passages of a read
+        come back in page order, each with its position in the page."""
+        ranked = rank_passages(page.text, query)
+        index_of = {span: number for number, span in enumerate(split_passages(page.text))}
+        first = min(offset, len(ranked))
+        chosen: list[tuple[int, int, int]] = []
+        used = 0
+        position = first
+        while position < len(ranked):
+            start, end = ranked[position]
+            number = index_of[(start, end)]
+            if not chosen and end - start > max_chars:
+                end = start + max_chars  # a limit below one passage cuts it
+            cost = (end - start) + (len(PASSAGE_SEPARATOR) if chosen else 0)
+            if chosen and used + cost > max_chars:
+                break
+            chosen.append((start, end, number))
+            used += cost
+            position += 1
+        chosen.sort()
+        parts = [{"index": number, "start": start, "end": end, "text": page.text[start:end]}
+                 for start, end, number in chosen]
+        # Pieces that follow each other on the page are joined by a line break
+        # and need no separator; others get one, so the text never suggests
+        # that two parts of a page stood together.
+        text = ""
+        for number, part in enumerate(parts):
+            if number:
+                neighbours = part["index"] == parts[number - 1]["index"] + 1
+                text += "\n" if neighbours else PASSAGE_SEPARATOR
+            text += part["text"]
+        return {
+            "url": page.url,
+            "title": page.title,
+            "mode": "passages",
+            "passages": parts,
+            "text": text,
+            "offset": first,
+            "next_offset": position if position < len(ranked) else None,
+            "passage_count": len(ranked),
+            "total_chars": len(page.text),
         }
 
     def search(self, query: str, max_results: int = 6) -> dict:
@@ -703,7 +880,8 @@ class Handler(BaseHTTPRequestHandler):
         if not host_allowed(self.headers.get("Host")):
             return self._error(ToolError("forbidden host", "forbidden_host", 403))
         if self.path == "/health":
-            return self._send(200, {"status": "ok"})
+            # "passages" tells the research loop this sandbox can rank passages.
+            return self._send(200, {"status": "ok", "passages": True})
         self._error(ToolError("not found", "not_found", 404))
 
     def do_POST(self):
@@ -729,7 +907,8 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path == "/v1/fetch":
                 result = self.tools.fetch(
                     request.get("url"), request.get("offset", 0),
-                    request.get("max_chars", DEFAULT_SLICE_CHARS))
+                    request.get("max_chars", DEFAULT_SLICE_CHARS),
+                    request.get("passages", False), request.get("query", ""))
             else:
                 raise ToolError("not found", "not_found", 404)
             self._send(200, result)
