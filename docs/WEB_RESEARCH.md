@@ -45,7 +45,7 @@ launches; **Restore Defaults** resets them.
 | `--context-chars <2000...1000000>` | Prompt budget | from the model | How long the conversation may grow before older results are shortened. |
 | `--search-results <1...10>` | Results per search | 5 | Results each search returns. |
 | `--tool-calls <1...8>` | Tool calls per step | 4 | Searches and page reads the model may ask for in one step. |
-| `--min-pages <1...6>` | Pages to read | 3 | Pages the model is asked to read; the research opens top results to reach it. |
+| `--min-pages <1...12>` | Pages to read | 3 | Pages the model is asked to read; the research opens top results to reach it. |
 | `--auto-open on\|off` | Open top results when too few pages are read | on | The research opens top results itself (see [Limits](#limits)). |
 | `--nudges on\|off` | Ask the model to search, read and look wider | on | The requests to search first, open pages and look wider (see [Limits](#limits)). |
 | `--rewrite on\|off` | Rewrite answers that cite unread pages or lack citations | on | One rewrite when the answer cites pages that were never read, leaves figures without a source number, or is in the wrong language. |

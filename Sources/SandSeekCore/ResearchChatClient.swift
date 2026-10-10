@@ -55,6 +55,10 @@ public struct ResearchChatClient: Sendable {
     public let maxTokens: Int
     public let enableThinking: Bool?
     public let streaming: Bool
+    /// The `Authorization` header value for every request, such as
+    /// `Bearer <key>` for a llama.cpp server started with `--api-key`. Sent
+    /// as that header only: never in a body or URL, and not printed.
+    private let authorization: String?
     private let transport: any ResearchHTTPTransport
 
     public init(serverURL: URL,
@@ -62,6 +66,7 @@ public struct ResearchChatClient: Sendable {
                 maxTokens: Int,
                 enableThinking: Bool?,
                 streaming: Bool = false,
+                authorization: String? = nil,
                 transport: any ResearchHTTPTransport) {
         var base = serverURL.absoluteString
         if base.hasSuffix("/v1") { base.removeLast(3) }
@@ -70,6 +75,7 @@ public struct ResearchChatClient: Sendable {
         self.maxTokens = maxTokens
         self.enableThinking = enableThinking
         self.streaming = streaming
+        self.authorization = authorization
         self.transport = transport
     }
 
@@ -151,7 +157,8 @@ public struct ResearchChatClient: Sendable {
         let response: ResearchHTTPResponse
         do {
             response = try await transport.send(
-                method: "POST", url: endpoint, body: body, timeout: timeout)
+                method: "POST", url: endpoint, body: body, timeout: timeout,
+                authorization: authorization)
         } catch let error as URLError where error.code == .timedOut {
             throw ResearchError.modelTimedOut
         } catch {
@@ -202,7 +209,8 @@ public struct ResearchChatClient: Sendable {
         let response: ResearchHTTPLineResponse
         do {
             response = try await transport.sendStreaming(
-                method: "POST", url: endpoint, body: body, timeout: timeout)
+                method: "POST", url: endpoint, body: body, timeout: timeout,
+                authorization: authorization)
         } catch let error as URLError where error.code == .timedOut {
             throw ResearchError.modelTimedOut
         } catch {
@@ -251,7 +259,7 @@ public struct ResearchChatClient: Sendable {
         guard let response = try? await transport.send(
                 method: "GET", url: endpoint.deletingLastPathComponent()
                     .deletingLastPathComponent().appendingPathComponent("models"),
-                body: nil),
+                body: nil, timeout: nil, authorization: authorization),
               response.status == 200,
               let models = (try? ResearchJSON.decode(response.body))?["data"]?.arrayValue
         else { return [] }

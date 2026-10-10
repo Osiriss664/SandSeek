@@ -157,12 +157,32 @@ public protocol ResearchHTTPTransport: Sendable {
     /// throws `URLError(.timedOut)` when it runs out.
     func sendStreaming(method: String, url: URL, body: Data?,
                        timeout: TimeInterval?) async throws -> ResearchHTTPLineResponse
+    /// The same as the request above, with an optional `Authorization` header
+    /// value such as `Bearer <key>` (llama.cpp started with `--api-key`). The
+    /// value goes into that one header and nowhere else: not into the body,
+    /// the URL, an error message or a log. A transport that cannot send a
+    /// header (every test fake) gets the default below, which leaves it out.
+    func send(method: String, url: URL, body: Data?, timeout: TimeInterval?,
+              authorization: String?) async throws -> ResearchHTTPResponse
+    /// The streaming form of the request above, with the same header.
+    func sendStreaming(method: String, url: URL, body: Data?, timeout: TimeInterval?,
+                       authorization: String?) async throws -> ResearchHTTPLineResponse
 }
 
 public extension ResearchHTTPTransport {
     func send(method: String, url: URL, body: Data?,
               timeout: TimeInterval?) async throws -> ResearchHTTPResponse {
         try await send(method: method, url: url, body: body)
+    }
+
+    func send(method: String, url: URL, body: Data?, timeout: TimeInterval?,
+              authorization: String?) async throws -> ResearchHTTPResponse {
+        try await send(method: method, url: url, body: body, timeout: timeout)
+    }
+
+    func sendStreaming(method: String, url: URL, body: Data?, timeout: TimeInterval?,
+                       authorization: String?) async throws -> ResearchHTTPLineResponse {
+        try await sendStreaming(method: method, url: url, body: body, timeout: timeout)
     }
 
     /// For a transport that cannot stream (every test fake): the whole reply
@@ -192,17 +212,29 @@ public struct URLSessionResearchTransport: ResearchHTTPTransport {
     }
 
     public func send(method: String, url: URL, body: Data?) async throws -> ResearchHTTPResponse {
-        try await send(method: method, url: url, body: body, timeout: nil)
+        try await send(method: method, url: url, body: body, timeout: nil, authorization: nil)
+    }
+
+    public func send(method: String, url: URL, body: Data?,
+                     timeout: TimeInterval?) async throws -> ResearchHTTPResponse {
+        try await send(method: method, url: url, body: body, timeout: timeout,
+                       authorization: nil)
     }
 
     /// A request given up at `timeout` is cancelled, which closes its
     /// connection; TUFF then stops generating the abandoned reply instead of
     /// making the next request wait for it.
-    public func send(method: String, url: URL, body: Data?,
-                     timeout: TimeInterval?) async throws -> ResearchHTTPResponse {
-        guard let timeout else { return try await fetch(method: method, url: url, body: body) }
+    public func send(method: String, url: URL, body: Data?, timeout: TimeInterval?,
+                     authorization: String?) async throws -> ResearchHTTPResponse {
+        guard let timeout else {
+            return try await fetch(method: method, url: url, body: body,
+                                   authorization: authorization)
+        }
         return try await withThrowingTaskGroup(of: ResearchHTTPResponse.self) { group in
-            group.addTask { try await fetch(method: method, url: url, body: body) }
+            group.addTask {
+                try await fetch(method: method, url: url, body: body,
+                                authorization: authorization)
+            }
             group.addTask {
                 try await Task.sleep(nanoseconds: UInt64(max(0, timeout) * 1_000_000_000))
                 throw URLError(.timedOut)
@@ -213,16 +245,17 @@ public struct URLSessionResearchTransport: ResearchHTTPTransport {
         }
     }
 
-    private func fetch(method: String, url: URL, body: Data?) async throws -> ResearchHTTPResponse {
+    private func fetch(method: String, url: URL, body: Data?,
+                       authorization: String?) async throws -> ResearchHTTPResponse {
         let request = Self.makeRequest(method: method, url: url, body: body,
-                                       accept: "application/json")
+                                       accept: "application/json", authorization: authorization)
         let (data, response) = try await session.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         return ResearchHTTPResponse(status: status, body: data)
     }
 
-    private static func makeRequest(method: String, url: URL, body: Data?,
-                                    accept: String) -> URLRequest {
+    static func makeRequest(method: String, url: URL, body: Data?,
+                            accept: String, authorization: String? = nil) -> URLRequest {
         var request = URLRequest(url: url)
         request.httpMethod = method
         if let body {
@@ -230,8 +263,28 @@ public struct URLSessionResearchTransport: ResearchHTTPTransport {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
         request.setValue(accept, forHTTPHeaderField: "Accept")
+        // The only place the key goes: a header, never the body or the URL.
+        if let authorization, !authorization.isEmpty {
+            request.setValue(authorization, forHTTPHeaderField: "Authorization")
+        }
         return request
     }
+
+    public func sendStreaming(method: String, url: URL, body: Data?,
+                              timeout: TimeInterval?) async throws -> ResearchHTTPLineResponse {
+        try await sendStreaming(method: method, url: url, body: body, timeout: timeout,
+                                authorization: nil)
+    }
+
+    #if canImport(FoundationNetworking)
+    /// A transport that cannot stream gives the whole reply as lines.
+    public func sendStreaming(method: String, url: URL, body: Data?, timeout: TimeInterval?,
+                              authorization: String?) async throws -> ResearchHTTPLineResponse {
+        let response = try await send(method: method, url: url, body: body, timeout: timeout,
+                                      authorization: authorization)
+        return ResearchHTTPLineResponse(status: response.status, body: response.body)
+    }
+    #endif
 
     #if !canImport(FoundationNetworking)
     /// Sends the request and gives the reply as lines while it arrives.
@@ -250,11 +303,11 @@ public struct URLSessionResearchTransport: ResearchHTTPTransport {
     /// for minutes while the server reads in a long prompt (llama.cpp sends
     /// nothing at all then), and that must never be cut off early. There is
     /// no idle timer of our own.
-    public func sendStreaming(method: String, url: URL, body: Data?,
-                              timeout: TimeInterval?) async throws -> ResearchHTTPLineResponse {
+    public func sendStreaming(method: String, url: URL, body: Data?, timeout: TimeInterval?,
+                              authorization: String?) async throws -> ResearchHTTPLineResponse {
         let started = ContinuousClock.now
         let request = Self.makeRequest(method: method, url: url, body: body,
-                                       accept: "text/event-stream")
+                                       accept: "text/event-stream", authorization: authorization)
         let session = self.session
         // Up to the headers, with the same task group as `send`. Cancelling
         // the group's task cancels `bytes(for:)`.

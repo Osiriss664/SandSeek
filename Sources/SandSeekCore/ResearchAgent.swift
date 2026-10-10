@@ -79,7 +79,7 @@ public struct ResearchOptions: Equatable, Sendable {
     public static let maxStepsRange = 1...100
     public static let toolCallsRange = 1...8
     public static let searchResultsRange = 1...10
-    public static let minimumPagesRange = 1...6
+    public static let minimumPagesRange = 1...12
     public static let pageCharactersRange = 500...20_000
     public static let contextCharactersRange = 2_000...1_000_000
     public static let maxTokensRange = 64...32_768

@@ -71,7 +71,7 @@ public struct ResearchArguments: Equatable, Sendable {
                                Results per search (default 5).
       --tool-calls <1...8>     Tool calls the model may make per turn
                                (default 4).
-      --min-pages <1...6>      Pages the research should read; the prompt asks
+      --min-pages <1...12>     Pages the research should read; the prompt asks
                                for this many and the loop opens top results
                                to reach it (default 3).
       --auto-open on|off       Let the loop open top results itself when the

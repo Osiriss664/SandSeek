@@ -4001,7 +4001,7 @@ struct ResearchArgumentsTests {
         for arguments in [[String](), ["--max-steps", "0", "q"], ["--thinking", "maybe", "q"],
                           ["--frobnicate", "q"], ["q", "--model"],
                           ["q", "--search-results", "11"], ["q", "--tool-calls", "0"],
-                          ["q", "--min-pages", "7"], ["q", "--step-timeout", "61"],
+                          ["q", "--min-pages", "13"], ["q", "--step-timeout", "61"],
                           ["q", "--auto-open", "yes"], ["q", "--nudges"],
                           ["q", "--rewrite", "maybe"], ["q", "--max-steps", "101"],
                           ["q", "--thinking-limit", "0"], ["q", "--thinking-limit", "61"]] {
