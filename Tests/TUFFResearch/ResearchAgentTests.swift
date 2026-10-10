@@ -300,6 +300,42 @@ private let openContainerPage = FakeServices.calls([
     ("a", "open_page", #"{"url":"https://github.com/apple/container"}"#),
 ])
 
+/// A server whose context window is `contextTokens` and which keeps 4,096
+/// tokens for the reply: the agent opens one page and answers.
+private func continuationWindow(_ page: String, contextTokens: Int,
+                                replies: [ResearchHTTPResponse],
+                                events: EventLog? = nil)
+    -> (ResearchAgent, FakeServices) {
+    let services = FakeServices(modelReplies: [openContainerPage] + replies) { path, body in
+        switch path {
+        case "/v1/models":
+            return FakeServices.json(200, .object(["object": .string("list"), "data": .array([
+                .object(["id": .string("qwen3.6-35b-a3b"),
+                         "context_length": .integer(contextTokens)]),
+            ])]))
+        case "/v1/fetch":
+            return FakeServices.json(200, .object([
+                "url": body?["url"] ?? .string(""), "title": .string("apple/container"),
+                "text": .string(page), "offset": .integer(0),
+                "total_chars": .integer(page.unicodeScalars.count),
+            ]))
+        default:
+            return FakeServices.webPages(path, body)
+        }
+    }
+    var options = ResearchOptions()
+    options.nudges = false
+    let agent = ResearchAgent(
+        chat: ResearchChatClient(
+            serverURL: URL(string: "http://127.0.0.1:8080")!, model: "default",
+            maxTokens: 4_096, enableThinking: false, transport: services),
+        sandbox: ResearchSandboxClient(
+            baseURL: URL(string: "http://127.0.0.1:9000")!, transport: services),
+        options: seenOptions(options, false),
+        onEvent: { events?.append($0) })
+    return (agent, services)
+}
+
 @Suite("Web research loop")
 struct ResearchAgentTests {
     @Test func searchesReadsAndAnswersWithNumberedSources() async throws {
@@ -1100,14 +1136,124 @@ struct ResearchAgentTests {
             overflow, overflow, overflow,
         ])
         let report = try await agent(services, options: options).run(question: "q")
-        // The request failed twice; the third try, which would shorten the
-        // cut-off answer to a few hundred characters, is never sent.
-        #expect(services.modelRequests.count == 4)
+        // The request is refused once. With nothing before the cut-off answer
+        // to shorten, it is not sent again; the emergency step, which would
+        // shorten the cut-off answer to a few hundred characters, is never taken.
+        #expect(services.modelRequests.count == 3)
         #expect(report.answer == longAnswer)
         #expect(report.answerCutOff)
         let cutOff = messages(try #require(services.modelRequests.last))
             .filter { $0["role"] == .string("assistant") }.last
         #expect(cutOff?["content"]?.stringValue == longAnswer)
+    }
+
+    /// A cut-off answer long enough that the continuation request is far larger
+    /// than the system prompt and the tools around it.
+    private static let longCutOff = String(
+        repeating: "Es gab 350 Sitze im Parlament [1]. ", count: 500)
+
+    /// The sizes of the answer request and of the continuation request, in
+    /// characters, as the agent measures them: a probe run in a window that
+    /// holds anything.
+    private func requestSizes() async throws -> (answer: Int, continuation: Int) {
+        let (probe, services) = continuationWindow(
+            Self.spainPage, contextTokens: 1_000_000,
+            replies: [FakeServices.answer(Self.longCutOff, finishReason: "length"),
+                      FakeServices.answer(" mehr [1].")])
+        _ = try await probe.run(question: "q")
+        let requests = services.modelRequests
+        func size(_ request: ResearchJSON) -> Int {
+            messages(request).reduce(probe.toolCharacters) {
+                $0 + ResearchAgent.State.characters(of: $1)
+            }
+        }
+        let sizes = (answer: size(requests[1]), continuation: size(requests[2]))
+        #expect(sizes.continuation > 15_000)
+        return sizes
+    }
+
+    /// The cut-off answer, with the prompt tokens the server counts for the
+    /// request that got it: 2.5 characters each, so the run measures 2.5.
+    private func cutOffReply(answerSize: Int) -> ResearchHTTPResponse {
+        FakeServices.json(200, .object([
+            "choices": .array([.object([
+                "message": .object(["role": .string("assistant"),
+                                    "content": .string(Self.longCutOff)]),
+                "finish_reason": .string("length"),
+            ])]),
+            "usage": .object(["prompt_tokens": .integer(Int(Double(answerSize) / 2.5))]),
+        ]))
+    }
+
+    /// The window (in tokens) whose limit at 2.5 characters per token is
+    /// `share` of `size`; 4,096 tokens reply and 256 template are added.
+    /// Above 1 the request fits the window; with the margin (2.25) it is
+    /// refused up to a share of 1.11.
+    private func window(forLimit share: Double, of size: Int) -> Int {
+        Int(Double(size) / 2.5 * share) + 4_096 + ResearchAgent.templateReserveTokens
+    }
+
+    @Test func aContinuationBetweenTheMarginedAndTheFullLimitIsSent() async throws {
+        let sizes = try await requestSizes()
+        // The limit with the margin is below the request, the one without is above.
+        let tokens = window(forLimit: 1.03, of: sizes.continuation)
+        let log = EventLog()
+        let (runner, services) = continuationWindow(
+            Self.spainPage, contextTokens: tokens,
+            replies: [cutOffReply(answerSize: sizes.answer),
+                      FakeServices.answer(" mehr [1].")],
+            events: log)
+        let report = try await runner.run(question: "q")
+        #expect(report.answer == Self.longCutOff + " mehr [1].")
+        #expect(services.modelRequests.count == 3)
+        #expect(log.events.contains(.continuingCutOffAnswer))
+        #expect(!log.events.contains(.keepingCutOffAnswerNoRoom))
+        #expect(!log.events.contains(.shortenedOlderResults))
+    }
+
+    @Test func aContinuationFarAboveTheLimitIsStillNotSent() async throws {
+        let sizes = try await requestSizes()
+        let tokens = window(forLimit: 0.5, of: sizes.continuation)
+        let log = EventLog()
+        let (runner, services) = continuationWindow(
+            Self.spainPage, contextTokens: tokens,
+            replies: [cutOffReply(answerSize: sizes.answer),
+                      FakeServices.answer(" mehr [1].")],
+            events: log)
+        let report = try await runner.run(question: "q")
+        #expect(report.answer == Self.longCutOff)
+        #expect(report.answerCutOff)
+        #expect(services.modelRequests.count == 2)
+        #expect(log.events.contains(.keepingCutOffAnswerNoRoom))
+        #expect(!log.events.contains(.continuingCutOffAnswer))
+    }
+
+    @Test func aContinuationTheServerRefusesKeepsTheWholeCutOffAnswer() async throws {
+        let sizes = try await requestSizes()
+        let tokens = window(forLimit: 1.03, of: sizes.continuation)
+        let overflow = FakeServices.json(400, .object(["error": .object([
+            "message": .string("too long"), "code": .string("context_length_exceeded"),
+        ])]))
+        let log = EventLog()
+        let (runner, services) = continuationWindow(
+            Self.spainPage, contextTokens: tokens,
+            replies: [cutOffReply(answerSize: sizes.answer),
+                      overflow, overflow, FakeServices.answer(" mehr [1].")],
+            events: log)
+        let report = try await runner.run(question: "q")
+        #expect(report.answer == Self.longCutOff)
+        #expect(report.answerCutOff)
+        // The refused request may be sent once more with older results
+        // shortened, never more often, and the cut-off answer stays whole.
+        #expect((3...4).contains(services.modelRequests.count))
+        #expect(log.events.contains(.continuingCutOffAnswer))
+        #expect(log.events.contains(.keepingCutOffAnswerNoRoom))
+        for request in services.modelRequests.dropFirst(2) {
+            let sent = messages(request)
+            #expect(sent.filter { $0["role"] == .string("assistant") }.last?["content"]?
+                .stringValue == Self.longCutOff)
+            #expect(sent.last?["content"]?.stringValue == ResearchAgent.continueCutOffRequest)
+        }
     }
 
     @Test func aContinuationThatStartsOverIsDropped() async throws {

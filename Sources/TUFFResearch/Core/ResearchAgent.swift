@@ -980,6 +980,7 @@ public struct ResearchAgent: Sendable {
            let reasoning = turn.reasoning, !reasoning.isEmpty {
             cutOff["reasoning_content"] = .string(reasoning)
         }
+        let before = state.messages.count
         state.messages.append(.object(cutOff))
         state.messages.append(.object([
             "role": .string("user"),
@@ -988,8 +989,13 @@ public struct ResearchAgent: Sendable {
         ]))
         // A request that does not fit the context window is not sent: the server
         // would refuse it, and shortening to make it fit cut the half answer to a few lines
-        // (the model then started over from the top, in the Berlin run).
-        guard state.size(overhead: toolCharacters) <= contextLimit(state) else {
+        // (the model then started over from the top, in the Berlin run). The
+        // check is made against the limit without the calibration margin: the
+        // margin keeps routine shortening safe, but a continuation that fits
+        // the window was refused by it (q3: 13.1k tokens and a 2,048 token reply
+        // in a 16,384 token window). An overflow the estimate still misses is
+        // refused by the server and keeps the cut-off answer (see `send`).
+        guard state.size(overhead: toolCharacters) <= continuationLimit(state) else {
             state.messages.removeLast(2)
             if !midSentence { onEvent(.keepingCutOffAnswerNoRoom) }
             return answer
@@ -1014,6 +1020,13 @@ public struct ResearchAgent: Sendable {
             }
         } catch {
             try Task.checkCancellation()
+            // The server refused the request for lack of room: the same
+            // message as when the estimate says so beforehand.
+            if case ResearchError.modelRequestFailed(_, _, "context_length_exceeded"?) = error {
+                // A revision that follows must not see the refused messages.
+                state.messages.removeSubrange(before...)
+                if !midSentence { onEvent(.keepingCutOffAnswerNoRoom) }
+            }
             return answer
         }
         // Asked about a short answer that only seems unfinished, a blank
@@ -1571,14 +1584,28 @@ public struct ResearchAgent: Sendable {
 
     /// The prompt the context window really holds, in characters, without the
     /// speed cap of `promptBudget`, with the full `maxTokens` kept for the
-    /// reply. Only the continuation of a cut-off answer, which cannot be
-    /// shortened, is held to this (see `continuingCutOff`). A fixed budget,
+    /// reply, at the estimate with its margin. A fixed budget,
     /// or a window the server did not say, gives `promptBudget`.
     func contextLimit(_ state: State) -> Int {
         guard options.contextBudgetCharacters == nil, let window = state.contextTokens else {
             return promptBudget(state)
         }
         return contextCharacters(window: window, state)
+    }
+
+    /// What the continuation of a cut-off answer may use, in characters: the
+    /// window less the full reply and the template reserve, at the ratio the
+    /// server measured, without the calibration margin. The margin is for
+    /// routine shortening; a continuation cannot be shortened, and was
+    /// refused by it although it fitted. Without a measured ratio (never
+    /// calibrated), with a fixed budget or without a window, it is
+    /// `contextLimit`.
+    func continuationLimit(_ state: State) -> Int {
+        guard options.contextBudgetCharacters == nil, let window = state.contextTokens,
+              let measured = state.measuredCharactersPerToken else {
+            return contextLimit(state)
+        }
+        return contextCharacters(window: window, state, ratio: measured)
     }
 
     /// What a request for an answer may use, in characters: the context
@@ -1597,10 +1624,11 @@ public struct ResearchAgent: Sendable {
         return max(contextCharacters(window: window, state, reply: reply), promptBudget(state))
     }
 
-    private func contextCharacters(window: Int, _ state: State, reply: Int? = nil) -> Int {
+    private func contextCharacters(window: Int, _ state: State, reply: Int? = nil,
+                                   ratio: Double? = nil) -> Int {
         let tokens = max(window - (reply ?? chat.maxTokens) - Self.templateReserveTokens,
                          window * 2 / 5)
-        return Int(Double(tokens) * state.charactersPerToken)
+        return Int(Double(tokens) * (ratio ?? state.charactersPerToken))
     }
 
     /// The request for an answer now (the final answer, the empty-answer
@@ -1752,7 +1780,9 @@ public struct ResearchAgent: Sendable {
     /// Sends the conversation, shortening older results to fit the budget.
     /// A context overflow the estimate missed is retried at half budget,
     /// then once more with even the newest results shortened, so a long
-    /// run keeps going instead of failing on a full context.
+    /// run keeps going instead of failing on a full context. The
+    /// continuation of a cut-off answer is retried once at most, with older
+    /// results shortened, never with the emergency step.
     private func send(_ state: inout State,
                       toolUse: ResearchToolUse,
                       thinking: Bool?) async throws -> ResearchAssistantTurn {
@@ -1778,6 +1808,26 @@ public struct ResearchAgent: Sendable {
             ? TimeInterval(options.thinkingMinutes * 60) : nil
         let turn: ResearchAssistantTurn
         do {
+            turn = try await chat.complete(
+                messages: state.messages, tools: toolDefinitions, toolUse: toolUse,
+                thinking: thinking,
+                preserveThinking: state.preserveThinking, timeout: limit)
+        } catch ResearchError.modelRequestFailed(let status, let message,
+                                                 "context_length_exceeded"?)
+                    where state.keepsHistoryWhole {
+            // The continuation of a cut-off answer is shortened only as far as
+            // results before `sealedFrom` allow, to the limit with the corrected
+            // estimate, once; never the emergency step, which would cut the
+            // answer itself (see `continuingCutOff`, which keeps it).
+            state.charactersPerToken = max(
+                State.charactersPerTokenRange.lowerBound, state.charactersPerToken * 0.75)
+            guard state.compact(toFit: answerLimit(state, thinking: thinking),
+                                overhead: toolCharacters) else {
+                throw ResearchError.modelRequestFailed(
+                    status: status, message: message, code: "context_length_exceeded")
+            }
+            onEvent(.shortenedOlderResults)
+            sent = state.size(overhead: toolCharacters)
             turn = try await chat.complete(
                 messages: state.messages, tools: toolDefinitions, toolUse: toolUse,
                 thinking: thinking,
@@ -2415,7 +2465,8 @@ public struct ResearchAgent: Sendable {
         /// reasoning, so every later request extends what the server cached.
         var sealedFrom: Int?
         /// Set while the continuation of a cut-off answer is asked: no
-        /// emergency shortening, which would cut the answer itself.
+        /// emergency shortening, and at most one retry (see `send`), which
+        /// would cut the answer itself.
         var keepsHistoryWhole = false
         /// Set while a request for the answer is sent (see `completeAnswer`).
         var answering = false
@@ -2943,12 +2994,19 @@ public struct ResearchAgent: Sendable {
         /// measured from the prompt tokens the server reports.
         var charactersPerToken = 2.5
         static let charactersPerTokenRange = 1.5...4.0
+        /// The share of the measured characters per token that is kept, so the
+        /// estimate holds a tenth in hand.
+        static let calibrationMargin = 0.9
+        /// The last ratio the server measured, before the margin and the range.
+        var measuredCharactersPerToken: Double?
 
         /// Learns how many characters a token holds from a prompt the server
         /// counted, keeping a tenth in hand.
         mutating func calibrate(sentCharacters: Int, promptTokens: Int?) {
             guard let promptTokens, promptTokens > 0, sentCharacters > 0 else { return }
-            let measured = Double(sentCharacters) / Double(promptTokens) * 0.9
+            let exact = Double(sentCharacters) / Double(promptTokens)
+            measuredCharactersPerToken = exact
+            let measured = exact * Self.calibrationMargin
             charactersPerToken = min(max(measured, Self.charactersPerTokenRange.lowerBound),
                                      Self.charactersPerTokenRange.upperBound)
         }
