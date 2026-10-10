@@ -131,11 +131,22 @@ With the server running:
 
 Use the port of your server (8080 for TUFF). The command tries each of this
 Mac's own network addresses on that port and on the sandbox's port, and sends
-nothing. Exit code 0 means nothing answered on the network. Exit code 3 means
-something did: stop the server and start it again with `--host 127.0.0.1`. Exit
-code 4 means the server does not answer on this Mac at all. The app does the
-same check when you press **Check** on the model server card and shows a warning
-if the server is reachable.
+nothing. Every address comes out as accepted, refused or not known (a timeout
+or another failure, for example macOS Local Network privacy). Exit codes:
+
+- 0: every address refused the connection. Nothing answers on the network.
+- 3: something answered. Stop the server and start it again so that it
+  listens on 127.0.0.1 only (llama-server: `--host 127.0.0.1`). TUFF always
+  stays on 127.0.0.1, so on its port this means another program answers there.
+- 4: the model server does not answer on this Mac at all; start it first.
+- 5: some address neither accepted nor refused, so the result says nothing.
+  If macOS asks SandSeek for Local Network access, allow it and run the check
+  again.
+- 2: bad arguments.
+
+The app does the same check for the model server's port when you press **Check**
+on the model server card, and shows a warning if the server is reachable, or a
+note if it could not tell.
 
 ## First run
 

@@ -23,7 +23,9 @@ Linux VM (Apple container)
 
 - **The model server** is a program you start yourself: TUFF (8.3.1 or newer) or
   llama.cpp's `llama-server`. SandSeek connects to it and never starts or stops
-  it. It speaks only to 127.0.0.1, so only programs on your Mac can reach it.
+  it. SandSeek talks to it only on 127.0.0.1. Start it so that it listens on
+  127.0.0.1 only (see [INSTALL.md](INSTALL.md)); SandSeek's **Check** warns if it
+  is reachable from the network.
 - **SandSeek** is the loop. It asks the model for the next step, does what the
   model asks, and puts the results back in front of the model.
 - **The web sandbox** is a small web server in a disposable Linux VM made by
@@ -197,7 +199,7 @@ between launches. Run `sandseek --help` for every option.
 
 The two presets: **Quick answer** is 8 steps, at least 3 pages and 5 results per
 search; **Thorough** is 30 steps, at least 6 pages and 8 results per search. The
-Thorough values are a first guess, measured and fixed in step 2c of the plan.
+Thorough values are a first guess and will be adjusted after measuring.
 Limits that protect the Mac are not settings: the sandbox, its firewall, the
 loopback-only addresses, the fetch limits and the report rules stay fixed.
 
@@ -218,8 +220,10 @@ if it calls itself OpenAI-compatible.
   read as a stream. Research makes many long prompts, so model speed matters:
   Qwen3.6 35B-A3B gives good answers; a question takes roughly 2 to 8 minutes
   on a 16 GB Mac (estimates from earlier runs).
-- **llama.cpp (`llama-server`).** The context window comes from `/props`, and the
-  key from the key file is sent with every request. Requests are plain (not
+- **llama.cpp (`llama-server`).** The app reads the context window from `/props`;
+  the `sandseek` command does not, and uses a 16,000-character prompt budget
+  unless `--context-chars` is given. The key from the key file is sent with every
+  request. Requests are plain (not
   streamed) for now. If the server gives no context size, Settings has a prompt
   budget.
 

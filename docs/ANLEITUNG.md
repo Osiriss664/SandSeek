@@ -2,8 +2,9 @@
 
 SandSeek recherchiert für dich im Web. Du stellst eine Frage, ein Sprachmodell auf deinem
 eigenen Mac sucht und liest Webseiten, und du bekommst eine Antwort mit nummerierten Quellen.
-Deine Frage und die Antwort bleiben auf deinem Mac. Nur die Suche selbst geht ins Internet,
-wie bei jeder Websuche.
+Deine Frage und die Antwort bleiben auf deinem Mac. Ins Internet gehen die Suchbegriffe, die
+das Modell aus deiner Frage bildet, und das Laden der Webseiten; Suchmaschine und Webseiten
+sehen dabei deine IP-Adresse.
 
 ## Was du brauchst
 
@@ -31,7 +32,9 @@ SandSeek startet das Modell-Programm nicht selbst. Du startest es vorher.
 - **llama.cpp:** In SandSeek bei *Model server* **llama.cpp** wählen. Die Karte zeigt einen
   fertigen Startbefehl. Mit **Copy start command** kopieren, im Terminal einfügen, das
   Modell eintragen und Return drücken. Der Befehl enthält `--host 127.0.0.1`: das heißt, nur
-  dein Mac darf zugreifen. Lass diesen Teil immer drin.
+  dein Mac darf zugreifen. Lass diesen Teil immer drin. llama.cpp ist nur eingeschränkt
+  getestet: Mit dem Modell Bonsai ist die Prüfung gegen Angriffe aus Webseiten noch nicht
+  gemessen. Mit TUFF und Qwen ist sie bestanden.
 
 Auf einem Mac mit 16 GB darf immer nur ein Modell-Programm laufen.
 
@@ -58,8 +61,9 @@ sehr langen Frage kann das einige Sekunden dauern.
 
 Jede fertige Antwort wird gespeichert. Du findest sie links in der Seitenleiste unter
 **Reports**, mit Datum und Frage. Die Dateien liegen im Ordner
-`Library/Application Support/SandSeek/Reports` in deinem Benutzerordner. Zum Löschen wähle
-einen Bericht in der Liste: Er wandert in den Papierkorb.
+`Library/Application Support/SandSeek/Reports` in deinem Benutzerordner. Zum Löschen drücke
+bei einem Bericht auf **Delete** und bestätige mit **Move to Trash**: Er wandert in den
+Papierkorb.
 
 Ein Klick auf eine Quelle öffnet sie nicht sofort. Die App zeigt zuerst die ganze Adresse,
 und erst nach deiner Bestätigung öffnet sie sich im Browser. Links in der Antwort selbst
@@ -80,8 +84,12 @@ will. SandSeek schützt so:
 - **Security check** auf der Sandbox-Karte macht einen längeren Test (etwa eine Minute) und
   zeigt jede Prüfung einzeln. Alles sollte grün sein.
 - Bei **Check** am Modell-Programm prüft die App außerdem, ob es auch von anderen Geräten in
-  deinem Netz erreichbar wäre. Dann erscheint eine orange Warnung. Starte das Programm in
-  diesem Fall neu und achte darauf, dass `--host 127.0.0.1` dabei ist.
+  deinem Netz erreichbar wäre. Dann erscheint eine orange Warnung. Bei llama.cpp: starte das
+  Programm neu und achte darauf, dass `--host 127.0.0.1` dabei ist. TUFF bleibt immer auf
+  127.0.0.1; eine Warnung bei TUFF heißt, dass ein anderes Programm diesen Anschluss benutzt.
+  Erscheint stattdessen ein Hinweis, dass die App es nicht feststellen konnte, erlaube
+  SandSeek unter *Systemeinstellungen > Datenschutz & Sicherheit > Lokales Netzwerk* den
+  Zugriff und drücke noch einmal **Check**.
 
 Das ist keine Garantie. Ein Modell kann falsche Seiten glauben und sich irren. Lies die
 Quellen, vor allem bei wichtigen Fragen. Mehr dazu steht in `docs/SECURITY.md`.
@@ -91,7 +99,7 @@ Quellen, vor allem bei wichtigen Fragen. Mehr dazu steht in `docs/SECURITY.md`.
 - **Not running** beim Modell-Programm: Es läuft nicht oder unter einer anderen Adresse. Starte
   es und drücke **Check**.
 - **Not verified** bei der Sandbox: Drücke **Stop Sandbox**, dann wieder **Start Sandbox**.
-  Bleibt es rot, öffne die Sicherheitsprüfung und schicke die roten Zeilen weiter.
+  Bleibt es rot, öffne die Sicherheitsprüfung und kopiere die roten Zeilen in den Chat, in dem du Hilfe suchst.
 - **Die Frage ist sehr langsam:** Schließe andere große Programme. Ein Mac mit 16 GB schafft
   nur ein Modell zur Zeit.
 - **llama.cpp lehnt den Schlüssel ab:** Starte es neu mit dem Befehl von der Karte.

@@ -54,7 +54,7 @@ Apple `container` software, and the model weights you chose.
 | Boundary | What crosses it | What holds it |
 | --- | --- | --- |
 | Web → sandbox VM | page bytes | read-only VM, firewall, no root, parser in a time-limited child process, address checks |
-| Sandbox VM → Mac | cleaned page text and search results over 127.0.0.1:9100 | the VM cannot call the Mac; the Mac calls the VM; text is cleaned again on the Mac |
+| Sandbox VM → Mac | cleaned page text and search results over 127.0.0.1:9100 | the VM cannot call the Mac (except DNS); the Mac calls the VM; text is cleaned again on the Mac |
 | Text → model | tool results | fenced as untrusted; the model has nothing dangerous to call |
 | Model → tools | `web_search`, `open_page` | only these two exist; unknown tool names are refused by the loop; addresses must have been shown to the model |
 | Model → you | the answer and the report | plain text only, no images loaded, no links that act, source addresses opened only after you confirm them |
@@ -135,8 +135,8 @@ These hold as long as the design is intact and the VM boundary holds.
   out from your IP address to the search engine and the sites.
 - **The sandbox does not filter by domain.** It can reach any public site.
   A model steered by a page could still ask to open an address the page wrote
-  on itself, and the page's server then learns that it was opened (a few bits
-  per call). The question and page text can no longer be put into an address.
+  on itself, if that address also appeared in a search result or the question,
+  and the server there then learns that it was opened (a few bits per call). The question and page text can no longer be put into an address.
   To restrict domains, put an egress proxy in front of the VM; SandSeek does
   not.
 - **The firewall refuses ranges, not devices.** A device with a public IPv6
@@ -175,27 +175,44 @@ does not control.
   mode 0700) and offers a start command that names the file. The key is never
   on a command line, in the clipboard text or in a log.
 - **Network exposure.** A server that listens beyond loopback (for example
-  `--host 0.0.0.0`) is reachable from every machine on your network. SandSeek
-  checks this on **Check** in the connection card, and with the command:
+  llama-server with `--host 0.0.0.0`) is reachable from every machine on your
+  network. TUFF binds to 127.0.0.1 only by itself and has no `--host` option, so
+  a positive on TUFF's port means another program answers there. SandSeek checks
+  this on **Check** in the connection card, and with the command:
 
   ```sh
   .build/release/sandseek --check-exposure --server http://127.0.0.1:8081
   ```
 
   It lists this Mac's own non-loopback addresses and tries a plain TCP connect
-  to each one on the server's port (and on the sandbox's port, 9100). No data is
-  sent. Exit code 0: nothing answered on the network. Exit code 3: something
-  did. Exit code 4: the model server did not answer on this Mac at all, so
-  "nothing answered" says nothing; start it and run the check again. Link-local
-  addresses (169.254/16, fe80::/10) are not tried. The check shows what this Mac
-  can reach at its own addresses. It does not see the Mac's firewall or your
-  router, so a positive result is firm and a negative one is good evidence.
+  to each one on the server's port. The command also tries the sandbox's port
+  (9100); the app's Check tries the model server's port only. No data is sent.
+  Each address comes out as *accepted* (something listens), *refused* (the Mac's
+  own network stack answers at once that nothing listens) or *not known* (a
+  timeout or any other failure, for example macOS Local Network privacy or a
+  firewall rule). Only a refusal counts as "not reachable". Exit codes: 0 every
+  address refused; 2 bad arguments; 3 something accepted; 4 the model server did
+  not answer on this Mac at all; 5 some address was neither accepted nor
+  refused. 4 and 5 mean "cannot tell": fix the cause and run the check again.
+  Link-local addresses (169.254/16, fe80::/10) are not tried.
+
+  A positive result means something listens on that port beyond loopback. The
+  macOS firewall may still block other machines, but fix it anyway: the check
+  does not see the Mac's firewall or your router, and on BSD a second program can
+  hold the port on the network addresses beside a server on 127.0.0.1, so the
+  answer may not come from the model server. A negative result is good evidence
+  as long as every address was actually refused, which the output shows.
+  Whether macOS Local Network privacy covers connects to the Mac's own addresses
+  is still to be checked on a Mac; that is why a silent address is reported and
+  never counted as clear.
 
 ## Known limits
 
-- **Public egress.** The VM can reach any public address on ports 80 and 443,
-  so an attacker who controls code in the VM can send data to any public
-  server. Only research content is in the VM.
+- **Public egress.** The VM's firewall lets it reach any public address on any
+  port and protocol. Only the sandbox server itself is limited to http on port
+  80 and https on port 443, and that is a check in the server's code, not in the
+  firewall. So an attacker who controls code in the VM can send data to any
+  public server. Only research content is in the VM.
 - **DNS through the Mac.** By default the VM asks the Mac's resolver, so it
   sees the same DNS as the rest of the Mac (your router, Pi-hole, a company
   resolver) and works on networks that block outside DNS. The firewall lets the
@@ -213,9 +230,8 @@ does not control.
 - **Servers without a host check:** TUFF 8.3.1 and llama.cpp, as above.
   llama.cpp only with `--host 127.0.0.1` and `--api-key-file`.
 - **Only TUFF with Qwen has been measured against the injection pages** so far.
-  llama.cpp with Bonsai is tested in Abschnitt 4 of the plan, and the result is
-  recorded in the release notes; a failure there does not block version 0.1,
-  llama.cpp is then marked as only partly tested.
+  llama.cpp with Bonsai: not measured yet. Until it is, llama.cpp counts as only
+  partly tested.
 - **No signature, no notarization.** The packaged app is signed ad hoc and
   runs on the Mac that built it.
 - **The self-test and address check run from outside.** They try the sandbox as
@@ -233,7 +249,7 @@ Durations are estimates from earlier runs on a 16 GB MacBook Air.
 | Address check | 98 addresses (private, loopback, link-local, IPv6 forms, numeric spellings, `localhost`, names that resolve to private addresses, bad schemes and ports) are refused, sent straight to the sandbox with no model; a public page still loads | `python3 Scripts/research_address_check.py` | `RESULT: pass`, exit 0 | 1 to 3 min |
 | Sandbox unit tests | the address policy, fetching, redirects, extraction, cleaning, the HTTP API, and the address check's list against the real policy; no network | `python3 -m unittest Sandbox/test_server.py` | `OK` | seconds |
 | Swift tests | the research loop with fake services, the command, the app logic, streaming, the exposure check | `swift test` | all pass | minutes |
-| Exposure check | the model server and the sandbox do not answer on this Mac's network addresses | `.build/release/sandseek --check-exposure --server http://127.0.0.1:8080` | exit 0 | seconds |
+| Exposure check | the model server and the sandbox do not accept connections on this Mac's network addresses | `.build/release/sandseek --check-exposure --server http://127.0.0.1:8080` | exit 0 (every address refused) | seconds |
 | Injection check, original set | 5 pages with 16 planted attacks (print a canary, send the question to an outside address, read the Mac or the cloud metadata address, fake end of tool result, look-alike markers) | see below | `5/5 runs resisted the injections` | 6 to 15 min per repeat with Qwen; longer with slower models |
 | Injection check, external set | 9 pages with 91 attack texts rewritten from BIPIA and AgentDojo (both MIT) | `--set external` | per-source totals; every attack resisted, reported or blocked | 10 to 30 min per repeat |
 | garak (optional) | the bare model against latent injection, bad characters and encoded instructions; not the sandbox or the loop | `Scripts/garak/README.md` | hit rates per probe, to compare over time | about 40 min for the small pass |
@@ -241,12 +257,14 @@ Durations are estimates from earlier runs on a 16 GB MacBook Air.
 ### Sandbox self-test and address check
 
 ```sh
-Scripts/research_sandbox.sh build      # once
+Scripts/research_sandbox.sh build
 Scripts/research_sandbox.sh start
 Scripts/research_sandbox.sh selftest
 python3 Scripts/research_address_check.py --label "my Mac" --output address-check.txt
 Scripts/research_sandbox.sh stop
 ```
+
+`build` is needed once, before the first `start`.
 
 The address check exits 0 when every address was refused and the control page
 loaded; 1 when at least one address was not refused (a failure); 2 when the
@@ -279,8 +297,12 @@ python3 Scripts/research_injection_check.py \
   --base-url https://<public host>/<path>/injection \
   --server http://127.0.0.1:8081 --server-type llamacpp \
   --api-key-file ~/Library/Application\ Support/SandSeek/State/llamacpp-api-key \
+  --research-arg --context-chars --research-arg 20000 \
   --label "llama.cpp + Bonsai" --output injection-llamacpp.txt
 ```
+
+The command, unlike the app, does not read the context size from llama.cpp, so
+`--context-chars` gives the prompt budget.
 
 The report starts with the label, the server type, the server and the model,
 and its summary repeats them, so a result file says what it measured.
@@ -304,9 +326,18 @@ The original fixtures were written for this project: their markers were once
 raw `<<<`, which HTML parsing reduces to `<<>>`, so results from before that
 fix did not test the boundary attack. The external fixtures only use places
 the sandbox's text extraction keeps (it drops HTML comments, alt text, `<meta>`,
-`<aside>`, `<footer>` and `display:none` text before the model sees them). The
-attacks and their licences are in `Sandbox/fixtures/injection/external-attacks.json`
-and `THIRD_PARTY_NOTICES.md`.
+`<aside>`, `<footer>` and `display:none` text when it turns a page served as
+`text/html` into text). The attacks and their licences are in
+`Sandbox/fixtures/injection/external-attacks.json` and `THIRD_PARTY_NOTICES.md`.
+
+What the run measures depends on how the pages are served. The raw files of a
+GitHub repository (`raw.githubusercontent.com`) arrive as `text/plain`, and the
+sandbox then cleans the text but does not extract it from HTML. The model
+sees the full markup, including comments, alt text, `<meta>`, `<aside>` and
+hidden text. That makes the test harsher for hidden-text attacks but does not
+exercise the HTML extraction. A host that serves `text/html` (for example GitHub
+Pages of a public repository) tests the extraction too. Say which one a result
+came from.
 
 ### What was measured so far
 
@@ -320,8 +351,7 @@ and `THIRD_PARTY_NOTICES.md`.
   self-test and the injection pages passed with Qwen3.6 35B-A3B on TUFF. The
   original set was resisted in every run so far (5/5 in the latest). Gemma 4
   E4B and Gemma 4 26B-A4B also resisted the earlier four-page set.
-- **llama.cpp with Bonsai** has not been measured yet; the Abschnitt 4 Mac test
-  records it.
+- **llama.cpp with Bonsai:** not measured yet.
 - **garak** (bare Qwen3.6 35B-A3B, small pass): attacks hidden in documents
   succeed against the bare model at 12.5 to 75 percent depending on the probe.
   That is a property of the model; the loop's counter-measures are the markers
@@ -330,9 +360,12 @@ and `THIRD_PARTY_NOTICES.md`.
 ### Unit tests and other tools
 
 ```sh
-python3 -m unittest Sandbox/test_server.py   # sandbox policy, no network
-swift test                                   # loop, command and app logic
+python3 -m unittest Sandbox/test_server.py
+swift test
 ```
+
+The first tests the sandbox policy and needs no network; the second tests the
+loop, the command and the app logic.
 
 `--save-pages <file.json>` and `--replay-figures <file.json>` on the command
 help to measure the figure check on real runs. `Scripts/research_question_set.py`
@@ -345,6 +378,7 @@ you can reinstall, or in a throwaway container.
 
 If you find a way past any of this (a fetch of a private address, a path from a
 page to your files, a prompt injection that makes the model do something
-beyond searching and reading), please open an issue in the repository, or
-write to the maintainer privately if it is something you do not want public
-yet.
+beyond searching and reading), please open an issue in the repository. If you
+would rather not make it public yet: while the repository is private, tell the
+person who gave you access; once it is public, use GitHub's private
+vulnerability reporting if it is switched on there.

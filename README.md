@@ -39,7 +39,7 @@ Swift package. The app has not been compiled yet by the person who wrote it
 
 ## The app
 
-    Scripts/package_app.sh            # builds build/SandSeek.app
+    Scripts/package_app.sh
     open build/SandSeek.app
 
 The script builds `SandSeekApp` in release mode, assembles `SandSeek.app`
@@ -73,8 +73,10 @@ progress and answer side by side. Stop is visible while a question runs.
   with a loaded model at a time. If the server gives no context size, Settings
   shows a Prompt budget and the card says so. On Check (not on the ten-second
   look) the card also tries this Mac's own network addresses on the server's
-  port with a plain TCP connect, and warns "Reachable from the network at
-  <address>:<port>; start the server with --host 127.0.0.1" if one answers.
+  port with a plain TCP connect. It warns ("Something answers at
+  <address>:<port>. Other machines on that network can reach it. ...") if one
+  accepts, and says it could not tell if an address neither accepted nor refused
+  (for example because macOS Local Network access was denied).
 - **Sandbox files.** The app carries `Scripts/research_sandbox.sh` and
   `Sandbox/` in `Contents/Resources/sandbox` and runs the script from there, in
   place: the folder is part of the signed bundle, and neither the script nor
@@ -112,9 +114,12 @@ progress and answer side by side. Stop is visible while a question runs.
 
 The app does this itself. By hand:
 
-    Scripts/research_sandbox.sh build      # once
-    Scripts/research_sandbox.sh start      # listens on 127.0.0.1:9100
-    Scripts/research_sandbox.sh selftest   # optional: check the VM's isolation
+    Scripts/research_sandbox.sh build
+    Scripts/research_sandbox.sh start
+    Scripts/research_sandbox.sh selftest
+
+`build` is needed once. `start` publishes the sandbox on 127.0.0.1:9100.
+`selftest` is optional and checks the VM's isolation.
 
 ## Run
 
@@ -130,9 +135,10 @@ Security checks (see [docs/SECURITY.md](docs/SECURITY.md)):
     python3 Scripts/research_injection_check.py --base-url <public URL> --label "TUFF + Qwen"
 
 `--check-exposure` tries this Mac's own network addresses on the model server's
-port and the sandbox's port and exits 0 when nothing answered on the network,
-3 when something did, 4 when the model server does not answer on this Mac at
-all. `research_address_check.py` sends 98 tricky addresses straight to the
+port and the sandbox's port. Exit code 0: every address refused the connection.
+3: something answered on the network. 4: the model server does not answer on
+this Mac at all. 5: some address neither accepted nor refused, so the result
+says nothing. 2: bad arguments. `research_address_check.py` sends 98 tricky addresses straight to the
 sandbox and expects each to be refused. `research_injection_check.py` takes
 `--server-type llamacpp --api-key-file <path>` for llama-server, and `--label`
 and `--output` for a report that names the server type and model.
@@ -158,9 +164,10 @@ To record real streams from a running server for test fixtures, use
   later.
 - Whether the ten-second status poll resets TUFF's idle unload is checked on
   the Mac.
-- Thorough preset values are a first guess (step 2c measures them).
+- Thorough preset values are a first guess; they will be adjusted after
+  measuring.
 - The pre-question check does not yet verify mounts or that port 9100 is
-  published by `sandseek-sandbox` (planned for step 4).
+  published by `sandseek-sandbox`.
 - The model transport follows HTTP redirects from the loopback server.
 - Model names in the picker are the ids the server lists; there is no table of
   display names.
