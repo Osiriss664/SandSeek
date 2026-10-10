@@ -836,8 +836,11 @@ public struct ResearchAgent: Sendable {
         var finalRequest = stoppedAtStep == nil
             ? Self.budgetUsedUpRequest : Self.repeatedSearchesStopRequest
         let missing = options.minimumPagesRead - state.sources.count
+        // Sized against the limit of the request for the answer, which
+        // sends them whole.
         let perPage = min(options.readCharacters,
-                          promptBudget(state) / 2 / max(1, missing))
+                          max(0, answerLimit(state) - state.size(overhead: toolCharacters))
+                              / max(1, missing))
         if options.autoOpenPages, state.searched, missing > 0, answerBeforeSearchingMore == nil,
            perPage >= Self.minimumTopUpCharacters,
            state.topResults().contains(where: { url in
@@ -1033,7 +1036,19 @@ public struct ResearchAgent: Sendable {
     /// The cut-off answer and its continuation as one text. The model goes on
     /// where it stopped, in the middle of a word or a line, so nothing is
     /// added between them, unless the answer stopped in the middle of a line
-    /// and the continuation begins with a list or heading marker.
+    /// and the continuation begins with a list or heading marker or a
+    /// numbered source entry (`[27] `).
+    ///
+    /// Round F: when the continuation starts a block, the partial's last
+    /// line (with an earlier line break before it) is dropped if the model began it
+    /// again:
+    /// - it began that line again: the continuation's first line, in lower
+    ///   case and with white space collapsed, starts with the trimmed last
+    ///   line ("[2] Bez" and "[2] Bezirk Mitte"); or
+    /// A skip to the next entry is not assumed (a complete entry and a cut
+    /// one look the same): "[26] Name Ko" + "[27] Next" keeps the half word
+    /// on its own line instead of gluing `Ko[27]`.
+    /// A source entry always gets its line break, also after a digit.
     ///
     /// `spaced` is for an answer that only seemed unfinished (see
     /// `looksCutOff`): it stopped at the end of a word, so a space is added
@@ -1041,19 +1056,46 @@ public struct ResearchAgent: Sendable {
     /// or a digit.
     static func joined(_ partial: String, _ continuation: String, spaced: Bool = false) -> String {
         let range = NSRange(continuation.startIndex..., in: continuation)
-        let startsBlock = listOrHeadingStart.firstMatch(in: continuation, range: range) != nil
+        let startsBlock = blockStart.firstMatch(in: continuation, range: range) != nil
         if spaced, !startsBlock, let last = partial.last, !last.isWhitespace,
            let first = continuation.first, first.isLetter || first.isNumber {
             return partial + " " + continuation
         }
-        // A digit at the end may go on (`2` and `0. x` are `20`).
+        // A digit at the end may go on (`2` and `0. x` are `20`), but not
+        // before a source entry.
         let endsInNumber = partial.last?.isNumber ?? false
-        return startsBlock && !partial.hasSuffix("\n") && !endsInNumber
-            ? partial + "\n" + continuation : partial + continuation
+        let startsSource = sourceEntryStart.firstMatch(in: continuation, range: range) != nil
+        guard startsBlock, !partial.hasSuffix("\n"), startsSource || !endsInNumber else {
+            return partial + continuation
+        }
+        if let lineBreak = partial.lastIndex(where: \.isNewline),
+           dropsLastLine(String(partial[partial.index(after: lineBreak)...]),
+                         before: continuation) {
+            return String(partial[...lineBreak]) + continuation
+        }
+        return partial + "\n" + continuation
+    }
+
+    /// Whether the unfinished last line of a partial answer is replaced by
+    /// the continuation, which starts a new block (see `joined`).
+    private static func dropsLastLine(_ line: String, before continuation: String) -> Bool {
+        func collapsed(_ text: String) -> String {
+            text.split(whereSeparator: \.isWhitespace).joined(separator: " ").lowercased()
+        }
+        let last = collapsed(line)
+        guard !last.isEmpty else { return false }
+        // Started again. A skip to the next entry is not assumed: a complete
+        // entry and a cut one look the same.
+        return firstLine(of: continuation)?.hasPrefix(last) ?? false
     }
 
     private static let listOrHeadingStart = try! NSRegularExpression(
         pattern: #"^(?:[-*+•]\s|#{1,6}\s|\d{1,2}[.)]\s)"#)
+    /// A numbered source entry, `[27] Name`.
+    private static let sourceEntryStart = try! NSRegularExpression(pattern: #"^\[\d{1,3}\]\s"#)
+    /// A line that starts a new block of the answer.
+    private static let blockStart = try! NSRegularExpression(
+        pattern: #"^(?:[-*+•]\s|#{1,6}\s|\d{1,2}[.)]\s|\[\d{1,3}\]\s)"#)
 
     /// How a final answer ended. `.midSentence` is a short answer that seems
     /// to stop in the middle of a sentence although the server reported a
@@ -1509,8 +1551,9 @@ public struct ResearchAgent: Sendable {
     }
 
     /// The prompt the context window really holds, in characters, without the
-    /// speed cap of `promptBudget`. Only a request that cannot be shortened
-    /// (the continuation of a cut-off answer) is held to this. A fixed budget,
+    /// speed cap of `promptBudget`, with the full `maxTokens` kept for the
+    /// reply. Only the continuation of a cut-off answer, which cannot be
+    /// shortened, is held to this (see `continuingCutOff`). A fixed budget,
     /// or a window the server did not say, gives `promptBudget`.
     func contextLimit(_ state: State) -> Int {
         guard options.contextBudgetCharacters == nil, let window = state.contextTokens else {
@@ -1519,8 +1562,25 @@ public struct ResearchAgent: Sendable {
         return contextCharacters(window: window, state)
     }
 
-    private func contextCharacters(window: Int, _ state: State) -> Int {
-        let tokens = max(window - chat.maxTokens - Self.templateReserveTokens, window * 2 / 5)
+    /// What a request for an answer may use, in characters: the context
+    /// window without the speed cap of `promptBudget`. The reply needs the
+    /// full `maxTokens` with reasoning on, else half of it but at least 2,048
+    /// tokens, as the answer itself is short. Above this the request is
+    /// shortened first; below it the request is sent as it is, so it extends
+    /// what the server cached. A fixed budget, or a window the server did not
+    /// say, gives `promptBudget`.
+    func answerLimit(_ state: State, thinking: Bool? = nil) -> Int {
+        guard options.contextBudgetCharacters == nil, let window = state.contextTokens else {
+            return promptBudget(state)
+        }
+        let reply = (thinking ?? chat.enableThinking) == true
+            ? chat.maxTokens : max(chat.maxTokens / 2, 2_048)
+        return max(contextCharacters(window: window, state, reply: reply), promptBudget(state))
+    }
+
+    private func contextCharacters(window: Int, _ state: State, reply: Int? = nil) -> Int {
+        let tokens = max(window - (reply ?? chat.maxTokens) - Self.templateReserveTokens,
+                         window * 2 / 5)
         return Int(Double(tokens) * state.charactersPerToken)
     }
 
@@ -1680,14 +1740,16 @@ public struct ResearchAgent: Sendable {
         // Once a reply to the request for an answer called a tool, the prompt
         // is not shortened any more, so each request extends the last; only a
         // context overflow or a timeout (see `complete`) still shortens it.
-        // A request for the answer is shortened only when it would not fit
-        // the context window. The speed cap of `promptBudget` is for the
-        // steps of the research: shortening right before the final request
-        // rewrote 21 messages and made the server miss its cache (0 of
-        // 9,857 tokens), for a prompt that fitted.
-        let routineBudget = state.answering ? contextLimit(state) : promptBudget(state)
+        // A request for the answer is held to `answerLimit`, the context
+        // window less the room for the reply, instead of the speed cap of
+        // `promptBudget`: shortening right before the final request rewrote
+        // the cached prefix (q3 0 of 8,848 tokens, q6 0 of 9,208) for a
+        // prompt that fitted. Above it the prompt is shortened as before, and
+        // the refusals below shorten it further.
+        let budget = state.answering
+            ? answerLimit(state, thinking: thinking) : promptBudget(state)
         if state.sealedFrom == nil,
-           state.compact(toFit: routineBudget, overhead: toolCharacters) {
+           state.compact(toFit: budget, overhead: toolCharacters) {
             onEvent(.shortenedOlderResults)
         }
         var sent = state.size(overhead: toolCharacters)
@@ -1705,7 +1767,13 @@ public struct ResearchAgent: Sendable {
             // The server's tokens hold fewer characters than estimated.
             state.charactersPerToken = max(
                 State.charactersPerTokenRange.lowerBound, state.charactersPerToken * 0.75)
-            if state.compact(toFit: promptBudget(state) / 2, overhead: toolCharacters) {
+            // A request for the answer is first shortened to the limit with the
+            // corrected estimate, and only then to half the budget.
+            let shortened = state.answering
+                && state.compact(toFit: answerLimit(state, thinking: thinking),
+                                 overhead: toolCharacters)
+            if shortened || state.compact(toFit: promptBudget(state) / 2,
+                                          overhead: toolCharacters) {
                 onEvent(.shortenedOlderResults)
             }
             sent = state.size(overhead: toolCharacters)

@@ -4464,7 +4464,7 @@ struct ResearchRequestedSourcesLoopTests {
             .contains { $0.contains("requested.") })
     }
 
-    @Test func theFinalRequestIsShortenedOnlyWhenTheContextWindowOverflows() async throws {
+    @Test func aLargeContextWindowKeepsTheStepsWholeAboveTheSpeedCap() async throws {
         let page = String(repeating: "Wasser fließt bergab und trägt Sand. ", count: 1_200)
         var options = ResearchOptions()
         options.maxSteps = 2
@@ -4499,6 +4499,104 @@ struct ResearchRequestedSourcesLoopTests {
             .compactMap { $0["content"]?.stringValue }
         #expect(tools.count == 2)
         #expect(tools.allSatisfy { $0.contains(page) })
+    }
+
+    /// A 16,384 token server with 8,192 tokens for a reply: the steps are held
+    /// to 19,840 characters (`promptBudget`), a request for the answer to
+    /// 30,080 (`answerLimit`, 4,096 tokens kept for the reply). The fake server
+    /// does not enforce either.
+    private func answerWindow(page: String,
+                              lastReplies: [ResearchHTTPResponse],
+                              events: EventLog) -> (ResearchAgent, FakeServices) {
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "open_page", #"{"url":"https://a.example/"}"#)]),
+            FakeServices.calls([("b", "open_page", #"{"url":"https://b.example/"}"#)]),
+        ] + lastReplies) { path, body in
+            switch path {
+            case "/v1/models":
+                return FakeServices.json(200, .object(["object": .string("list"), "data": .array([
+                    .object(["id": .string("qwen3.6-35b-a3b"), "context_length": .integer(16_384)]),
+                ])]))
+            case "/v1/fetch":
+                return FakeServices.json(200, .object([
+                    "url": body?["url"] ?? .string(""), "title": .string("Wasser"),
+                    "text": .string(page), "offset": .integer(0),
+                    "total_chars": .integer(page.unicodeScalars.count),
+                ]))
+            default:
+                return FakeServices.webPages(path, body)
+            }
+        }
+        var options = ResearchOptions()
+        options.maxSteps = 2
+        options.nudges = false
+        let agent = ResearchAgent(
+            chat: ResearchChatClient(
+                serverURL: URL(string: "http://127.0.0.1:8080")!, model: "default",
+                maxTokens: 8_192, enableThinking: false, transport: services),
+            sandbox: ResearchSandboxClient(
+                baseURL: URL(string: "http://127.0.0.1:9000")!, transport: services),
+            options: seenOptions(options, false),
+            onEvent: { events.append($0) })
+        return (agent, services)
+    }
+
+    private static func toolResults(_ request: ResearchJSON) -> [String] {
+        messages(request).filter { $0["role"] == .string("tool") }
+            .compactMap { $0["content"]?.stringValue }
+    }
+
+    @Test func anAnswerRequestBetweenTheBudgetAndTheAnswerLimitIsSentWhole() async throws {
+        // About 20,000 characters of pages: over the budget of the steps, under
+        // the limit of the answer.
+        let page = String(repeating: "Wasser fließt bergab und trägt Sand. ", count: 270)
+        let log = EventLog()
+        let (runner, services) = answerWindow(
+            page: page, lastReplies: [FakeServices.answer("Wasser fließt [1][2].")], events: log)
+        let report = try await runner.run(question: "q")
+        #expect(report.sources.count == 2)
+        // The request for the answer extends what the server cached instead of
+        // rewriting it.
+        #expect(!log.events.contains(.shortenedOlderResults))
+        #expect(services.modelRequests.count == 3)
+        let tools = Self.toolResults(try #require(services.modelRequests.last))
+        #expect(tools.count == 2)
+        #expect(tools.allSatisfy { $0.contains(page) })
+    }
+
+    @Test func anAnswerRequestAboveTheAnswerLimitIsShortened() async throws {
+        let page = String(repeating: "Wasser fließt bergab und trägt Sand. ", count: 450)
+        let log = EventLog()
+        let (runner, services) = answerWindow(
+            page: page, lastReplies: [FakeServices.answer("Wasser fließt [1][2].")], events: log)
+        let report = try await runner.run(question: "q")
+        #expect(report.sources.count == 2)
+        #expect(log.events.contains(.shortenedOlderResults))
+        let tools = Self.toolResults(try #require(services.modelRequests.last))
+        #expect(tools.count == 2)
+        #expect(!tools[0].contains(page))
+        #expect(tools[1].contains(page))
+    }
+
+    @Test func anAnswerRequestTheServerRefusesIsShortenedAndSentAgain() async throws {
+        let page = String(repeating: "Wasser fließt bergab und trägt Sand. ", count: 270)
+        let overflow = FakeServices.json(400, .object(["error": .object([
+            "message": .string("effective prompt exceeds the configured context"),
+            "code": .string("context_length_exceeded"),
+        ])]))
+        let log = EventLog()
+        let (runner, services) = answerWindow(
+            page: page, lastReplies: [overflow, FakeServices.answer("Wasser fließt [1][2].")],
+            events: log)
+        let report = try await runner.run(question: "q")
+        #expect(report.answer == "Wasser fließt [1][2].")
+        #expect(log.events.filter { $0 == .shortenedOlderResults }.count == 1)
+        // The refused request had both pages whole; the retry has the older one shortened.
+        #expect(Self.toolResults(services.modelRequests[2]).allSatisfy { $0.contains(page) })
+        let retried = Self.toolResults(services.modelRequests[3])
+        #expect(retried.count == 2)
+        #expect(!retried[0].contains(page))
+        #expect(retried[1].contains(page))
     }
 }
 
@@ -5124,9 +5222,11 @@ struct ResearchRoundDLoopTests {
 
 @Suite("Web research escaped citations, short cut-off answers and look-alike figures, round E")
 struct ResearchRoundETests {
-    private func check(_ answer: String, _ texts: [Int: String]) -> [ResearchUnverifiedFigure] {
+    private func check(_ answer: String, _ texts: [Int: String],
+                       question: String = "") -> [ResearchUnverifiedFigure] {
         ResearchFigureCheck.unverified(
-            answer: answer, sourceTexts: texts, knownSources: Set(texts.keys))
+            answer: answer, sourceTexts: texts, question: question,
+            knownSources: Set(texts.keys))
     }
 
     private func notOnPage(_ answer: String, _ texts: [Int: String]) -> [String] {
@@ -5194,6 +5294,53 @@ struct ResearchRoundETests {
         #expect(check("Die Kosten liegen bei 360 Euro.", [1: "Es sind 360 Euro."]).isEmpty)
         // ... but not in one uncited sentence of an answer that cites.
         #expect(check("Die Kosten liegen bei 360 Euro. Das steht in Quelle [1].", pages).isEmpty)
+    }
+
+    @Test func twoDigitFiguresOfABodyThatCitesNothingAreLookedUp() {
+        let pages = [8: "Die Wahl brachte 12 Sitze für Rot und 40 Sitze für Blau.",
+                     9: "Im Bezirk gab es 21 Sitze, 15 Sitze und 83 Sitze."]
+        let sources = "\n\nQuellen:\n[8] Wahlergebnis, https://a.example/\n"
+            + "[9] Bezirk, https://b.example/"
+        // Seat counts the model made up; the source list does not count as a
+        // citation, so the body is uncited.
+        let invented = notOnPage(
+            "Die Partei erhielt 31, 17 und 64 Sitze in der Kammer." + sources, pages)
+        #expect(invented == ["31", "17", "64"])
+        // Seats that are on a page are not reported.
+        #expect(notOnPage(
+            "Die Partei erhielt 21, 15 und 83 Sitze in der Kammer." + sources, pages).isEmpty)
+        // One two-digit number in a sentence of an uncited answer is left alone.
+        #expect(notOnPage("Die Partei erhielt 31 Sitze in der Kammer." + sources, pages).isEmpty)
+        #expect(notOnPage("Die Partei erhielt 31 Sitze. Die andere erhielt 17 Sitze." + sources,
+                          pages).isEmpty)
+        // So are the question's numbers, years and decimals.
+        #expect(check("Die Partei erhielt 31, 17 und 64 Sitze.", pages,
+                      question: "Wie viele Sitze: 31, 17 oder 64?")
+            .filter { $0.kind == .notOnPage }.isEmpty)
+        #expect(notOnPage("Im Jahr 2024 gab es 3,1 und 1,7 Sitze." + sources, pages).isEmpty)
+        // Ranges, multiples of ten and time or age units are not seat counts.
+        for text in ["Es waren zwischen 10 und 20 Prozent.", "Das dauert 30 bis 40 Minuten.",
+                     "Es waren zwischen 12 und 18 Prozent.", "Das dauert 13 bis 17 Minuten.",
+                     "Es waren 13-17 Leute.", "Das dauert 24 Stunden, 12 Monate.",
+                     "Er ist 31 Jahre alt, sie 17 Jahren.", "Es waren 40 und 50 Sitze."] {
+            #expect(notOnPage(text + sources, pages).isEmpty, "\(text)")
+        }
+        // The seats are still found next to them.
+        #expect(notOnPage("Nach 24 Stunden hatte sie 31, 17 und 64 Sitze." + sources, pages)
+            == ["31", "17", "64"])
+        // Only a source list at the end, or under a heading for the sources,
+        // is not a citation; a source line inside the body is.
+        #expect(notOnPage(
+            "Die Partei erhielt 31, 17 und 64 Sitze.\n[8] Wahlergebnis, https://a.example/\n\n"
+                + "Danach folgt der Rest des Textes.", pages).isEmpty)
+        #expect(notOnPage(
+            "Die Partei erhielt 31, 17 und 64 Sitze.\n\n## Quellen\n"
+                + "[8] Wahlergebnis, https://a.example/\n\n## Fazit\nEnde.", pages)
+            == ["31", "17", "64"])
+        // An answer that cites in its body keeps the stricter rule.
+        #expect(notOnPage(
+            "Die Partei erhielt 31, 17 und 64 Sitze. Das steht in Quelle [8]." + sources, pages)
+            .isEmpty)
     }
 
     @Test func aShortAnswerThatEndsMidSentenceLooksCutOff() {
@@ -5318,6 +5465,53 @@ struct ResearchRoundETests {
         #expect(ResearchAgent.joined("Es gab und", ", mehr.", spaced: true) == "Es gab und, mehr.")
         #expect(ResearchAgent.joined("Es gab und", "mehr.") == "Es gab undmehr.")
         #expect(ResearchAgent.joined("Es gab:", "- eins", spaced: true) == "Es gab:\n- eins")
+    }
+
+    @Test func aSourceEntryAfterAHalfEntryDropsTheHalfEntry() {
+        // The Berlin case: the model skipped the rest of entry 26.
+        let partial = "Quellen:\n[25] Name Eins, https://a.example/\n[26] Name Ko"
+        let joined = ResearchAgent.joined(partial, "[27] Name Drei, https://c.example/")
+        // The half word stays, but on its own line.
+        #expect(joined == "Quellen:\n[25] Name Eins, https://a.example/\n[26] Name Ko\n"
+            + "[27] Name Drei, https://c.example/")
+        #expect(!joined.contains("Ko[27]"))
+        // Without a line before, or in running text, only the line break is added.
+        #expect(ResearchAgent.joined("Name Ko", "[27] Next") == "Name Ko\n[27] Next")
+        #expect(ResearchAgent.joined("Der Verein [26] Ko", "[27] Next")
+            == "Der Verein [26] Ko\n[27] Next")
+        // A restart of the cut entry replaces it instead of doubling it.
+        #expect(ResearchAgent.joined("[1] A\n[2] Bez", "[2] Bezirk Mitte\n[3] C")
+            == "[1] A\n[2] Bezirk Mitte\n[3] C")
+        #expect(ResearchAgent.joined("- eins\n- zw", "- zwei\n- drei") == "- eins\n- zwei\n- drei")
+        // A skip is never assumed: a complete entry and a cut one look the same.
+        #expect(ResearchAgent.joined("[1] A\n[2] Statistisches Bundesamt", "[3] C")
+            == "[1] A\n[2] Statistisches Bundesamt\n[3] C")
+        #expect(ResearchAgent.joined("- eins\n- zw", "- drei") == "- eins\n- zw\n- drei")
+        #expect(ResearchAgent.joined("1. eins\n2. zw", "3. drei") == "1. eins\n2. zw\n3. drei")
+        // A web address, a year, a closing bracket, a bullet without a full
+        // stop and a number that is not the next one are kept.
+        #expect(ResearchAgent.joined("[1] A\n[2] Name, https://b.example/x", "[3] C")
+            == "[1] A\n[2] Name, https://b.example/x\n[3] C")
+        #expect(ResearchAgent.joined("[1] A\n[2] Siehe Destatis 2023", "[3] C")
+            == "[1] A\n[2] Siehe Destatis 2023\n[3] C")
+        #expect(ResearchAgent.joined("[1] A\n[2] Name (Berlin)", "[3] C")
+            == "[1] A\n[2] Name (Berlin)\n[3] C")
+        #expect(ResearchAgent.joined("[1] A\n[2] Name www.b.example", "[3] C")
+            == "[1] A\n[2] Name www.b.example\n[3] C")
+        #expect(ResearchAgent.joined("[1] A\n[2] Name Ko", "[5] C") == "[1] A\n[2] Name Ko\n[5] C")
+        // A finished entry stays, and so do headings and the middle of a word.
+        #expect(ResearchAgent.joined("[1] A\n[2] Fertig.", "[3] C") == "[1] A\n[2] Fertig.\n[3] C")
+        #expect(ResearchAgent.joined("[1] A\n[2] B", "ezirk [3]") == "[1] A\n[2] Bezirk [3]")
+        #expect(ResearchAgent.joined("Text\n# Titel", "- eins") == "Text\n# Titel\n- eins")
+        // A source entry gets its line break after a digit too; a list marker does not.
+        #expect(ResearchAgent.joined("Siehe Destatis 2023", "[27] X")
+            == "Siehe Destatis 2023\n[27] X")
+        #expect(ResearchAgent.joined("Es gab 2", "0. Platz") == "Es gab 20. Platz")
+        // A citation in the continuation is no block start in the middle of a line.
+        #expect(ResearchAgent.joined("Es gab und", ", mehr [3].") == "Es gab und, mehr [3].")
+        // The round E spacing is unchanged.
+        #expect(ResearchAgent.joined("Es gab und", "mehr.", spaced: true) == "Es gab und mehr.")
+        #expect(ResearchAgent.joined("Es gab:", "[1] eins", spaced: true) == "Es gab:\n[1] eins")
     }
 
     @Test func aShortCompleteAnswerIsNotContinued() async throws {

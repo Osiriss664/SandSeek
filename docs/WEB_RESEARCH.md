@@ -568,8 +568,20 @@ run can be compared with and without it.
   older results get shortened so often and changes nothing.
   A shortening on the last research step (it uses the routine prompt budget)
   can make the final request start with a cold cache, since that request
-  extends the shortened prompt. Requests for an answer shorten older results
-  only above the context limit, so none happens below it.
+  extends the shortened prompt. Round F: a request for an answer is held to
+  `answerLimit` instead of the speed cap of `promptBudget`: the context
+  window less the room for the reply (the full `maxTokens` with reasoning on,
+  else half of it but at least 2,048 tokens) and the template reserve, never
+  less than `promptBudget`. Round A used the whole window, which on a
+  16,384-token server is the same budget as for the steps, so q3 and q6 of
+  the passages run still sent a rewritten prefix (0 of 8,848 and 0 of 9,208
+  cached tokens). Between the two limits the request goes out whole; above
+  `answerLimit` it is shortened first. A `context_length_exceeded` refusal of
+  an answer request is retried after shortening to `answerLimit` with the
+  corrected characters-per-token estimate, then (as for steps) to half the
+  budget, then with the newest results too. The pages of the top-up before the
+  final request are sized against `answerLimit` as well. Research steps are
+  shortened as before.
   A model that spends two steps in a row doing nothing but
   repeating searches it already ran (Qwen did from step 25
   of a 40-step run, wasting the rest) is stopped there and asked for its final
@@ -646,7 +658,16 @@ run can be compared with and without it.
   continue exactly where it stopped, without repeating anything, in the same
   language and format. The continuation is joined to the text directly; a
   line break is added only when the text stopped in the middle of a line and
-  the continuation starts with a list or heading marker. The answer counts as
+  the continuation starts with a list or heading marker or a numbered source
+  entry (`[27] `); a source entry gets its line break also after a digit
+  (`Siehe Destatis 2023` + `[27] X`). Round F: with an earlier line break in
+  the text, the unfinished last line is dropped and the continuation follows
+  on a new line when the continuation starts that line again (its first line,
+  in lower case and with white space collapsed, starts with the trimmed last
+  line). A skip to the next number is not assumed, since a complete entry and
+  a cut one look the same: `[26] Name Ko` + `[27] …` gives `…[26] Name Ko`,
+  a line break and `[27] …`, not `Ko[27]`. The
+  answer counts as
   cut off only if the continuation stopped at the limit as well. If the
   continuation is empty or fails, the cut-off text is kept, marked as cut off.
   The request is only sent if the conversation with it fits the model's
@@ -845,6 +866,19 @@ run can be compared with and without it.
     three written digits is looked up on all pages read too, and it counts
     as found only if a page has the same digits as written (`36` or `3,6` is
     not `360`).
+  Round F: `nothingCited` is decided over the body: the source list does
+  not count as a citation, so the Berlin answer that listed `[8]` to `[36]`
+  but cited nothing in its text is uncited too. Only the block of source
+  lines at the end of the answer, or the source lines under a heading that
+  names the sources (`Quellen`, `Sources`), are the list; a source-looking
+  line in the middle of the body is a citation. In that mode a two-digit
+  number is also looked up by its written digits, but only in a sentence with
+  at least two such numbers (the invented seat counts `21`, `15` and `83`).
+  Left out: multiples of ten, both ends of a range (`13 bis 17`, `13-17`,
+  `13 to 17`, `zwischen 12 und 18`, `between`, `von`, `from`), numbers directly
+  followed by a time or age unit (`24 Stunden`, `12 Monate`, `31 Jahre`, `min`,
+  `h`, `Uhr`, ...), decimals, years, dates, ordinals, numbers of the question
+  and today's date. An answer that cites in its body keeps the old rule.
   - Finance abbreviations (`YoY`, `QoQ`, `MoM`, `WoW`, `YTD`, `MTD`, `QTD`,
     `TTM`, `LTM`) are no names; `p.a.` splits into single letters. The name
     check alone skips them, so labels such as `FY2026` and `PA28` are still

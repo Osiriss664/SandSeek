@@ -153,8 +153,13 @@ enum ResearchFigureCheck {
         let ratings = ratingFlags(for: allPieces)
         // An answer with no readable citation at all (the model wrote them in
         // a form that is none) is all uncited, and its figures get the
-        // looser test of `uncitedFindings`.
-        let nothingCited = allPieces.allSatisfy { citations(in: $0).isEmpty }
+        // looser test of `uncitedFindings`. Source-list lines do not count: a
+        // body that cites nothing is uncited although its list names `[8]`
+        // to `[36]` (the Berlin answer with invented seat counts).
+        let sourceLists = sourceListFlags(for: allPieces)
+        let nothingCited = allPieces.indices.allSatisfy {
+            sourceLists[$0] || citations(in: allPieces[$0]).isEmpty
+        }
         for (pieceIndex, piece) in allPieces.enumerated() {
             let cited = citations(in: piece)
             let usable = cited.filter { sourceTexts[$0] != nil }
@@ -322,6 +327,12 @@ enum ResearchFigureCheck {
     /// `160` were never looked up, and an answer whose citations were all
     /// unreadable got no figure check at all. When the whole answer has no
     /// citation (`nothingCited`), a number of three written digits counts too.
+    ///
+    /// Round F: `nothingCited` is decided over the body alone, without the
+    /// lines of a source list. Then two-digit numbers count as well, by their
+    /// written digits, but only in a sentence with at least two of them (a
+    /// list of figures such as "21, 15 und 83 Sitze"): a single `21` is too
+    /// often a count the model rightly knows.
     private static func uncitedFindings(scanned: Scan,
                                         pages: [(number: Int, page: PageFacts)],
                                         question: Set<String>,
@@ -337,14 +348,23 @@ enum ResearchFigureCheck {
         // zeros are dropped) must be on a page with the same digits as
         // written: `36` or `3,6` is not `360`.
         var written: [Token] = []
-        for token in tokens(in: withoutNoise(scanned.remainder))
+        var twoDigit: [Token] = []
+        let plain = withoutNoise(scanned.remainder)
+        let all = tokens(in: plain)
+        let ranged = rangeMembers(of: all, in: plain)
+        for (index, token) in all.enumerated()
         where !token.ignored && !question.contains(significant(token.digits)) {
             if significant(token.digits).count >= 3 {
                 candidates.append(.number(token))
             } else if nothingCited, token.digits.count >= 3 {
                 written.append(token)
+            } else if nothingCited, token.digits.count == 2, token.text == token.digits,
+                      !token.digits.hasSuffix("0"), !ranged.contains(index),
+                      !isFollowedByUnit(token, in: plain) {
+                twoDigit.append(token)
             }
         }
+        if twoDigit.count >= 2 { written += twoDigit }
         var result: [ResearchUnverifiedFigure] = []
         for candidate in candidates {
             let (figure, present) = candidate.check(in: pages.map { $0.page })
@@ -355,6 +375,89 @@ enum ResearchFigureCheck {
             result.append(ResearchUnverifiedFigure(figure: token.text, sources: []))
         }
         return result
+    }
+
+    /// Units of time and age: `24 Stunden`, `12 Monate`, `5 min`.
+    private static let timeUnits: Set<String> = [
+        "sekunden", "sekunde", "minuten", "minute", "stunden", "stunde", "tage", "tagen", "tag",
+        "wochen", "woche", "monate", "monaten", "monat", "jahre", "jahren", "jahr",
+        "jahrzehnte", "jahrzehnten", "h", "min", "s", "sec", "seconds", "minutes", "hours",
+        "days", "weeks", "months", "years", "uhr",
+    ]
+
+    /// Whether a time or age unit stands directly after a number.
+    private static func isFollowedByUnit(_ token: Token, in text: String) -> Bool {
+        let ns = text as NSString
+        var index = token.location + token.text.utf16.count
+        while index < ns.length, ns.character(at: index) == 0x20 || ns.character(at: index) == 0xA0 {
+            index += 1
+        }
+        var end = index
+        while end < ns.length,
+              let scalar = UnicodeScalar(ns.character(at: end)), Character(scalar).isLetter {
+            end += 1
+        }
+        guard end > index else { return false }
+        let word = ns.substring(with: NSRange(location: index, length: end - index))
+        return timeUnits.contains(word.lowercased())
+    }
+
+    /// The indices of the numbers that are the ends of a range: `13 bis 17`,
+    /// `13-17`, `13 to 17`, and `13 und 17` after `zwischen`, `between`,
+    /// `von` or `from`.
+    private static func rangeMembers(of tokens: [Token], in text: String) -> Set<Int> {
+        let ns = text as NSString
+        var result = Set<Int>()
+        guard tokens.count >= 2 else { return result }
+        for index in 0..<(tokens.count - 1) {
+            let left = tokens[index]
+            let right = tokens[index + 1]
+            let start = left.location + left.text.utf16.count
+            guard right.location >= start else { continue }
+            let between = ns.substring(with: NSRange(location: start, length: right.location - start))
+                .trimmingCharacters(in: .whitespaces).lowercased()
+            var isRange = ["bis", "-", "\u{2013}", "\u{2014}", "to"].contains(between)
+            if !isRange, between == "und" || between == "and" {
+                let before = ns.substring(to: left.location)
+                    .split(whereSeparator: { !$0.isLetter }).last.map { $0.lowercased() } ?? ""
+                isRange = ["zwischen", "between", "von", "from"].contains(before)
+            }
+            if isRange {
+                result.insert(index)
+                result.insert(index + 1)
+            }
+        }
+        return result
+    }
+
+    /// Whether each piece is a line of the answer's source list: a source
+    /// line (`isSourceLine`) in the block of such lines at the end of the
+    /// answer, or after a heading that names the sources (`## Quellen`,
+    /// `## Sources`) up to the next heading. A source-looking line among the
+    /// body's own text is a citation of the body.
+    private static func sourceListFlags(for pieces: [String]) -> [Bool] {
+        var flags = Array(repeating: false, count: pieces.count)
+        var trailing = true
+        for index in pieces.indices.reversed() {
+            let line = pieces[index].trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.isEmpty { continue }
+            if isSourceLine(line) {
+                flags[index] = trailing
+            } else {
+                trailing = false
+            }
+        }
+        var under = false
+        for (index, piece) in pieces.enumerated() {
+            let line = piece.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.hasPrefix("#") {
+                let heading = line.lowercased()
+                under = heading.contains("quelle") || heading.contains("source")
+            } else if under, isSourceLine(line) {
+                flags[index] = true
+            }
+        }
+        return flags
     }
 
     /// Whether each piece lies in a part of the answer that lists what could
