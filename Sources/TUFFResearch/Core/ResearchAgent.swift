@@ -17,11 +17,18 @@ public struct ResearchOptions: Equatable, Sendable {
     /// wider when it answers too early.
     public var nudges = true
     /// Whether `open_page` opens only addresses the model can have from the
-    /// research: verbatim in a search result, in the text of a page read, in
-    /// the question or as a source. Stops a page from steering the model into
-    /// writing the question or page text into an address. On by default; the
-    /// command line can switch it off to measure the model alone.
+    /// research: verbatim in a search result, in the question or as a source
+    /// (a page already read, with its final address). An address that appears
+    /// only in the text of a page read is not opened unless `pageLinks` is on.
+    /// Stops a page from steering the model into writing the question or page
+    /// text into an address. On by default; the command line can switch it off
+    /// to measure the model alone.
     public var onlySeenURLs = true
+    /// Whether `open_page` may also open addresses that appear only in the text
+    /// of a page read. Off by default, as in TUFF's own web search, so a page
+    /// cannot steer the model to further addresses; the command line can
+    /// switch it on to compare. Only used when `onlySeenURLs` is on.
+    public var pageLinks = false
     /// Whether the final answer is sent back once to be rewritten when it
     /// cites pages the research never read, when figures in it carry no
     /// citation (or it has none at all), or when it is not in the language the
@@ -360,9 +367,9 @@ public enum ResearchEvent: Equatable, Sendable {
     case repeatedSearchRefused(String)
     /// The model opened a page part it already read, and was told so instead.
     case repeatedPageRefused(String)
-    /// The model asked to open an address that was in no search result, on no
-    /// page read and not in the question. It was told so instead, and nothing
-    /// was fetched.
+    /// The model asked to open an address that was in no search result, no
+    /// source and not in the question (nor on a page read, with `pageLinks`
+    /// on). It was told so instead, and nothing was fetched.
     case unseenURLRefused(String)
     /// The model asked to open an address on the local or a private network
     /// (localhost, a private or link-local IP, a `.local` name, ...). It was
@@ -572,6 +579,7 @@ public struct ResearchAgent: Sendable {
     public func run(question: String) async throws -> ResearchReport {
         var state = State(question: question)
         state.passagesOn = options.passages
+        state.pageLinks = options.pageLinks
         do {
             return try await research(&state)
         } catch {
@@ -2040,7 +2048,8 @@ public struct ResearchAgent: Sendable {
                 var target = url
                 if options.onlySeenURLs {
                     guard let seenAddress = state.seenAddress(for: url) else {
-                        var refusal = Self.unseenURLRefusal
+                        var refusal = state.pageLinks ? Self.unseenURLRefusalWithPageLinks
+                                                      : Self.unseenURLRefusal
                         if !state.searched { refusal += " Search first with web_search." }
                         onEvent(.unseenURLRefused(ResearchText.oneLine(url, limit: 200)))
                         if state.pageReads[seenKey]?.refusedUnseen == true {
@@ -2266,7 +2275,8 @@ public struct ResearchAgent: Sendable {
                                              : state.hasSeen(url: url)
             if redirect != .same, !known {
                 let rejection = Self.redirectedElsewhere(
-                    requested: url, page: page, redirect: redirect)
+                    requested: url, page: page, redirect: redirect,
+                    pageLinks: !options.onlySeenURLs || state.pageLinks)
                 state.recordRead(requested: url, page: page, offset: offset,
                                  redirectedElsewhere: rejection)
                 onEvent(.toolFailed("open_page: \(ResearchText.oneLine(url, limit: 200)) "
@@ -2374,22 +2384,30 @@ public struct ResearchAgent: Sendable {
     }
 
     /// The tool result for an address the research never showed the model.
-    static let unseenURLRefusal = "This address was in no search result, on no page read and "
-        + "not in the question, so it was not opened. Open addresses from the search results "
-        + "or from pages you read; do not guess addresses."
+    /// This is the text with `pageLinks` off, the default.
+    static let unseenURLRefusal = "This address was in no search result and not in the "
+        + "question, so it was not opened. Links on pages you read are not opened; search for "
+        + "them instead. Open addresses from the search results; do not guess addresses."
+
+    /// The same with `pageLinks` on: addresses in the text of a page read count.
+    static let unseenURLRefusalWithPageLinks = "This address was in no search result, on no "
+        + "page read and not in the question, so it was not opened. Open addresses from the "
+        + "search results or from pages you read; do not guess addresses."
 
     /// The tool result for a page that is not the one asked for. Its text is
     /// left out: it is about something else, and it would only fill the context.
     static func redirectedElsewhere(requested: String, page: ResearchPageSlice,
-                                    redirect: Redirect) -> String {
+                                    redirect: Redirect, pageLinks: Bool = false) -> String {
         let asked = sanitized(ResearchText.url(requested))
         let got = sanitized(ResearchText.url(page.url))
         let what = redirect == .homePage
             ? "redirected to the home page \(got), so the page was not found at that address"
             : "redirected to \(got), which is a different page and does not match"
+        let hint = pageLinks
+            ? "Open addresses from the search results or from pages you read; "
+            : "Open addresses from the search results (or search again); "
         return "The address \(asked) \(what). It is not the page you asked for, so it was not "
-            + "counted as a source and cannot be cited. Open addresses from the search results "
-            + "or from pages you read; do not guess addresses."
+            + "counted as a source and cannot be cited. " + hint + "do not guess addresses."
     }
 
     /// Removes the untrusted-content markers until none is left, so a page
@@ -2655,6 +2673,10 @@ public struct ResearchAgent: Sendable {
         /// Whether this run's page reads were passages.
         var passagesOn = false
 
+        /// Whether `seenAddress` also accepts an address that appears only in
+        /// the text of a page read (`ResearchOptions.pageLinks`).
+        var pageLinks = false
+
         /// Also files the query under the address the sandbox returned, which
         /// the model may use to read on after a redirect.
         mutating func keepPassageQuery(for url: String, finalURL: String) {
@@ -2806,12 +2828,16 @@ public struct ResearchAgent: Sendable {
                 || pageTexts.values.contains { Self.mentions($0, address: bare) }
         }
 
-        /// The strict test behind `onlySeenURLs`; see `seenAddress`.
+        /// The strict test behind `onlySeenURLs`; see `seenAddress`. Follows
+        /// `pageLinks` like `seenAddress`.
         func hasSeenExactly(url: String) -> Bool { seenAddress(for: url) != nil }
 
         /// The address to open for `url`, or nil when the research never
         /// showed it to the model: it appears verbatim in a search result, a
-        /// source, the text of a page read or the question. Compared without
+        /// source (a page already read, including its final address) or the
+        /// question. The text of a page read counts only when `pageLinks` is
+        /// on; by default an address found only there is not opened, so a page
+        /// cannot steer the model to further addresses. Compared without
         /// the scheme (http and https alike), the case of the host, `www.`, a
         /// fragment, one trailing slash and the way characters are
         /// percent-encoded; path and query are compared case-sensitively, so
@@ -2834,6 +2860,7 @@ public struct ResearchAgent: Sendable {
             }
             let scheme = url.lowercased().hasPrefix("http://") ? "http" : "https"
             if let found = Self.link(in: question, matching: wanted, scheme: scheme) { return found }
+            guard pageLinks else { return nil }
             for text in pageTexts.values {
                 if let found = Self.link(in: text, matching: wanted, scheme: scheme) { return found }
             }

@@ -47,7 +47,8 @@ launches; **Restore Defaults** resets them.
 | `--auto-open on\|off` | Open top results when too few pages are read | on | The research opens top results itself (see [Limits](#limits)). |
 | `--nudges on\|off` | Ask the model to search, read and look wider | on | The requests to search first, open pages and look wider (see [Limits](#limits)). |
 | `--rewrite on\|off` | Rewrite answers that cite unread pages or lack citations | on | One rewrite when the answer cites pages that were never read, leaves figures without a source number, or is in the wrong language. |
-| `--only-seen-urls on\|off` | (none, always on) | on | `open_page` opens only addresses that appear verbatim in a search result, a page read or the question (see [Security model](#security-model)). Off is for measuring the model alone; the app has no switch. |
+| `--only-seen-urls on\|off` | (none, always on) | on | `open_page` opens only addresses that appear verbatim in a search result, a source or the question (see [Security model](#security-model)). Off is for measuring the model alone; the app has no switch. |
+| `--page-links on\|off` | (none, always off) | off | With `--only-seen-urls` on, also open addresses that appear only in the text of a page read. Off, as in TUFF's own web search; on is for comparing source counts. |
 | `--step-timeout <1...60>` | Step time limit | 30 minutes | A step with reasoning on that takes longer is asked again without reasoning; a step with reasoning already off is asked once more with older results shortened. A second failure ends the question (the pages read are kept). |
 | `--thinking-limit <1...60>` | Thinking time limit | 3 minutes | A step with reasoning on that takes longer is asked again without reasoning, which stays off for the rest of the question. |
 
@@ -222,17 +223,20 @@ what it downloads. The design limits what either can reach:
   make it count as seen. The progress shows "local network address refused:
   URL". The sandbox's own check of resolved addresses remains the second layer.
 - **`open_page` opens only addresses the research showed the model.** An
-  address must appear verbatim in a search result, in the text of a page the
-  model read, in the question, or be a source. When comparing, the scheme
+  address must appear verbatim in a search result or in the question, or be a
+  source (a page already read). A link that appears only in the text of a
+  page read is not opened, as in TUFF's own web search (`--page-links on`
+  allows it again, for comparing). When comparing, the scheme
   (http or https), `www.`, the case of the host, percent-encoding, a
   `#fragment` and one trailing slash are ignored; the case of path and query
   is not, so letter case cannot carry a message. What is opened is never the
   model's own spelling: it is the search result's or source's address as
   shown, or the link as the page or question wrote it, with non-ASCII
-  characters percent-encoded. So only the scheme of a link taken from a page
-  or the question stays free to the model, one bit per call. With the gate on the
-  model can only follow links that are printed as visible text; a link that
-  exists only in a page's markup is not one it can open. A made-up address is refused and never fetched ("unknown address
+  characters percent-encoded. So only the scheme of a link taken from the
+  question (or, with `--page-links on`, from a page) stays free to the model,
+  one bit per call. With page links on, the model can only follow links
+  printed as visible text; a link that exists only in a page's markup is not
+  one it can open. A made-up address is refused and never fetched ("unknown address
   refused" in the progress, with a hint to search first if nothing was
   searched). Only the first 200 000 characters of a page (1 MB over all pages)
   count as read, so an address past that limit counts as unseen.

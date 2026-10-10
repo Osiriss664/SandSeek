@@ -2644,6 +2644,7 @@ struct ResearchAgentTests {
         #expect(state.seenAddress(for: "https://q.example/Doc%7ea#frag")
                 == "https://q.example/Doc%7Ea")
         // Written with non-ASCII characters on the page: sent escaped.
+        state.pageLinks = true
         state.pageTexts = [1: "siehe de.wikipedia.org/wiki/Köln. Und “www.x.example/a/b”."]
         #expect(state.seenAddress(for: "https://de.wikipedia.org/wiki/K%C3%B6ln")
                 == "https://de.wikipedia.org/wiki/K%C3%B6ln")
@@ -2707,6 +2708,7 @@ struct ResearchAgentTests {
         #expect(!state.hasSeenExactly(url: "https://fromquestion.example/doc"))
         #expect(!state.hasSeenExactly(url: "https://fromquestion.example/Doc2"))
         // Without scheme, with www., in brackets and before punctuation.
+        state.pageLinks = true
         state.pageTexts = [1: "DOI doi.org/10.1000/xyz. Report: www.example.org/Report/ and "
             + "(notexample.org/a) [see example.org/p/Q?x=1]."]
         #expect(state.hasSeenExactly(url: "https://doi.org/10.1000/xyz"))
@@ -2723,6 +2725,80 @@ struct ResearchAgentTests {
         #expect(!state.hasSeenExactly(url: "https://evil.example/v/aAaa"))
         #expect(!state.hasSeenExactly(url: "https://evil.example/v/aaaa/b"))
         #expect(!state.hasSeenExactly(url: "https://evil.example/v/aaaa//"))
+    }
+
+    @Test func anAddressOnlyInPageTextIsNotSeenUnlessPageLinksIsOn() {
+        var state = ResearchAgent.State(question: "Lies https://fromquestion.example/Doc bitte")
+        state.pageTexts = [1: "see https://b.example/Page/One for more"]
+        state.resultURLs = [["https://r.example/result"]]
+        state.sources = [ResearchSource(number: 1, title: "T", url: "https://s.example/Doc")]
+        #expect(!state.pageLinks)
+        #expect(!state.hasSeenExactly(url: "https://b.example/Page/One"))
+        #expect(state.seenAddress(for: "https://b.example/Page/One") == nil)
+        // Results, sources and the question still count.
+        #expect(state.hasSeenExactly(url: "https://r.example/result"))
+        #expect(state.hasSeenExactly(url: "https://s.example/Doc"))
+        #expect(state.hasSeenExactly(url: "https://fromquestion.example/Doc"))
+        state.pageLinks = true
+        #expect(state.hasSeenExactly(url: "https://b.example/Page/One"))
+        #expect(state.seenAddress(for: "https://b.example/Page/One") == "https://b.example/Page/One")
+    }
+
+    /// A model that searches, reads the one result, whose text links to
+    /// `linked.example/next`, and then asks for that link.
+    private func pageLinkServices() -> FakeServices {
+        FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"links"}"#)]),
+            FakeServices.calls([("b", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
+            FakeServices.calls([("c", "open_page", #"{"url":"https://linked.example/next"}"#)]),
+            FakeServices.answer("Done [1]."), FakeServices.answer("Done [1]."),
+        ]) { path, body in
+            guard path == "/v1/fetch" else { return FakeServices.webPages(path, body) }
+            return FakeServices.json(200, .object([
+                "url": .string(body?["url"]?.stringValue ?? ""),
+                "title": .string("Links"),
+                "text": .string("More at https://linked.example/next for details."),
+                "offset": .integer(0), "next_offset": .integer(60), "total_chars": .integer(60),
+            ]))
+        }
+    }
+
+    @Test func anAddressOnlyInPageTextIsRefusedByDefault() async throws {
+        let services = pageLinkServices()
+        let log = EventLog()
+        _ = try await agent(services, options: gateOptions(), onlySeenURLs: true, events: log)
+            .run(question: "q")
+        // Only the search result was fetched.
+        #expect(Self.fetches(services) == 1)
+        #expect(log.events.contains(.unseenURLRefused("https://linked.example/next")))
+        let refused = messages(services.modelRequests[3])
+            .first { $0["tool_call_id"] == .string("c") }?["content"]?.stringValue ?? ""
+        #expect(refused.hasPrefix(ResearchAgent.unseenURLRefusal))
+        #expect(!refused.contains("or from pages you read"))
+        #expect(!ResearchOptions().pageLinks)
+    }
+
+    @Test func anAddressOnlyInPageTextIsOpenedWithPageLinksOn() async throws {
+        let services = pageLinkServices()
+        var options = gateOptions()
+        options.pageLinks = true
+        let log = EventLog()
+        _ = try await agent(services, options: options, onlySeenURLs: true, events: log)
+            .run(question: "q")
+        #expect(Self.fetches(services) == 2)
+        #expect(!log.events.contains { if case .unseenURLRefused = $0 { true } else { false } })
+    }
+
+    @Test func anAddressInTheQuestionIsOpenedByDefault() async throws {
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "open_page", #"{"url":"https://asked.example/Doc"}"#)]),
+            FakeServices.answer("Done [1]."), FakeServices.answer("Done [1]."),
+        ])
+        let log = EventLog()
+        _ = try await agent(services, options: gateOptions(), onlySeenURLs: true, events: log)
+            .run(question: "Read https://asked.example/Doc please")
+        #expect(Self.fetches(services) == 1)
+        #expect(!log.events.contains { if case .unseenURLRefused = $0 { true } else { false } })
     }
 
     @Test func stepsOfOnlyMadeUpAddressesStopTheRunLikeRepeats() async throws {
@@ -3731,7 +3807,7 @@ struct ResearchArgumentsTests {
         let parsed = try ResearchArguments.parse([
             "q", "--search-results", "8", "--tool-calls", "2", "--min-pages", "5",
             "--auto-open", "off", "--nudges", "off", "--rewrite", "off",
-            "--only-seen-urls", "off", "--step-timeout", "10", "--context-chars", "32000", "--max-tokens", "4096",
+            "--only-seen-urls", "off", "--page-links", "on", "--step-timeout", "10", "--context-chars", "32000", "--max-tokens", "4096",
         ])
         #expect(parsed.options.searchResults == 8)
         #expect(parsed.options.maxToolCallsPerTurn == 2)
@@ -3741,6 +3817,10 @@ struct ResearchArgumentsTests {
         #expect(!parsed.options.reviseUnreadCitations)
         #expect(defaults.options.onlySeenURLs)
         #expect(!parsed.options.onlySeenURLs)
+        #expect(!defaults.options.pageLinks)
+        #expect(parsed.options.pageLinks)
+        let linksOff = try ResearchArguments.parse(["q", "--page-links", "off"])
+        #expect(!linksOff.options.pageLinks)
         #expect(parsed.stepTimeoutMinutes == 10)
         #expect(parsed.options.contextBudgetCharacters == 32_000)
         #expect(parsed.maxTokens == 4_096)

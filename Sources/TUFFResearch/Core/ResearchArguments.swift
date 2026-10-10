@@ -61,8 +61,11 @@ public struct ResearchArguments: Equatable, Sendable {
                                to look wider when it answers too early
                                (default on).
       --only-seen-urls on|off  Open only addresses that appear verbatim in a
-                               search result, a page read or the question
+                               search result, a source or the question
                                (default on; off is for measuring the model).
+      --page-links on|off      Also open addresses that appear only in the text
+                               of a page read, which --only-seen-urls on
+                               refuses (default off; on is for comparing).
       --rewrite on|off         Ask once for a rewrite when the answer cites
                                pages that were never read, has figures without
                                a source number, or is in the wrong language
@@ -178,6 +181,8 @@ public struct ResearchArguments: Equatable, Sendable {
                 parsed.options.nudges = try onOff(argument)
             case "--only-seen-urls":
                 parsed.options.onlySeenURLs = try onOff(argument)
+            case "--page-links":
+                parsed.options.pageLinks = try onOff(argument)
             case "--rewrite":
                 parsed.options.reviseUnreadCitations = try onOff(argument)
             case "--step-timeout":
