@@ -5696,3 +5696,114 @@ struct ResearchRoundETests {
         #expect(notOnPage("Der Plan gilt für 403-Seiten-Bücher [1].", pages) == ["403"])
     }
 }
+
+@Suite("Web research padded source lists and context nouns")
+struct ResearchPaddedSourceListTests {
+    private static func entry(_ number: Int) -> String {
+        "\(number). [Page title number \(number) of the list](https://example.com/page\(number))"
+    }
+
+    /// 17 distinct entries, then 12 that repeat entries 1 to 12 (the first of
+    /// them with another spelling of the address), then one with a mangled
+    /// address and the title of entry 13.
+    private func paddedAnswer() -> String {
+        var lines = (1...17).map { Self.entry($0) }
+        for number in 1...12 {
+            var line = Self.entry(number)
+            if number == 1 {
+                line = line.replacingOccurrences(
+                    of: "https://example.com/page1", with: "HTTPS://Example.com/page1/#top")
+            }
+            lines.append("\(number + 17). " + String(line.drop { $0 != "[" }))
+        }
+        lines.append("30. [Page title number 13 of the list](https://example.com/mangled-page13)")
+        return "Antwort mit Beleg [1].\n\n### Quellenverzeichnis (30 Quellen)\n"
+            + lines.joined(separator: "\n") + "\n"
+    }
+
+    @Test func repeatedEntriesAreCountedByAddressAndByTitle() {
+        #expect(ResearchFigureCheck.repeatedSourceEntries(in: paddedAnswer()) == 13)
+        // Entry 30's address was not read, so its title alone still counts.
+        let read = (1...17).map { "https://example.com/page\($0)" }
+        #expect(ResearchFigureCheck.repeatedSourceEntries(
+            in: paddedAnswer(), readURLs: read) == 13)
+        #expect(ResearchFigureCheck.sourceListLines(in: paddedAnswer()).count == 30)
+    }
+
+    @Test func aListWithoutRepeatsHasNone() {
+        let answer = "Antwort [1].\n\n## Quellen\n"
+            + (1...5).map { Self.entry($0) }.joined(separator: "\n") + "\n"
+        #expect(ResearchFigureCheck.repeatedSourceEntries(in: answer) == 0)
+    }
+
+    @Test func citationsInTheBodyAreNotListEntries() {
+        let answer = "Erste Zeile.\n" + Self.entry(1) + "\nEin Satz dazwischen [1].\n\n"
+            + "## Quellen\n" + Self.entry(1) + "\n"
+        #expect(ResearchFigureCheck.repeatedSourceEntries(in: answer) == 0)
+    }
+
+    @Test func eachListBlockIsCountedOnItsOwn() {
+        let list = (1...3).map { Self.entry($0) }.joined(separator: "\n")
+        let answer = "Antwort [1].\n\n## Quellen\n" + list
+            + "\n\n## Quellenbewertung\n" + list + "\n"
+        #expect(ResearchFigureCheck.repeatedSourceEntries(in: answer) == 0)
+    }
+
+    @Test func pagesWithTheSameTitleAreNoRepeat() {
+        let title = "A page title that is long enough"
+        let answer = "Antwort.\n\n## Quellen\n1. [\(title)](https://a.example.com/x)\n"
+            + "2. [\(title)](https://b.example.com/y)\n"
+        #expect(ResearchFigureCheck.repeatedSourceEntries(in: answer) == 1)
+        #expect(ResearchFigureCheck.repeatedSourceEntries(
+            in: answer, readURLs: ["https://a.example.com/x", "https://b.example.com/y"]) == 0)
+    }
+
+    @Test func addressesAreComparedAfterNormalising() {
+        let answer = "Antwort.\n\n## Quellen\n1. [A](https://example.com/x)\n"
+            + "2. [B](HTTPS://Example.com/x/#top)\n"
+        #expect(ResearchFigureCheck.repeatedSourceEntries(in: answer) == 1)
+    }
+
+    @Test func theNoteNamesTheCountAndIsSingularForOne() {
+        var report = ResearchReport(
+            question: "q", answer: "a", sources: [], modelTurns: 1, budgetExhausted: false)
+        report.repeatedSourceEntries = 13
+        #expect(!report.markdown.contains("source list repeats"))
+        report = ResearchReport(
+            question: "q", answer: "a",
+            sources: [ResearchSource(number: 1, title: "t", url: "https://example.com/")],
+            modelTurns: 1, budgetExhausted: false)
+        report.repeatedSourceEntries = 13
+        #expect(report.markdown.contains(
+            "_The answer's own source list repeats 13 entries it already lists; "
+            + "only the pages under Sources were read._"))
+        report.repeatedSourceEntries = 1
+        #expect(report.markdown.contains(
+            "_The answer's own source list repeats 1 entry it already lists; "
+            + "only the pages under Sources were read._"))
+    }
+
+    @Test func theRequestsForTheAnswerAskForEachSourceOnce() {
+        for request in [ResearchAgent.budgetUsedUpRequest,
+                        ResearchAgent.repeatedSearchesStopRequest] {
+            #expect(request.contains("List each source only once"))
+        }
+    }
+
+    @Test func contextAndSourceNounsAreNoNameButARealNameStillIs() {
+        let page = "Der Text spricht viel von der Zeit und den Leuten, ohne einen Namen "
+            + "zu nennen, und er ist nicht klein."
+        let tail = " und ist nicht klein, mit der Zeit für die Leute [1]."
+        for phrase in ["im Kontext der Quelle", "im Kontext der Quellen", "in the Context of the Source",
+                       "laut Hinweis der Angabe"] {
+            let found = ResearchFigureCheck.unverified(
+                answer: "Die Figur ist fiktiv (\(phrase))" + tail, sourceTexts: [1: page],
+                question: "")
+            #expect(found.isEmpty, "\(phrase)")
+        }
+        let name = ResearchFigureCheck.unverified(
+            answer: "Der Bürgermeister Stiegert spricht viel" + tail, sourceTexts: [1: page],
+            question: "")
+        #expect(name.map(\.kind) == [.name])
+    }
+}

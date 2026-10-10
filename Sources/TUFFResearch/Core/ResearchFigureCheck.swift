@@ -442,6 +442,13 @@ enum ResearchFigureCheck {
     private static func sourceListFlags(for answer: String) -> [Bool] {
         let lines = answer.split(whereSeparator: \.isNewline).map { String($0) }
         let counts = lines.map { pieces(of: $0).count }
+        let lineFlags = sourceListLineFlags(lines)
+        return zip(lineFlags, counts).flatMap { Array(repeating: $0, count: $1) }
+    }
+
+    /// Whether each line is a line of the answer's source list (see
+    /// `sourceListFlags`).
+    private static func sourceListLineFlags(_ lines: [String]) -> [Bool] {
         var lineFlags = Array(repeating: false, count: lines.count)
         var trailing = true
         for index in lines.indices.reversed() {
@@ -463,7 +470,96 @@ enum ResearchFigureCheck {
                 lineFlags[index] = true
             }
         }
-        return zip(lineFlags, counts).flatMap { Array(repeating: $0, count: $1) }
+        return lineFlags
+    }
+
+    /// The blocks of consecutive source-list lines of the answer, trimmed. A
+    /// heading or a line of other text ends a block; blank lines do not.
+    static func sourceListBlocks(in answer: String) -> [[String]] {
+        let lines = answer.split(whereSeparator: \.isNewline).map { String($0) }
+        let flags = sourceListLineFlags(lines)
+        var blocks: [[String]] = []
+        var current: [String] = []
+        for (line, flagged) in zip(lines, flags) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if flagged {
+                current.append(trimmed)
+            } else if !trimmed.isEmpty {
+                if !current.isEmpty { blocks.append(current) }
+                current = []
+            }
+        }
+        if !current.isEmpty { blocks.append(current) }
+        return blocks
+    }
+
+    /// The lines of the answer's own source list, trimmed, in order.
+    static func sourceListLines(in answer: String) -> [String] {
+        sourceListBlocks(in: answer).flatMap { $0 }
+    }
+
+    /// How many entries of the answer's own source list repeat an entry of
+    /// the same list block: the first link of the entry has the same address
+    /// (scheme and host in lower case, no fragment, no trailing slash) or the
+    /// same link text of at least 20 characters. A model that was asked for
+    /// more sources than it read can pad its list this way. A repeat by link
+    /// text only counts when the entry's address is none of `readURLs`, the
+    /// pages read: two pages can share a title.
+    static func repeatedSourceEntries(in answer: String, readURLs: [String] = []) -> Int {
+        let read = Set(readURLs.map { normalizedAddress($0) })
+        var repeats = 0
+        for block in sourceListBlocks(in: answer) {
+            var addresses = Set<String>()
+            var titles = Set<String>()
+            for line in block {
+                let range = NSRange(line.startIndex..., in: line)
+                var address: String?
+                var title: String?
+                if let match = markdownLinkWithAddress.firstMatch(in: line, range: range),
+                   let textRange = Range(match.range(at: 1), in: line),
+                   let urlRange = Range(match.range(at: 2), in: line) {
+                    let text = line[textRange].trimmingCharacters(in: .whitespacesAndNewlines)
+                    if text.count >= 20 { title = text }
+                    address = normalizedAddress(String(line[urlRange]))
+                } else if let match = bareAddress.firstMatch(in: line, range: range),
+                          let urlRange = Range(match.range, in: line) {
+                    let trimmed = String(line[urlRange]).trimmingCharacters(
+                        in: CharacterSet(charactersIn: ".,;:!?\u{BB}\"'"))
+                    address = normalizedAddress(trimmed)
+                }
+                let sameAddress = address.map { addresses.contains($0) } ?? false
+                let sameTitle = title.map { titles.contains($0) } ?? false
+                let titleCounts = address.map { !read.contains($0) } ?? true
+                if sameAddress || (sameTitle && titleCounts) { repeats += 1 }
+                if let address { addresses.insert(address) }
+                if let title { titles.insert(title) }
+            }
+        }
+        return repeats
+    }
+
+    private static let markdownLinkWithAddress = try! NSRegularExpression(
+        pattern: #"\[([^\]]*)\]\(\s*<?([^)\s>]+)"#)
+    private static let bareAddress = try! NSRegularExpression(
+        pattern: #"https?://[^\s)\]>]+"#)
+
+    /// An address with the scheme and host in lower case, without fragment
+    /// and trailing slash, so that two spellings of one page compare equal.
+    private static func normalizedAddress(_ raw: String) -> String {
+        let text = raw.trimmingCharacters(in: .whitespaces)
+        guard let parts = URLComponents(string: text), let scheme = parts.scheme,
+              let host = parts.host else {
+            var plain = text
+            if let hash = plain.firstIndex(of: "#") { plain = String(plain[..<hash]) }
+            while plain.hasSuffix("/") { plain.removeLast() }
+            return plain
+        }
+        var result = scheme.lowercased() + "://" + host.lowercased()
+        if let port = parts.port { result += ":\(port)" }
+        result += parts.percentEncodedPath
+        if let query = parts.percentEncodedQuery { result += "?" + query }
+        while result.hasSuffix("/") { result.removeLast() }
+        return result
     }
 
     /// Whether each piece lies in a part of the answer that lists what could
@@ -1513,7 +1609,8 @@ enum ResearchFigureCheck {
             verhandlung ergebnis thema bereich mitglied \
             mayor governing secretary chancellor governor candidate chairman chairwoman \
             director spokesperson leader prime deputy vice member president content \
-            contents usage talks negotiations results mr mrs ms
+            contents usage talks negotiations results mr mrs ms \
+            kontext quelle angabe hinweis context source note notes
             """
         return ResearchFigureCheck.wordSet(list).map { $0 }
     }()

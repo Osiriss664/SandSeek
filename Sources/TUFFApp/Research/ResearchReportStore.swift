@@ -72,6 +72,10 @@ public struct SavedResearchReport: Codable, Equatable, Identifiable, Sendable {
     /// True when the answer is short and seems to stop in the middle of a sentence.
     public var answerEndsMidSentence: Bool { answerWasMidSentence ?? false }
     /// Optional so reports saved before it existed still load.
+    private let repeatedSourceListEntries: Int?
+    /// How many entries of the answer's own source list repeat an entry it already lists.
+    public var repeatedSourceEntries: Int { repeatedSourceListEntries ?? 0 }
+    /// Optional so reports saved before it existed still load.
     private let savedSearchQueries: [String]?
     /// What the model searched for, in order.
     public var searchQueries: [String] { savedSearchQueries ?? [] }
@@ -115,6 +119,7 @@ public struct SavedResearchReport: Codable, Equatable, Identifiable, Sendable {
         budgetExhausted = report.budgetExhausted
         answerWasCutOff = report.answerCutOff
         answerWasMidSentence = report.answerEndsMidSentence
+        repeatedSourceListEntries = report.repeatedSourceEntries
         savedSearchQueries = report.searchQueries.map(ResearchText.terminalSafe)
         stoppedOnRepeats = report.stoppedRepeatedSearches
         endedEarlyReason = report.endedEarly.map(ResearchText.terminalSafe)

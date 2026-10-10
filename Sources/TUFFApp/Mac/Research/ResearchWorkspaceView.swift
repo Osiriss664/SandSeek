@@ -891,6 +891,11 @@ private struct ResearchReportView: View {
                     .appFont(.caption)
                     .foregroundStyle(.orange)
             }
+            if report.repeatedSourceEntries > 0, !report.sources.isEmpty {
+                Text("The answer's own source list repeats \(report.repeatedSourceEntries) \(report.repeatedSourceEntries == 1 ? "entry" : "entries") it already lists; only the pages under Sources were read.")
+                    .appFont(.caption)
+                    .foregroundStyle(.orange)
+            }
             if !report.sources.isEmpty {
                 Text("Sources").appFont(.headline)
                 VStack(alignment: .leading, spacing: 6) {

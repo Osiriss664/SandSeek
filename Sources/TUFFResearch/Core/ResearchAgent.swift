@@ -106,6 +106,10 @@ public struct ResearchReport: Equatable, Sendable {
     /// sentence although the server reported a normal stop, and asking the
     /// model to go on did not settle it.
     public var answerEndsMidSentence: Bool = false
+    /// How many entries of the answer's own source list repeat an entry the
+    /// list already has (same address or same title), as when the model pads
+    /// the list to the number of sources the question asked for.
+    public var repeatedSourceEntries: Int = 0
     /// True when the question asks for an answer in German or English, and the
     /// answer is in the other language.
     public var answerLanguageMismatch: Bool = false
@@ -194,6 +198,11 @@ public struct ResearchReport: Equatable, Sendable {
         }
         if answerEndsMidSentence {
             text += "\n_The answer seems to stop mid-sentence and may be incomplete._\n"
+        }
+        if repeatedSourceEntries > 0, !sources.isEmpty {
+            text += "\n_The answer's own source list repeats \(repeatedSourceEntries) "
+                + "\(repeatedSourceEntries == 1 ? "entry" : "entries") it already lists; "
+                + "only the pages under Sources were read._\n"
         }
         if answerLanguageMismatch {
             text += "\n_The answer may not be in the language the question asks for._\n"
@@ -926,6 +935,8 @@ public struct ResearchAgent: Sendable {
             checked.checkedQueries = state.queries
             checked.checkedOn = options.currentDate
         }
+        checked.repeatedSourceEntries = ResearchFigureCheck.repeatedSourceEntries(
+            in: report.answer, readURLs: state.sources.map(\.url))
         checked.answerLanguageMismatch = Self.wrongLanguage(
             question: state.question, answer: report.answer) != nil
         return checked
@@ -1450,13 +1461,15 @@ public struct ResearchAgent: Sendable {
     static let budgetUsedUpRequest = "The research budget is used up. Answer now from what "
         + "you have read, citing source numbers, and say what remains unverified. Check every "
         + "item against each condition in the question, and leave out, or list as excluded "
-        + "with the reason, any item that breaks one."
+        + "with the reason, any item that breaks one. List each source only once, and if you "
+        + "read fewer pages than the question asked for, say so instead of repeating entries."
 
     static let repeatedSearchesStopRequest = "You keep repeating searches you already ran, "
         + "so the research stops here. Answer now from what you have read, citing source "
         + "numbers, and say what remains unverified. Check every item against each condition "
         + "in the question, and leave out, or list as excluded with the reason, any item that "
-        + "breaks one."
+        + "breaks one. List each source only once, and if you read fewer pages than the "
+        + "question asked for, say so instead of repeating entries."
 
     static let topUpNote = "Few pages had been read, so the research opened more of the top "
         + "search results for you. They follow below; use them like the pages you opened."
