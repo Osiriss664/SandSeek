@@ -108,6 +108,19 @@ These hold as long as the design is intact and the VM boundary holds.
   as NAT64, 6to4 and Teredo), connects to the address it checked, and checks
   every redirect again. Only http on port 80 and https on port 443; at most
   5 MB and 45 seconds per request; only HTML and plain text.
+- **`POST /v1/raw` returns the site's bytes, not cleaned text.** It is for a
+  program that reads pages itself, such as TUFF's page reader when that option
+  is turned on; SandSeek's own research loop never calls it. It makes the same
+  address checks as the text endpoint (public addresses only, checked after
+  every DNS answer and every redirect, connection pinned to the checked
+  address, ports 80 and 443). Invisible-character stripping and text
+  extraction deliberately do **not** apply to it, and a compressed body is not
+  unpacked, so the caller must parse and clean what it gets. Other differences:
+  GET only, no redirect from https to http, a body over the caller's limit is
+  an error and never a shortened body, no `Accept-Encoding` is sent, no
+  cookies and no page cache, and one time limit (at most 60 seconds) covers
+  the whole request including its redirects. The Host and `application/json`
+  checks and the request size limit are the same as for the other endpoints.
 - **The sandbox API is not for web pages.** It refuses a `Host` header that is
   not a loopback name (which stops DNS rebinding from your browser) and
   accepts only `application/json` POSTs (which a page cannot send across

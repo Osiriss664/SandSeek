@@ -2,6 +2,7 @@
 """Tests for the web research sandbox. No network: resolver and transport are
 replaced with fakes. Run with `python3 -m unittest Sandbox/test_server.py`."""
 
+import base64
 import contextlib
 import gzip
 import http.client
@@ -13,6 +14,7 @@ import socket
 import sys
 import threading
 import time
+import unicodedata
 import unittest
 from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -52,13 +54,24 @@ def resolver(table):
 
 
 class FakeTransport:
+    """A route is a Response, or an exception to raise. /v1/raw passes the
+    keyword arguments `deadline` and `max_bytes`; they are recorded, and are
+    None for a call that does not pass them (as /v1/fetch's does not)."""
+
     def __init__(self, routes):
         self.routes = routes
         self.calls = []
+        self.deadlines = []
+        self.limits = []
 
-    def __call__(self, method, target, headers, body):
+    def __call__(self, method, target, headers, body, deadline=None, max_bytes=None):
         self.calls.append((method, target, headers, body))
-        return self.routes[target.url]
+        self.deadlines.append(deadline)
+        self.limits.append(max_bytes)
+        result = self.routes[target.url]
+        if isinstance(result, Exception):
+            raise result
+        return result
 
 
 def page(markup, status=200, content_type="text/html; charset=utf-8", **headers):
@@ -389,6 +402,514 @@ href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fdoc&amp;rut=1">Exampl
 <div class="result"><a class="result__a" href="https://other.example/page">Other</a>
 <div class="result__snippet">Second.</div></div>
 <div class="result"><a class="result__a" href="javascript:alert(1)">Bad</a></div>"""
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
+
+
+class ClockedTransport(FakeTransport):
+    """Every request takes `seconds` of the fake clock."""
+
+    def __init__(self, routes, clock, seconds):
+        super().__init__(routes)
+        self.clock, self.seconds = clock, seconds
+
+    def __call__(self, *args, **options):
+        result = super().__call__(*args, **options)
+        self.clock.now += self.seconds
+        return result
+
+
+def redirect(location, status=302, **headers):
+    return Response(status, {"location": location, **headers}, b"")
+
+
+class RawTests(unittest.TestCase):
+    """WebTools.raw, the code behind POST /v1/raw."""
+
+    def setUp(self):
+        table = resolver({
+            "example.com": ["93.184.216.34"],
+            "other.example": ["93.184.216.35"],
+            "internal.example": ["10.1.2.3"],
+        })
+
+        def resolve(host, port):
+            # Numeric addresses are read as libc reads them, without DNS.
+            try:
+                return table(host, port)
+            except ToolError:
+                return _numeric_only_resolver(host, port)
+        self.resolve = resolve
+
+    def tools(self, routes, **options):
+        self.transport = FakeTransport(routes)
+        return WebTools(resolver=self.resolve, transport=self.transport, searxng_url="",
+                        **options)
+
+    def raw(self, routes, url="https://example.com/a", **arguments):
+        return self.tools(routes).raw(url, **arguments)
+
+    def error(self, tools, url, **arguments):
+        with self.assertRaises(ToolError) as caught:
+            tools.raw(url, **arguments)
+        return caught.exception
+
+    def test_a_page_comes_back_with_its_exact_bytes(self):
+        # Not text: a NUL, bytes that are no UTF-8, a zero-width space and an
+        # escape sequence, none of which may be cleaned or decoded.
+        body = b"\x00\xff<p>\xe2\x80\x8b\x1b[2J caf\xe9</p>\r\n"
+        result = self.raw({"https://example.com/a": Response(
+            200, {"content-type": "text/html; charset=ISO-8859-1"}, body)})
+        self.assertEqual(result, {
+            "final_url": "https://example.com/a",
+            "status": 200,
+            "content_type": "text/html; charset=ISO-8859-1",
+            "body_base64": base64.b64encode(body).decode(),
+        })
+        self.assertEqual(base64.b64decode(result["body_base64"], validate=True), body)
+
+    def test_an_empty_body_and_a_missing_content_type_are_fine(self):
+        result = self.raw({"https://example.com/a": Response(204, {}, b"")})
+        self.assertEqual((result["status"], result["content_type"], result["body_base64"]),
+                         (204, "", ""))
+
+    def test_a_404_is_a_success_with_its_status_and_body(self):
+        result = self.raw({"https://example.com/a": page("not here", status=404)})
+        self.assertEqual((result["status"], base64.b64decode(result["body_base64"])),
+                         (404, b"not here"))
+
+    def test_a_500_is_a_success_too(self):
+        result = self.raw({"https://example.com/a": page("oops", status=500)})
+        self.assertEqual(result["status"], 500)
+
+    def test_the_final_url_is_the_last_hop(self):
+        result = self.raw({
+            "https://example.com/a": redirect("https://other.example/b?q=1"),
+            "https://other.example/b?q=1": page("x")})
+        self.assertEqual(result["final_url"], "https://other.example/b?q=1")
+
+    # --- size -------------------------------------------------------------
+
+    def test_a_body_over_max_bytes_is_an_error_never_a_short_body(self):
+        routes = {"https://example.com/a": page("x" * 11)}
+        error = self.error(self.tools(routes), "https://example.com/a", max_bytes=10)
+        self.assertEqual(error.code, "oversized")
+        self.assertEqual(self.raw(routes, max_bytes=11)["body_base64"],
+                         base64.b64encode(b"x" * 11).decode())
+
+    def test_a_body_the_transport_cut_short_is_oversized(self):
+        routes = {"https://example.com/a": Response(200, {}, b"x" * 10, truncated=True)}
+        error = self.error(self.tools(routes), "https://example.com/a", max_bytes=10)
+        self.assertEqual(error.code, "oversized")
+
+    def test_a_content_length_over_max_bytes_is_oversized(self):
+        routes = {"https://example.com/a": page("small", **{"content-length": "100"})}
+        error = self.error(self.tools(routes), "https://example.com/a", max_bytes=50)
+        self.assertEqual(error.code, "oversized")
+        for announced in ("50", "abc", "-1", ""):
+            routes = {"https://example.com/a": page("small", **{"content-length": announced})}
+            self.assertEqual(self.raw(routes, max_bytes=50)["status"], 200, announced)
+
+    def test_the_limits_are_handed_to_the_transport(self):
+        tools = self.tools({"https://example.com/a": page("x")})
+        tools.raw("https://example.com/a", max_bytes=1234, timeout_seconds=9)
+        self.assertEqual(self.transport.limits, [1234])
+        self.assertEqual(len(self.transport.deadlines), 1)
+        self.assertAlmostEqual(self.transport.deadlines[0], 9, delta=1)
+
+    def test_defaults(self):
+        tools = self.tools({"https://example.com/a": page("x")})
+        tools.raw("https://example.com/a")
+        self.assertEqual(self.transport.limits, [server.MAX_DOWNLOAD_BYTES])
+        self.assertAlmostEqual(self.transport.deadlines[0], 15, delta=1)
+        self.assertEqual(self.transport.calls[0][2]["Accept"],
+                         "text/html,application/xhtml+xml,text/plain;q=0.9,application/pdf;q=0.8")
+
+    # --- redirects ----------------------------------------------------------
+
+    def test_all_five_redirect_statuses_are_followed(self):
+        for status in (301, 302, 303, 307, 308):
+            result = self.raw({
+                "https://example.com/a": redirect("/b", status),
+                "https://example.com/b": page("arrived")})
+            self.assertEqual(result["final_url"], "https://example.com/b", status)
+
+    def test_redirects_may_leave_the_host_and_go_from_http_to_https(self):
+        result = self.raw({
+            "http://example.com/a": redirect("https://other.example/b"),
+            "https://other.example/b": page("arrived")}, url="http://example.com/a")
+        self.assertEqual(result["final_url"], "https://other.example/b")
+
+    def test_a_redirect_from_https_to_http_is_refused(self):
+        for location in ("http://example.com/b", "HTTP://other.example/b"):
+            tools = self.tools({
+                "https://example.com/a": redirect(location),
+                "http://example.com/b": page("never"),
+                "http://other.example/b": page("never")})
+            error = self.error(tools, "https://example.com/a")
+            self.assertEqual(error.code, "insecure_redirect", location)
+            self.assertEqual(len(self.transport.calls), 1, "the http address is not contacted")
+
+    def test_http_to_http_is_allowed(self):
+        result = self.raw({
+            "http://example.com/a": redirect("http://other.example/b"),
+            "http://other.example/b": page("arrived")}, url="http://example.com/a")
+        self.assertEqual(result["final_url"], "http://other.example/b")
+
+    def test_five_redirects_are_followed_and_six_are_refused(self):
+        routes = {f"https://example.com/{n}": redirect(f"/{n + 1}") for n in range(6)}
+        routes["https://example.com/6"] = page("end")
+        self.assertEqual(self.raw(routes, url="https://example.com/1")["final_url"],
+                         "https://example.com/6")
+        tools = self.tools(routes)
+        error = self.error(tools, "https://example.com/0")
+        self.assertEqual(error.code, "too_many_redirects")
+        self.assertEqual(len(self.transport.calls), 6)
+
+    def test_a_redirect_loop_stops(self):
+        tools = self.tools({"https://example.com/a": redirect("/a")})
+        self.assertEqual(self.error(tools, "https://example.com/a").code, "too_many_redirects")
+
+    def test_a_3xx_without_a_location_is_a_success_with_that_status(self):
+        for status, headers in [(301, {}), (302, {"location": ""}), (307, {"location": "  "}),
+                                (300, {"location": "/b"}), (304, {"location": "/b"}),
+                                (305, {"location": "/b"}), (306, {"location": "/b"})]:
+            routes = {"https://example.com/a": Response(status, headers, b"body")}
+            result = self.raw(routes)
+            self.assertEqual((result["status"], result["final_url"]),
+                             (status, "https://example.com/a"), status)
+            self.assertEqual(base64.b64decode(result["body_base64"]), b"body")
+
+    def test_a_redirect_to_another_scheme_is_unsupported(self):
+        tools = self.tools({"https://example.com/a": redirect("ftp://example.com/x")})
+        self.assertEqual(self.error(tools, "https://example.com/a").code, "unsupported_scheme")
+
+    # --- addresses ------------------------------------------------------------
+
+    def test_a_private_address_is_refused_before_anything_is_sent(self):
+        for url in ("http://internal.example/", "http://10.1.2.3/", "http://169.254.169.254/",
+                    "http://192.168.1.1/", "http://[::1]/", "http://127.0.0.1/"):
+            tools = self.tools({})
+            error = self.error(tools, url)
+            self.assertEqual(error.code, "private_address", url)
+            self.assertEqual(error.status, 403)
+            self.assertEqual(self.transport.calls, [], url)
+
+    def test_a_private_address_after_a_redirect_is_refused(self):
+        tools = self.tools({"https://example.com/a": redirect("https://internal.example/")})
+        self.assertEqual(self.error(tools, "https://example.com/a").code, "private_address")
+        self.assertEqual(len(self.transport.calls), 1)
+        tools = self.tools({"http://example.com/a": redirect("http://169.254.169.254/latest")})
+        self.assertEqual(self.error(tools, "http://example.com/a").code, "private_address")
+
+    def test_the_connection_goes_to_the_checked_address(self):
+        tools = self.tools({"https://example.com/a": page("x")})
+        tools.raw("https://example.com/a")
+        self.assertEqual(self.transport.calls[0][1].address, "93.184.216.34")
+
+    # --- the request ------------------------------------------------------------
+
+    def test_a_bad_scheme_is_unsupported(self):
+        for url in ("ftp://example.com/", "file:///etc/passwd", "gopher://example.com/",
+                    "javascript:alert(1)", "data:text/html,x", "wss://example.com/"):
+            error = self.error(self.tools({}), url)
+            self.assertEqual(error.code, "unsupported_scheme", url)
+            self.assertEqual(self.transport.calls, [])
+
+    def test_other_bad_urls_keep_their_codes(self):
+        for url, code in [("example.com/page", "invalid_url"), ("", "invalid_url"),
+                          ("http:///nohost", "invalid_url"), (None, "invalid_url"),
+                          (42, "invalid_url"), ("http://user:pw@example.com/", "invalid_url"),
+                          ("https://example.com/a b", "invalid_url"),
+                          ("https://nowhere.example/", "dns_error")]:
+            self.assertEqual(self.error(self.tools({}), url).code, code, url)
+
+    def test_only_ports_80_and_443_are_allowed(self):
+        for url in ("http://example.com:8080/", "https://example.com:80/",
+                    "http://example.com:443/", "https://example.com:8443/", "http://example.com:22/"):
+            error = self.error(self.tools({}), url)
+            self.assertEqual(error.code, "blocked_port", url)
+            self.assertEqual(self.transport.calls, [])
+        tools = self.tools({"http://example.com/a": page("x")})
+        self.assertEqual(tools.raw("http://example.com:80/a")["status"], 200)
+
+    def test_a_bad_accept_is_refused(self):
+        for accept in ("text/html\r\nCookie: a=b", "text/html\nX: y", "text/html\r", "a" * 513,
+                       "text/hétml", "text/html\ttext/plain", "text/\x00html", "\x7f",
+                       None, 5, ["text/html"], b"text/html"):
+            error = self.error(self.tools({"https://example.com/a": page("x")}),
+                               "https://example.com/a", accept=accept)
+            self.assertEqual(error.code, "invalid_argument", repr(accept))
+            self.assertEqual(self.transport.calls, [])
+
+    def test_a_good_accept_is_sent_as_given(self):
+        for accept in ("application/pdf", "*/*", "text/html;q=0.9, */*;q=0.1", "a" * 512, ""):
+            tools = self.tools({"https://example.com/a": page("x")})
+            tools.raw("https://example.com/a", accept=accept)
+            self.assertEqual(self.transport.calls[0][2]["Accept"], accept)
+
+    def test_a_bad_max_bytes_is_refused(self):
+        for value in (0, -1, server.MAX_DOWNLOAD_BYTES + 1, 1.5, 10.0, "10", None, True, [1]):
+            error = self.error(self.tools({"https://example.com/a": page("x")}),
+                               "https://example.com/a", max_bytes=value)
+            self.assertEqual(error.code, "invalid_argument", repr(value))
+            self.assertEqual(self.transport.calls, [])
+        for value in (1, server.MAX_DOWNLOAD_BYTES):
+            self.assertEqual(self.raw({"https://example.com/a": page("x")},
+                                      max_bytes=value)["status"], 200)
+
+    def test_a_bad_timeout_is_refused(self):
+        for value in (0, -1, 0.0, 60.5, 61, 1000, float("nan"), float("inf"), "15", None, True, [15]):
+            error = self.error(self.tools({"https://example.com/a": page("x")}),
+                               "https://example.com/a", timeout_seconds=value)
+            self.assertEqual(error.code, "invalid_argument", repr(value))
+            self.assertEqual(self.transport.calls, [])
+        for value in (0.5, 1, 15, 60, 60.0):
+            self.assertEqual(self.raw({"https://example.com/a": page("x")},
+                                      timeout_seconds=value)["status"], 200)
+
+    def test_only_the_promised_headers_are_sent_and_no_accept_encoding(self):
+        tools = self.tools({
+            "https://example.com/a": redirect("/b", **{"set-cookie": "id=1", "www-authenticate": "x"}),
+            "https://example.com/b": page("x")})
+        tools.raw("https://example.com/a", accept="text/plain")
+        self.assertEqual(len(self.transport.calls), 2)
+        for method, target, headers, body in self.transport.calls:
+            self.assertEqual(method, "GET")
+            self.assertIsNone(body)
+            self.assertEqual(set(headers), {"Host", "User-Agent", "Accept"})
+            self.assertEqual(headers["User-Agent"], server.USER_AGENT)
+            self.assertEqual(headers["Accept"], "text/plain")
+            self.assertEqual(headers["Host"], target.host)
+
+    def test_cookies_are_not_kept_between_hops_or_requests(self):
+        tools = self.tools({
+            "https://example.com/a": redirect("/b", **{"set-cookie": "id=1"}),
+            "https://example.com/b": page("x", **{"set-cookie": "id=2"})})
+        tools.raw("https://example.com/a")
+        tools.raw("https://example.com/a")
+        for call in self.transport.calls:
+            self.assertFalse({"cookie", "authorization"} & {k.lower() for k in call[2]})
+
+    def test_the_cache_is_neither_used_nor_filled(self):
+        tools = self.tools({"https://example.com/a": page("<p>cached text</p>")})
+        tools.raw("https://example.com/a")
+        tools.raw("https://example.com/a")
+        self.assertEqual(len(self.transport.calls), 2)
+        self.assertEqual(len(tools.cache), 0)
+        # A page /v1/fetch has cached is not served to /v1/raw.
+        tools.fetch("https://example.com/a")
+        self.assertEqual(len(self.transport.calls), 3)
+        self.assertEqual(len(tools.cache), 1)
+        tools.raw("https://example.com/a")
+        self.assertEqual(len(self.transport.calls), 4)
+
+    # --- content encoding ---------------------------------------------------------
+
+    def test_a_compressed_body_is_returned_unchanged_with_its_encoding(self):
+        packed = gzip.compress(b"<p>hello</p>")
+        result = self.raw({"https://example.com/a": Response(
+            200, {"content-type": "text/html", "content-encoding": "gzip"}, packed)})
+        self.assertEqual(base64.b64decode(result["body_base64"]), packed)
+        self.assertEqual((result["content_encoding"], result["content_type"]), ("gzip", "text/html"))
+
+    def test_content_encoding_is_reported_whenever_the_header_is_there(self):
+        for value in ("gzip", "br", "identity", "zstd", "gzip, br"):
+            result = self.raw({"https://example.com/a": Response(
+                200, {"content-encoding": value}, b"x")})
+            self.assertEqual(result["content_encoding"], value)
+        self.assertNotIn("content_encoding", self.raw({"https://example.com/a": page("x")}))
+
+    # --- the deadline ---------------------------------------------------------------
+
+    def test_one_deadline_covers_every_redirect(self):
+        clock = FakeClock()
+        self.transport = ClockedTransport({
+            f"https://example.com/{n}": redirect(f"/{n + 1}") for n in range(5)}, clock, 4)
+        tools = WebTools(resolver=self.resolve, transport=self.transport, searxng_url="",
+                         clock=clock)
+        error = self.error(tools, "https://example.com/0", timeout_seconds=10)
+        self.assertEqual(error.code, "timed_out")
+        self.assertEqual(error.status, 504)
+        # The time left shrinks from hop to hop, and no fourth request is made.
+        self.assertEqual(self.transport.deadlines, [10, 6, 2])
+
+    def test_a_fast_chain_passes_the_remaining_time_each_hop(self):
+        clock = FakeClock()
+        self.transport = ClockedTransport({
+            "https://example.com/0": redirect("/1"),
+            "https://example.com/1": page("done")}, clock, 1.5)
+        tools = WebTools(resolver=self.resolve, transport=self.transport, searxng_url="",
+                         clock=clock)
+        self.assertEqual(tools.raw("https://example.com/0", timeout_seconds=5)["status"], 200)
+        self.assertEqual(self.transport.deadlines, [5, 3.5])
+
+    def test_a_transport_timeout_is_timed_out(self):
+        tools = self.tools({"https://example.com/a": ToolError(
+            "example.com took longer than 3 s", "fetch_timeout", 504)})
+        error = self.error(tools, "https://example.com/a", timeout_seconds=12)
+        self.assertEqual((error.code, error.status), ("timed_out", 504))
+        self.assertIn("12 s", error.message)
+
+    def test_a_name_lookup_that_hangs_is_cut_off_by_the_deadline(self):
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        def hanging(host, port):
+            release.wait(30)
+            return ["93.184.216.34"]
+        tools = WebTools(resolver=hanging, transport=FakeTransport({}), searxng_url="")
+        started = time.monotonic()
+        error = self.error(tools, "https://example.com/a", timeout_seconds=0.3)
+        self.assertEqual(error.code, "timed_out")
+        self.assertLess(time.monotonic() - started, 5)
+
+    # --- errors -------------------------------------------------------------------
+
+    def test_codes_are_the_names_the_spec_promises(self):
+        cases = [
+            (ToolError("m", "blocked_address", 403), "private_address", 403),
+            (ToolError("m", "fetch_timeout", 504), "timed_out", 504),
+            (ToolError("m", "fetch_failed", 502), "fetch_failed", 502),
+            (ToolError("m", "dns_error", 502), "dns_error", 502),
+        ]
+        for original, code, status in cases:
+            tools = self.tools({"https://example.com/a": original})
+            error = self.error(tools, "https://example.com/a")
+            self.assertEqual((error.code, error.status), (code, status), original.code)
+
+    def test_messages_have_no_control_characters_and_are_short(self):
+        hostile = "bad\x1b[2J\r\nline‮​\x07 end" + "x" * 500
+        tools = self.tools({"https://example.com/a": ToolError(hostile, "fetch_failed", 502)})
+        message = self.error(tools, "https://example.com/a").message
+        self.assertLessEqual(len(message), 200)
+        self.assertTrue(message.startswith("bad[2J line"), message)
+        for character in message:
+            self.assertFalse(unicodedata.category(character).startswith("C"), repr(character))
+
+    def test_fetch_keeps_its_own_error_codes(self):
+        tools = self.tools({"https://example.com/slow": ToolError("slow", "fetch_timeout", 504)})
+        for url, code in [("http://internal.example/", "blocked_address"),
+                          ("ftp://example.com/", "invalid_url"),
+                          ("https://example.com/slow", "fetch_timeout")]:
+            with self.assertRaises(ToolError, msg=url) as caught:
+                tools.fetch(url)
+            self.assertEqual(caught.exception.code, code, url)
+
+    def test_fetch_is_unchanged(self):
+        tools = self.tools({
+            "https://example.com/a": redirect("http://other.example/b"),
+            "http://other.example/b": page(ARTICLE)})
+        # /v1/fetch still follows a redirect from https to http, still asks for
+        # gzip, still sends a language, still caches, and sets no deadline or limit.
+        self.assertEqual(tools.fetch("https://example.com/a")["url"], "http://other.example/b")
+        headers = self.transport.calls[0][2]
+        self.assertEqual(headers["Accept-Encoding"], "gzip")
+        self.assertIn("Accept-Language", headers)
+        self.assertEqual(self.transport.deadlines, [None, None])
+        self.assertEqual(self.transport.limits, [None, None])
+        tools.fetch("https://example.com/a")
+        self.assertEqual(len(self.transport.calls), 2)
+        self.assertEqual(len(tools.cache), 2)
+        self.assertEqual(len(tools.fetch("http://other.example/b", 0, 5)["text"]), 5)
+
+
+class RawTransportTests(unittest.TestCase):
+    """pinned_transport with the byte limit /v1/raw adds, on a real socket on
+    loopback (check_url would refuse it, so the target is built by hand)."""
+
+    seen = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            RawTransportTests.seen.append(dict(self.headers))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            if self.path == "/encoded":
+                self.send_header("Content-Encoding", "gzip")
+            if self.path not in ("/unknown-length", "/drip"):
+                self.send_header("Content-Length", "2000")
+            self.end_headers()
+            if self.path == "/drip":
+                try:
+                    for _ in range(100):
+                        self.wfile.write(b"z")
+                        self.wfile.flush()
+                        time.sleep(0.2)
+                except OSError:
+                    pass
+            else:
+                self.wfile.write(b"z" * 2000)
+
+    @classmethod
+    def setUpClass(cls):
+        cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), cls.Handler)
+        cls.httpd.daemon_threads = True
+        cls.port = cls.httpd.server_address[1]
+        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+
+    def get(self, path, headers=None, **options):
+        target = server.Target("http", "pinned.invalid", self.port, path, "127.0.0.1")
+        return server.pinned_transport("GET", target, headers or {"Host": "pinned.invalid"},
+                                       None, **options)
+
+    def test_no_accept_encoding_goes_on_the_wire_unless_it_is_given(self):
+        # http.client would add `Accept-Encoding: identity` by itself.
+        self.seen.clear()
+        self.get("/", {"Host": "pinned.invalid", "User-Agent": "u", "Accept": "text/plain"},
+                 deadline=5, max_bytes=5000)
+        self.assertEqual(self.seen, [{"Host": "pinned.invalid", "User-Agent": "u",
+                                      "Accept": "text/plain"}])
+        self.seen.clear()
+        self.get("/", {"Host": "pinned.invalid", "Accept-Encoding": "gzip"}, deadline=5)
+        self.assertEqual(self.seen[0]["Accept-Encoding"], "gzip")
+
+    def test_without_a_limit_the_behaviour_is_the_old_one(self):
+        response = self.get("/", deadline=5)
+        self.assertEqual((len(response.body), response.truncated), (2000, False))
+
+    def test_a_body_over_the_limit_is_flagged_and_cut_at_the_limit(self):
+        response = self.get("/unknown-length", deadline=5, max_bytes=1000)
+        self.assertEqual((len(response.body), response.truncated), (1000, True))
+        response = self.get("/unknown-length", deadline=5, max_bytes=2000)
+        self.assertEqual((len(response.body), response.truncated), (2000, False))
+
+    def test_a_content_length_over_the_limit_is_flagged_without_reading(self):
+        response = self.get("/", deadline=5, max_bytes=1999)
+        self.assertEqual((response.body, response.truncated, response.status), (b"", True, 200))
+        response = self.get("/", deadline=5, max_bytes=2000)
+        self.assertEqual((len(response.body), response.truncated), (2000, False))
+
+    def test_the_encoding_header_comes_through_and_the_body_is_not_unpacked(self):
+        response = self.get("/encoded", deadline=5, max_bytes=5000)
+        self.assertEqual(response.headers["content-encoding"], "gzip")
+        self.assertEqual(response.body, b"z" * 2000)
+
+    def test_the_limit_cannot_exceed_the_download_cap(self):
+        with mock.patch.object(server, "MAX_DOWNLOAD_BYTES", 1500):
+            response = self.get("/unknown-length", deadline=5, max_bytes=5000)
+        self.assertEqual((len(response.body), response.truncated), (1500, True))
+
+    def test_the_deadline_applies_with_a_limit_too(self):
+        started = time.monotonic()
+        with self.assertRaises(ToolError) as caught:
+            self.get("/drip", deadline=1, max_bytes=5000)
+        self.assertEqual(caught.exception.code, "fetch_timeout")
+        self.assertLess(time.monotonic() - started, 3)
 
 
 class PassageTests(unittest.TestCase):
@@ -792,7 +1313,7 @@ class HTTPAPITests(unittest.TestCase):
 
     def test_health(self):
         self.assertEqual(self.call("GET", "/health"),
-                         (200, {"status": "ok", "passages": True}))
+                         (200, {"status": "ok", "passages": True, "raw": True}))
 
     def test_fetch_passages_round_trip(self):
         status, payload = self.call("POST", "/v1/fetch", {
@@ -827,6 +1348,152 @@ class HTTPAPITests(unittest.TestCase):
 
     def test_unknown_path(self):
         self.assertEqual(self.call("POST", "/v1/shell", {})[0], 404)
+
+
+class RawAPITests(unittest.TestCase):
+    """POST /v1/raw over HTTP, with the same Host, Content-Type and size rules
+    as the other endpoints."""
+
+    @classmethod
+    def setUpClass(cls):
+        table = resolver({"example.com": ["93.184.216.34"], "internal.example": ["10.1.2.3"],
+                          "other.example": ["93.184.216.35"]})
+
+        def resolve(host, port):
+            try:
+                return table(host, port)
+            except ToolError:
+                return _numeric_only_resolver(host, port)
+        cls.body = b"\x00\xff<p>raw</p>\n"
+        cls.transport = FakeTransport({
+            "https://example.com/a": Response(
+                200, {"content-type": "text/html", "content-encoding": "gzip"}, cls.body),
+            "https://example.com/missing": page("gone", status=404),
+            "https://example.com/big": page("x" * 100),
+            "https://example.com/hop": redirect("http://other.example/"),
+            "https://example.com/slow": ToolError("example.com took longer than 1 s",
+                                                  "fetch_timeout", 504),
+            "https://example.com/page": page(ARTICLE),
+        })
+
+        class TestHandler(server.Handler):
+            tools = WebTools(resolver=resolve, transport=cls.transport, searxng_url="")
+
+            def log_message(self, *args):
+                pass
+
+        cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), TestHandler)
+        cls.port = cls.httpd.server_address[1]
+        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+
+    def call(self, method, path, body=None, headers=None):
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        data = json.dumps(body).encode() if body is not None else None
+        all_headers = {"Content-Type": "application/json"}
+        all_headers.update(headers or {})
+        connection.request(method, path, body=data, headers=all_headers)
+        response = connection.getresponse()
+        payload = json.loads(response.read())
+        connection.close()
+        return response.status, payload
+
+    def raw(self, **request):
+        return self.call("POST", "/v1/raw", request)
+
+    def test_health_says_raw_is_there(self):
+        status, payload = self.call("GET", "/health")
+        self.assertEqual(status, 200)
+        self.assertIs(payload["raw"], True)
+        self.assertEqual(payload, {"status": "ok", "passages": True, "raw": True})
+
+    def test_a_page_round_trip(self):
+        status, payload = self.raw(url="https://example.com/a", max_bytes=1000,
+                                   timeout_seconds=5, accept="text/html")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, {
+            "final_url": "https://example.com/a", "status": 200,
+            "content_type": "text/html", "content_encoding": "gzip",
+            "body_base64": base64.b64encode(self.body).decode()})
+
+    def test_only_a_url_is_needed(self):
+        status, payload = self.raw(url="https://example.com/a")
+        self.assertEqual((status, payload["status"]), (200, 200))
+
+    def test_a_404_is_http_200_with_status_404(self):
+        status, payload = self.raw(url="https://example.com/missing")
+        self.assertEqual((status, payload["status"]), (200, 404))
+        self.assertEqual(base64.b64decode(payload["body_base64"]), b"gone")
+
+    def test_failures_are_json_errors_with_a_code_and_a_message(self):
+        for request, http_status, code in [
+                ({"url": "http://internal.example/"}, 403, "private_address"),
+                ({"url": "http://192.168.1.1/"}, 403, "private_address"),
+                ({"url": "http://169.254.169.254/"}, 403, "private_address"),
+                ({"url": "ftp://example.com/"}, 422, "unsupported_scheme"),
+                ({"url": "https://example.com:8443/"}, 422, "blocked_port"),
+                ({"url": "https://example.com/big", "max_bytes": 10}, 502, "oversized"),
+                ({"url": "https://example.com/hop"}, 502, "insecure_redirect"),
+                ({"url": "https://example.com/slow"}, 504, "timed_out"),
+                ({"url": "not a url"}, 422, "invalid_url"),
+                ({"url": "https://gone.example/"}, 502, "dns_error"),
+                ({"url": "https://example.com/a", "max_bytes": 0}, 422, "invalid_argument"),
+                ({"url": "https://example.com/a", "timeout_seconds": 61}, 422, "invalid_argument"),
+                ({"url": "https://example.com/a", "accept": "a\r\nb: c"}, 422, "invalid_argument"),
+                ({}, 422, "invalid_url")]:
+            status, payload = self.raw(**request)
+            self.assertEqual((status, payload["error"]["code"]), (http_status, code), request)
+            self.assertEqual(set(payload), {"error"})
+            self.assertEqual(set(payload["error"]), {"code", "message"})
+            self.assertLessEqual(len(payload["error"]["message"]), 200)
+
+    def test_a_rebinding_host_is_refused(self):
+        status, payload = self.call("POST", "/v1/raw", {"url": "https://example.com/a"},
+                                    {"Host": "attacker.example:9100"})
+        self.assertEqual((status, payload["error"]["code"]), (403, "forbidden_host"))
+        status, payload = self.call("POST", "/v1/raw", {"url": "https://example.com/a"},
+                                    {"Host": "localhost:9100"})
+        self.assertEqual(status, 200)
+
+    def test_a_cross_origin_style_post_is_refused(self):
+        calls = len(self.transport.calls)
+        status, payload = self.call("POST", "/v1/raw", {"url": "https://example.com/a"},
+                                    {"Content-Type": "text/plain"})
+        self.assertEqual((status, payload["error"]["code"]), (415, "invalid_request"))
+        self.assertEqual(len(self.transport.calls), calls)
+
+    def test_the_request_size_limit_applies(self):
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        connection.putrequest("POST", "/v1/raw")
+        connection.putheader("Content-Type", "application/json")
+        connection.putheader("Content-Length", str(server.MAX_REQUEST_BYTES + 1))
+        connection.endheaders()
+        response = connection.getresponse()
+        self.assertEqual(response.status, 413)
+        connection.close()
+
+    def test_a_request_that_is_not_a_json_object_is_refused(self):
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        connection.request("POST", "/v1/raw", body=b'["https://example.com/a"]',
+                           headers={"Content-Type": "application/json"})
+        self.assertEqual(connection.getresponse().status, 400)
+        connection.close()
+
+    def test_fetch_is_not_changed_by_raw(self):
+        status, payload = self.call("POST", "/v1/fetch", {"url": "https://example.com/page"})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["title"], "Bounded streaming")
+        self.assertNotIn("body_base64", payload)
+        status, payload = self.call("POST", "/v1/fetch", {"url": "http://internal.example/"})
+        self.assertEqual((status, payload["error"]["code"]), (403, "blocked_address"))
+        status, payload = self.call("POST", "/v1/fetch", {"url": "ftp://example.com/"})
+        self.assertEqual((status, payload["error"]["code"]), (422, "invalid_url"))
+        status, payload = self.call("POST", "/v1/fetch", {"url": "https://example.com/slow"})
+        self.assertEqual((status, payload["error"]["code"]), (504, "fetch_timeout"))
 
 
 def _load_address_check():

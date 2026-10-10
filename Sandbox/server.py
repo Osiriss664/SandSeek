@@ -12,6 +12,8 @@ Endpoints (JSON in, JSON out):
   POST /v1/search  {"query": str, "max_results": int?}
   POST /v1/fetch   {"url": str, "offset": int?, "max_chars": int?,
                     "passages": bool?, "query": str?}
+  POST /v1/raw     {"url": str, "accept": str?, "max_bytes": int?,
+                    "timeout_seconds": number?}
 
 Fetches refuse anything but http(s) on ports 80 and 443, and refuse every
 address that is not globally routable. The resolved address is the one
@@ -19,6 +21,16 @@ connected to, so a DNS answer cannot change between the check and the
 connection. Redirects are followed by hand and checked the same way. That keeps
 the Mac (the VM's gateway), the local network and cloud metadata addresses out
 of reach.
+
+/v1/raw is for a caller that reads pages itself (TUFF's page reader). It does
+the same address checks, but returns the site's bytes as they came: base64 in
+JSON, with the site's status, content type and content encoding. Invisible-
+character stripping and text extraction deliberately do NOT apply to it, and a
+compressed body is not unpacked; the caller parses and cleans what it gets.
+Unlike /v1/fetch it never follows a redirect from https to http, reports a body
+over its size limit as an error instead of cutting it, sends no
+Accept-Encoding, and never uses the page cache. All of its redirects share one
+time limit.
 
 Those checks live in this process, so they would not bind code that took it
 over. firewall.nft, loaded by entrypoint.sh before this server starts, applies
@@ -29,6 +41,7 @@ capability so it cannot change the firewall.
 
 from __future__ import annotations
 
+import base64
 import codecs
 import ctypes
 import errno
@@ -94,6 +107,17 @@ PASSAGE_SEPARATOR = "\n[...]\n"
 BM25_K1 = 1.5
 BM25_B = 0.75
 ALLOWED_PORTS = {"http": 80, "https": 443}
+REDIRECT_STATUSES = (301, 302, 303, 307, 308)
+# /v1/raw: the Accept value used when a request has none (it is what TUFF's
+# page reader sends), and the limits on a request's own values.
+RAW_DEFAULT_ACCEPT = "text/html,application/xhtml+xml,text/plain;q=0.9,application/pdf;q=0.8"
+RAW_MAX_ACCEPT_CHARS = 512
+RAW_DEFAULT_TIMEOUT = 15
+RAW_MAX_TIMEOUT = 60
+RAW_MAX_MESSAGE_CHARS = 200
+# check_url and the transport name two errors differently from what /v1/raw
+# promises its caller. /v1/fetch and /v1/search keep the old names.
+RAW_CODES = {"blocked_address": "private_address", "fetch_timeout": "timed_out"}
 TEXT_TYPES = ("text/html", "application/xhtml+xml", "text/plain")
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
 # Titles sit in the head; searching further only gives a hostile page more
@@ -242,10 +266,21 @@ class Response:
     truncated: bool = False
 
 
-Transport = Callable[[str, Target, dict[str, str], bytes | None], Response]
+# Called with (method, target, headers, body); /v1/raw adds the keyword
+# arguments `deadline` and `max_bytes`.
+Transport = Callable[..., Response]
 
 
-class _PinnedHTTPConnection(http.client.HTTPConnection):
+class _SendOnlyGivenHeaders:
+    """http.client adds `Accept-Encoding: identity` to a request that has no
+    Accept-Encoding header. The transport sends the headers it is given and
+    nothing else."""
+
+    def putrequest(self, method, url, skip_host=False, skip_accept_encoding=False):
+        return super().putrequest(method, url, skip_host, True)
+
+
+class _PinnedHTTPConnection(_SendOnlyGivenHeaders, http.client.HTTPConnection):
     def __init__(self, target: Target, timeout: float):
         super().__init__(target.host, target.port, timeout=timeout)
         self._address = target.address
@@ -254,7 +289,7 @@ class _PinnedHTTPConnection(http.client.HTTPConnection):
         self.sock = socket.create_connection((self._address, self.port), self.timeout)
 
 
-class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+class _PinnedHTTPSConnection(_SendOnlyGivenHeaders, http.client.HTTPSConnection):
     def __init__(self, target: Target, timeout: float):
         super().__init__(target.host, target.port, timeout=timeout,
                          context=ssl.create_default_context())
@@ -262,14 +297,30 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
 
     def connect(self):
         sock = socket.create_connection((self._address, self.port), self.timeout)
+        # Kept while the handshake runs, so the deadline can cut it short.
+        self.sock = sock
         self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
 
 
+def declared_length(headers: dict[str, str]) -> int | None:
+    """The Content-Length a response announces, if it is a plain number."""
+    value = headers.get("content-length", "").strip()
+    return int(value) if value.isascii() and value.isdigit() else None
+
+
 def pinned_transport(method: str, target: Target, headers: dict[str, str],
-                     body: bytes | None, deadline: float | None = None) -> Response:
+                     body: bytes | None, deadline: float | None = None,
+                     max_bytes: int | None = None) -> Response:
+    """`deadline` bounds the whole request in seconds. `max_bytes` caps the
+    body that is read (at most MAX_DOWNLOAD_BYTES by default); a longer body,
+    or a Content-Length above it, comes back as `truncated` without the rest
+    being read."""
     cls = _PinnedHTTPSConnection if target.scheme == "https" else _PinnedHTTPConnection
-    connection = cls(target, FETCH_TIMEOUT)
     limit = FETCH_DEADLINE if deadline is None else deadline
+    cap = MAX_DOWNLOAD_BYTES if max_bytes is None else min(max_bytes, MAX_DOWNLOAD_BYTES)
+    # A wait longer than the deadline is cut by the timer; one second more
+    # lets the timer win the race and report a timeout, not a failed connect.
+    connection = cls(target, min(FETCH_TIMEOUT, limit + 1))
     expired = threading.Event()
 
     def expire():
@@ -288,9 +339,13 @@ def pinned_transport(method: str, target: Target, headers: dict[str, str],
     try:
         connection.request(method, target.path, body=body, headers=headers)
         response = connection.getresponse()
+        received = {k.lower(): v for k, v in response.getheaders()}
+        announced = declared_length(received)
+        if max_bytes is not None and announced is not None and announced > cap:
+            return Response(response.status, received, b"", truncated=True)
         chunks, size = [], 0
-        while size <= MAX_DOWNLOAD_BYTES and not expired.is_set():
-            chunk = response.read1(min(65536, MAX_DOWNLOAD_BYTES + 1 - size))
+        while size <= cap and not expired.is_set():
+            chunk = response.read1(min(65536, cap + 1 - size))
             if not chunk:
                 break
             chunks.append(chunk)
@@ -300,9 +355,9 @@ def pinned_transport(method: str, target: Target, headers: dict[str, str],
         data = b"".join(chunks)
         return Response(
             status=response.status,
-            headers={k.lower(): v for k, v in response.getheaders()},
-            body=data[:MAX_DOWNLOAD_BYTES],
-            truncated=len(data) > MAX_DOWNLOAD_BYTES)
+            headers=received,
+            body=data[:cap],
+            truncated=len(data) > cap)
     except (OSError, http.client.HTTPException, ValueError) as error:
         if expired.is_set():
             raise too_slow
@@ -616,6 +671,31 @@ def rank_passages(text: str, query: str) -> list[tuple[int, int]]:
 
 # --- Tools ------------------------------------------------------------------
 
+def url_scheme(url: str) -> str:
+    try:
+        return urllib.parse.urlsplit(url.strip()).scheme.lower()
+    except ValueError:
+        return ""
+
+
+def check_raw_url(url: str, resolver: Callable[[str, int], list[str]]) -> Target:
+    """check_url, except that a scheme other than http and https is reported as
+    `unsupported_scheme`. (/v1/fetch keeps calling that `invalid_url`.)"""
+    if isinstance(url, str) and url_scheme(url) not in ("", *ALLOWED_PORTS):
+        raise ToolError("only http and https URLs can be fetched", "unsupported_scheme")
+    return check_url(url, resolver)
+
+
+def raw_error(error: ToolError) -> ToolError:
+    """An error as /v1/raw reports it: its own code names, and a message
+    without control characters or line breaks, of limited length."""
+    text = clean_text(error.message)
+    text = "".join(" " if c.isspace() else c for c in text)
+    text = "".join(c for c in text if unicodedata.category(c)[0] != "C").strip()
+    return ToolError(text[:RAW_MAX_MESSAGE_CHARS], RAW_CODES.get(error.code, error.code),
+                     error.status)
+
+
 @dataclass
 class Page:
     url: str
@@ -630,6 +710,7 @@ class WebTools:
     searxng_url: str = SEARXNG_URL
     cache: OrderedDict = field(default_factory=OrderedDict)
     lock: threading.Lock = field(default_factory=threading.Lock)
+    clock: Callable[[], float] = time.monotonic
 
     def request(self, method: str, url: str, body: bytes | None = None,
                 content_type: str | None = None) -> tuple[str, Response]:
@@ -657,6 +738,90 @@ class WebTools:
                 continue
             return target.url, response
         raise ToolError("too many redirects", "too_many_redirects", 502)
+
+    def raw(self, url, accept=RAW_DEFAULT_ACCEPT, max_bytes=MAX_DOWNLOAD_BYTES,
+            timeout_seconds=RAW_DEFAULT_TIMEOUT) -> dict:
+        """The site's own bytes, for a caller that parses them itself. No text
+        extraction, no cleaning, no decompression, no cache, no cookies."""
+        try:
+            return self._raw(url, accept, max_bytes, timeout_seconds)
+        except ToolError as error:
+            raise raw_error(error) from None
+
+    def _raw(self, url, accept, max_bytes, timeout_seconds) -> dict:
+        if (not isinstance(accept, str) or len(accept) > RAW_MAX_ACCEPT_CHARS
+                or not accept.isascii() or not accept.isprintable()):
+            raise ToolError(f"accept must be at most {RAW_MAX_ACCEPT_CHARS} printable ASCII "
+                            "characters", "invalid_argument")
+        if (not isinstance(max_bytes, int) or isinstance(max_bytes, bool)
+                or not 1 <= max_bytes <= MAX_DOWNLOAD_BYTES):
+            raise ToolError(f"max_bytes must be between 1 and {MAX_DOWNLOAD_BYTES}",
+                            "invalid_argument")
+        if (not isinstance(timeout_seconds, (int, float)) or isinstance(timeout_seconds, bool)
+                or not 0 < timeout_seconds <= RAW_MAX_TIMEOUT):
+            raise ToolError(f"timeout_seconds must be more than 0 and at most {RAW_MAX_TIMEOUT}",
+                            "invalid_argument")
+        # One deadline for the name lookups, connections and reads of every hop.
+        expires = self.clock() + timeout_seconds
+        too_slow = ToolError(f"the request took longer than {timeout_seconds:g} s",
+                             "timed_out", 504)
+        current = url
+        for _ in range(MAX_REDIRECTS + 1):
+            target = self._checked_target(current, expires - self.clock(), too_slow)
+            remaining = expires - self.clock()
+            if remaining <= 0:
+                raise too_slow
+            # No Accept-Encoding, no cookies, no language: only what the caller
+            # asked for and the sandbox's own User-Agent.
+            headers = {"Host": target.host, "User-Agent": USER_AGENT, "Accept": accept}
+            try:
+                response = self.transport("GET", target, headers, None,
+                                          deadline=remaining, max_bytes=max_bytes)
+            except ToolError as error:
+                raise too_slow if error.code == "fetch_timeout" else error
+            location = response.headers.get("location", "").strip()
+            if response.status in REDIRECT_STATUSES and location:
+                current = urllib.parse.urljoin(target.url, location)
+                if target.scheme == "https" and url_scheme(current) == "http":
+                    raise ToolError("a redirect from https to http was refused",
+                                    "insecure_redirect", 502)
+                continue
+            announced = declared_length(response.headers)
+            if (response.truncated or len(response.body) > max_bytes
+                    or (announced is not None and announced > max_bytes)):
+                raise ToolError(f"the body is larger than {max_bytes} bytes", "oversized", 502)
+            result = {
+                "final_url": target.url,
+                "status": response.status,
+                "content_type": response.headers.get("content-type", ""),
+                "body_base64": base64.b64encode(response.body).decode("ascii"),
+            }
+            if "content-encoding" in response.headers:
+                result["content_encoding"] = response.headers["content-encoding"]
+            return result
+        raise ToolError("too many redirects", "too_many_redirects", 502)
+
+    def _checked_target(self, url, remaining: float, too_slow: ToolError) -> Target:
+        """check_url, but given up on when the name lookup outlasts the
+        deadline. The lookup cannot be stopped; its thread ends by itself."""
+        if remaining <= 0:
+            raise too_slow
+        outcome: dict = {}
+
+        def check():
+            try:
+                outcome["target"] = check_raw_url(url, self.resolver)
+            except BaseException as error:
+                outcome["error"] = error
+
+        worker = threading.Thread(target=check, daemon=True)
+        worker.start()
+        worker.join(remaining)
+        if worker.is_alive():
+            raise too_slow
+        if "error" in outcome:
+            raise outcome["error"]
+        return outcome["target"]
 
     def load_page(self, url: str) -> Page:
         with self.lock:
@@ -907,7 +1072,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(ToolError("forbidden host", "forbidden_host", 403))
         if self.path == "/health":
             # "passages" tells the research loop this sandbox can rank passages.
-            return self._send(200, {"status": "ok", "passages": True})
+            # "raw" tells a caller that POST /v1/raw exists.
+            return self._send(200, {"status": "ok", "passages": True, "raw": True})
         self._error(ToolError("not found", "not_found", 404))
 
     def do_POST(self):
@@ -935,6 +1101,11 @@ class Handler(BaseHTTPRequestHandler):
                     request.get("url"), request.get("offset", 0),
                     request.get("max_chars", DEFAULT_SLICE_CHARS),
                     request.get("passages", False), request.get("query", ""))
+            elif self.path == "/v1/raw":
+                result = self.tools.raw(
+                    request.get("url"), request.get("accept", RAW_DEFAULT_ACCEPT),
+                    request.get("max_bytes", MAX_DOWNLOAD_BYTES),
+                    request.get("timeout_seconds", RAW_DEFAULT_TIMEOUT))
             else:
                 raise ToolError("not found", "not_found", 404)
             self._send(200, result)
