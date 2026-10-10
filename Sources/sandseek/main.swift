@@ -11,6 +11,14 @@ private func writeProgress(_ text: String) {
     writeError(ResearchText.terminalSafe(text))
 }
 
+// The old TUFF_RESEARCH_ names are ignored now. Say so, so that a run is not
+// silently measured with the default settings. This never stops the run.
+let oldVariablePrefix = "TUFF_RESEARCH_"
+for name in ProcessInfo.processInfo.environment.keys.sorted() where name.hasPrefix(oldVariablePrefix) {
+    let replacement = "SANDSEEK_" + String(name.dropFirst(oldVariablePrefix.count))
+    writeError("warning: \(name) is the old name and is ignored; use \(replacement)")
+}
+
 let arguments: ResearchArguments
 do {
     arguments = try ResearchArguments.parse(Array(CommandLine.arguments.dropFirst()))

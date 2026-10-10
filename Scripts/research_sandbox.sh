@@ -17,6 +17,14 @@
 
 set -euo pipefail
 
+# The old TUFF_RESEARCH_ names are ignored now; say so instead of silently
+# using the defaults. This does not stop the script.
+for old_name in TUFF_RESEARCH_SANDBOX_PORT TUFF_RESEARCH_DNS; do
+  if [[ -n "${!old_name+x}" ]]; then
+    echo "warning: $old_name is the old name and is ignored; use SANDSEEK_${old_name#TUFF_RESEARCH_}" >&2
+  fi
+done
+
 image="sandseek-sandbox:latest"
 name="sandseek-sandbox"
 port="${SANDSEEK_SANDBOX_PORT:-9100}"

@@ -63,9 +63,10 @@ except ImportError:  # The extractor is optional so tests can run without it.
 
 PORT = int(os.environ.get("PORT", "9100"))
 SEARXNG_URL = os.environ.get("SEARXNG_URL", "").rstrip("/")
+# Kept unchanged until the q3 comparison, so search results stay comparable.
 USER_AGENT = os.environ.get(
     "USER_AGENT",
-    "Mozilla/5.0 (compatible; SandSeek-sandbox/1.0)")
+    "Mozilla/5.0 (compatible; TUFF-web-research/1.0; +https://github.com/rexmhall09/TUFF)")
 # Each wait for a connection or data. Some official sites (Bank Indonesia)
 # take over 20 s to answer, so 15 s cut them off.
 FETCH_TIMEOUT = float(os.environ.get("FETCH_TIMEOUT", "30"))

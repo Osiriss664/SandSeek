@@ -1,8 +1,7 @@
 import Foundation
 
-/// A JSON value for the research loop's requests and replies. The loop only
-/// links Foundation and the model catalog, so it does not use the engine's
-/// `JSONValue`.
+/// A JSON value for the research loop's requests and replies. The loop links
+/// only Foundation, so it brings its own JSON type.
 public enum ResearchJSON: Codable, Equatable, Sendable {
     case null
     case bool(Bool)

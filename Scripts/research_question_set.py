@@ -230,7 +230,7 @@ def command_run(args: argparse.Namespace) -> int:
                 "thinking": args.thinking, "model": args.model or "default",
                 "max_steps": args.max_steps, "extra": args.extra or [],
                 "env": sorted(f"{k}={v}" for k, v in env.items()
-                              if k.startswith("SANDSEEK_"))}
+                              if k.startswith(("SANDSEEK_", "TUFF_", "TFF_")))}
     earlier = {json.dumps(r.get("settings"), sort_keys=True) for r in results.values()}
     now = json.dumps(settings, sort_keys=True)
     if earlier and earlier != {now} and not args.mixed:

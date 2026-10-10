@@ -78,7 +78,7 @@ public enum ResearchModelTable {
     }
 
     /// The API model ids of the models whose selector is exactly `selector`
-    /// (case-sensitive, like the server's own lookup).
+    /// (exact selector match only, as before: aliases and other cases are not mapped).
     public static func apiModelIDs(forSelector selector: String) -> [String] {
         all.filter { $0.selector == selector }.map(\.apiModelID)
     }

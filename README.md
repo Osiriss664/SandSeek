@@ -16,8 +16,9 @@ show some old TUFF names while they are rewritten.
 
 - Apple silicon, macOS 26 (needed by Apple `container`)
 - [Apple `container`](https://github.com/apple/container)
-- A local model server on 127.0.0.1: TUFF 8.3.1 or newer, or a llama.cpp
-  `llama-server`. Streaming is not implemented yet.
+- A local model server on 127.0.0.1: TUFF 8.3.1 or newer. llama.cpp
+  (`llama-server`) support is planned, not tested yet. Streaming is not
+  implemented yet.
 - A Swift 6.2 toolchain to build
 
 ## Build

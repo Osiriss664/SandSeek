@@ -1,6 +1,6 @@
-Being rewritten for SandSeek (plan section 4). Commands below may still show the old TUFF names.
-
 # Web research for TUFF
+
+> Being rewritten for SandSeek (Abschnitt 4 of the plan). Commands below may still show the old TUFF names.
 
 Ask a local TUFF model a question, and it searches the web, reads the pages it
 needs and answers with numbered sources. The model runs on your Mac, and

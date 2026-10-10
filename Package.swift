@@ -3,7 +3,7 @@ import PackageDescription
 
 // The App/ folder (SwiftUI app, run controllers and their tests) is not part
 // of this package yet: it still depends on TUFF app modules and is rebuilt in
-// plan section 3. See App/README.md.
+// Abschnitt 3 of the plan. See App/README.md.
 let package = Package(
     name: "SandSeek",
     platforms: [

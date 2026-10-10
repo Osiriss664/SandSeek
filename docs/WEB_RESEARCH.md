@@ -1,6 +1,6 @@
-Being rewritten for SandSeek (plan section 4). Commands below may still show the old TUFF names.
-
 # Web research
+
+> Being rewritten for SandSeek (Abschnitt 4 of the plan). Commands below may still show the old TUFF names.
 
 `tuff research` answers a question by searching the web and reading pages with
 a local TUFF model. The model runs on your Mac as usual. Everything that
@@ -175,7 +175,7 @@ sandbox mounts none.
 | Command | What `container` does |
 | --- | --- |
 | `build` | Builds the image `tuff-web-research` from `Sandbox/web-research/Containerfile`: a pinned Python base image, the firewall rules, and the sandbox server with hash-pinned packages. `container` runs the build in its own builder VM, which the script stops again afterwards unless it was already running. |
-| `start` | Starts a fresh VM from that image, named `tuff-web-research`, and deletes any older one. Its options: a read-only root filesystem with a scratch `/tmp`; 2 CPUs and 1 GB of memory; at most 512 processes; all Linux capabilities dropped except the four the start-up needs to load the firewall and switch to an unprivileged user; and the sandbox port published on the Mac's 127.0.0.1:9000 only (`TUFF_RESEARCH_SANDBOX_PORT` changes it), so only programs on your Mac can call it. `--rm` deletes the VM when it stops. |
+| `start` | Starts a fresh VM from that image, named `tuff-web-research`, and deletes any older one. Its options: a read-only root filesystem with a scratch `/tmp`; 2 CPUs and 1 GB of memory; at most 512 processes; all Linux capabilities dropped except the four the start-up needs to load the firewall and switch to an unprivileged user; and the sandbox port published on the Mac's 127.0.0.1:9000 only (`SANDSEEK_SANDBOX_PORT` changes it), so only programs on your Mac can call it. `--rm` deletes the VM when it stops. |
 | `selftest` | Runs checks inside the running VM with `container exec`: that the firewall is loaded, that the server has no privileges, and that the VM cannot reach the Mac or your local network. See [Testing the boundaries](#testing-the-boundaries). |
 
 The sandbox keeps its page cache and any state until `stop`. The app starts a
@@ -315,7 +315,7 @@ the VM reach the Mac on the DNS port only.
 To keep the VM away from the Mac entirely, use public resolvers instead:
 
 ```sh
-TUFF_RESEARCH_DNS="1.1.1.1 9.9.9.9" Scripts/research_sandbox.sh start
+SANDSEEK_DNS="1.1.1.1 9.9.9.9" Scripts/research_sandbox.sh start
 ```
 
 Then Cloudflare (1.1.1.1) and Quad9 (9.9.9.9) see which sites the research
@@ -637,9 +637,9 @@ run can be compared with and without it.
   leaves it out, which lets the server continue a plain-text turn from its
   cache. The model is the `--model` name, or for `default` the single model
   the server lists; an unknown model gets the flag. To measure on a Mac, set
-  `TUFF_RESEARCH_PRESERVE_THINKING=on|off|auto` (default `auto`, the rule
+  `SANDSEEK_PRESERVE_THINKING=on|off|auto` (default `auto`, the rule
   above) in the environment of `tuff research`; the app has no setting for it. The same goes for
-  `TUFF_RESEARCH_MARKERS=fixed|nonce` (default `fixed`): with `nonce` the markers around web
+  `SANDSEEK_MARKERS=fixed|nonce` (default `fixed`): with `nonce` the markers around web
   text carry a random code per run and `<<<` and `>>>` are made harmless in web text. The
   retry, the continuation and the revision ask with reasoning off, so with
   reasoning on they can still miss. A reply with tool calls is never used: the
