@@ -705,3 +705,187 @@ struct ResearchLineSplittingTests {
         #expect(try await collect(response) == ["data: 1", "", "data: 2"])
     }
 }
+
+/// Answers GET /tuff/v1/status from a script.
+private final class StatusScript: ResearchHTTPTransport {
+    private let handler: @Sendable (URL) throws -> ResearchHTTPResponse
+
+    init(_ handler: @escaping @Sendable (URL) throws -> ResearchHTTPResponse) {
+        self.handler = handler
+    }
+
+    func send(method: String, url: URL, body: Data?) async throws -> ResearchHTTPResponse {
+        try handler(url)
+    }
+
+    static func tuff(version: String?) -> StatusScript {
+        StatusScript { url in
+            guard url.absoluteString == "http://127.0.0.1:8080/tuff/v1/status" else {
+                return ResearchHTTPResponse(status: 404, body: Data())
+            }
+            let versionField = version.map { #""version":"\#($0)","# } ?? ""
+            return ResearchHTTPResponse(status: 200, body: Data(
+                (#"{"#
+                    + versionField
+                    + #""mode":"router","resident_model":null,"active_requests":0,"queued_requests":0,"default_model":"qwen3.6-35b-a3b","unload_delay_seconds":300}"#).utf8))
+        }
+    }
+
+    /// llama-server: no such route.
+    static let llamaServer = StatusScript { _ in
+        ResearchHTTPResponse(status: 404, body: Data(
+            #"{"error":{"code":404,"message":"File Not Found","type":"not_found_error"}}"#.utf8))
+    }
+}
+
+@Suite("Web research server connection")
+struct ResearchServerConnectionTests {
+    @Test func tuffIsDetectedFromItsStatusRoute() async throws {
+        let connection = try await ResearchServerConnection.establish(
+            choice: .auto, stream: nil, serverURL: serverURL,
+            transport: StatusScript.tuff(version: "8.3.1"))
+        #expect(connection == ResearchServerConnection(kind: .tuff, version: "8.3.1", streaming: true))
+        #expect(connection.progressLine == "server: TUFF 8.3.1, streaming")
+        // The address may end in /v1, as for chat.
+        let withV1 = try await ResearchServerConnection.establish(
+            choice: .auto, stream: nil, serverURL: URL(string: "http://127.0.0.1:8080/v1")!,
+            transport: StatusScript.tuff(version: "8.3.1"))
+        #expect(withV1.kind == .tuff)
+    }
+
+    @Test func aStatusWithoutAVersionIsStillTUFF() async throws {
+        let connection = try await ResearchServerConnection.establish(
+            choice: .auto, stream: nil, serverURL: serverURL,
+            transport: StatusScript.tuff(version: nil))
+        #expect(connection.kind == .tuff)
+        #expect(connection.version == nil)
+        #expect(connection.progressLine == "server: TUFF, streaming")
+    }
+
+    @Test func streamOffTurnsStreamingOffForTUFF() async throws {
+        let connection = try await ResearchServerConnection.establish(
+            choice: .auto, stream: false, serverURL: serverURL,
+            transport: StatusScript.tuff(version: "8.3.1"))
+        #expect(!connection.streaming)
+        #expect(connection.progressLine == "server: TUFF 8.3.1, no streaming")
+    }
+
+    @Test func anUnrecognisedServerIsRefusedAndTheMessageNamesTheWayOut() async {
+        let html = StatusScript({ _ in ResearchHTTPResponse(status: 200, body: Data("<html>".utf8)) })
+        let array = StatusScript({ _ in ResearchHTTPResponse(status: 200, body: Data("[1]".utf8)) })
+        let transports: [StatusScript] = [StatusScript.llamaServer, html, array]
+        for transport in transports {
+            do {
+                _ = try await ResearchServerConnection.establish(
+                    choice: .auto, stream: nil, serverURL: serverURL, transport: transport)
+                Issue.record("expected the server to be refused")
+            } catch let error as ResearchError {
+                let text = error.description
+                #expect(text.contains("--server-type llamacpp"), "\(text)")
+                #expect(text.contains("2b"), "\(text)")
+                #expect(text.contains("non-streaming"), "\(text)")
+            } catch {
+                Issue.record("unexpected error \(error)")
+            }
+        }
+    }
+
+    @Test func aServerThatDoesNotAnswerIsUnreachableNotRefused() async {
+        let silent = StatusScript({ _ in throw URLError(.cannotConnectToHost) })
+        do {
+            _ = try await ResearchServerConnection.establish(
+                choice: .auto, stream: nil, serverURL: serverURL, transport: silent)
+            Issue.record("expected an error")
+        } catch ResearchError.modelUnavailable(_) {
+        } catch {
+            Issue.record("unexpected error \(error)")
+        }
+    }
+
+    @Test func llamaCppIsUsedAsNamedWithThePlainRequest() async throws {
+        let connection = try await ResearchServerConnection.establish(
+            choice: .llamacpp, stream: nil, serverURL: serverURL,
+            transport: StatusScript.llamaServer)
+        #expect(connection == ResearchServerConnection(kind: .llamacpp, version: nil, streaming: false))
+        #expect(connection.progressLine.hasPrefix("server: llama.cpp, no streaming"))
+        // It does not ask the TUFF route at all.
+        let unreachable = StatusScript({ _ in throw URLError(.cannotConnectToHost) })
+        #expect(try await ResearchServerConnection.establish(
+            choice: .llamacpp, stream: false, serverURL: serverURL, transport: unreachable).kind
+            == .llamacpp)
+        await #expect(throws: ResearchError.self) {
+            _ = try await ResearchServerConnection.establish(
+                choice: .llamacpp, stream: true, serverURL: serverURL, transport: unreachable)
+        }
+    }
+
+    @Test func namingTUFFSkipsDetectionButRecordsTheVersion() async throws {
+        let named = try await ResearchServerConnection.establish(
+            choice: .tuff, stream: nil, serverURL: serverURL,
+            transport: StatusScript.tuff(version: "8.3.1"))
+        #expect(named == ResearchServerConnection(kind: .tuff, version: "8.3.1", streaming: true))
+        // A TUFF without the status route (no background server) still runs.
+        let without = try await ResearchServerConnection.establish(
+            choice: .tuff, stream: nil, serverURL: serverURL, transport: StatusScript.llamaServer)
+        #expect(without == ResearchServerConnection(kind: .tuff, version: nil, streaming: true))
+    }
+}
+
+@Suite("Web research streaming arguments")
+struct ResearchStreamingArgumentsTests {
+    @Test func defaultsAskForDetectionAndTheServersOwnStreaming() throws {
+        let parsed = try ResearchArguments.parse(["q"])
+        #expect(parsed.serverType == .auto)
+        #expect(parsed.stream == nil)
+    }
+
+    @Test func serverTypeAndStreamAreParsed() throws {
+        for (text, expected) in [("tuff", ResearchServerChoice.tuff), ("llamacpp", .llamacpp),
+                                 ("auto", .auto)] {
+            #expect(try ResearchArguments.parse(["q", "--server-type", text]).serverType == expected)
+        }
+        #expect(try ResearchArguments.parse(["q", "--stream", "off"]).stream == false)
+        #expect(try ResearchArguments.parse(["--stream", "on", "q"]).stream == true)
+        let both = try ResearchArguments.parse(
+            ["--server-type", "tuff", "--stream", "on", "--server", "http://127.0.0.1:8081",
+             "--model", "qwen36", "--context-chars", "32000", "q"])
+        #expect(both.serverType == .tuff)
+        #expect(both.stream == true)
+        // The options that were there before keep their meaning.
+        #expect(both.serverURL.absoluteString == "http://127.0.0.1:8081")
+        #expect(both.model == "qwen36")
+        #expect(both.options.contextBudgetCharacters == 32_000)
+        #expect(both.question == "q")
+        // llama.cpp, plain.
+        let llama = try ResearchArguments.parse(["q", "--server-type", "llamacpp", "--stream", "off"])
+        #expect(llama.serverType == .llamacpp)
+        #expect(llama.stream == false)
+        #expect(try ResearchArguments.parse(["q", "--server-type", "llamacpp"]).stream == nil)
+    }
+
+    @Test func badValuesAreRefused() {
+        for arguments in [["q", "--server-type", "ollama"], ["q", "--server-type", "TUFF"],
+                          ["q", "--server-type"], ["q", "--stream", "yes"], ["q", "--stream"],
+                          ["q", "--server-type", "llamacpp", "--stream", "on"]] {
+            #expect(throws: ResearchArgumentError.self) {
+                _ = try ResearchArguments.parse(arguments)
+            }
+        }
+    }
+
+    @Test func theUsageDescribesBothOptions() {
+        let usage = ResearchArguments.usage
+        #expect(usage.contains("--server-type tuff|llamacpp|auto"))
+        #expect(usage.contains("--stream on|off"))
+        #expect(usage.contains("/tuff/v1/status"))
+        #expect(usage.contains("2b"))
+    }
+
+    @Test func aReplayCannotBeCombinedWithTheNewOptions() {
+        for extra in [["--server-type", "tuff"], ["--stream", "off"]] {
+            #expect(throws: ResearchArgumentError.self) {
+                _ = try ResearchArguments.parse(["--replay-figures", "a.json"] + extra)
+            }
+        }
+    }
+}

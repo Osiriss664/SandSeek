@@ -5,6 +5,11 @@ public struct ResearchArguments: Equatable, Sendable {
     public var model: String = "default"
     public var serverURL: URL = URL(string: "http://127.0.0.1:8080")!
     public var sandboxURL: URL = URL(string: "http://127.0.0.1:9100")!
+    /// Which kind of model server `serverURL` is; `auto` asks it.
+    public var serverType: ResearchServerChoice = .auto
+    /// Whether to read model replies as a stream. Nil is the default for the
+    /// server kind: on for TUFF, off for llama.cpp (see `ResearchServerConnection`).
+    public var stream: Bool?
     public var outputPath: String?
     /// Test aids: write the answer and page texts of a finished run to a new
     /// JSON file, and run the figure check again on such a file, with no
@@ -32,6 +37,19 @@ public struct ResearchArguments: Equatable, Sendable {
       --model <name>           Model the server should use (default: default,
                                the model selected on the server).
       --server <url>           Model server (default: http://127.0.0.1:8080).
+      --server-type tuff|llamacpp|auto
+                               Kind of model server (default auto: the
+                               command asks TUFF's /tuff/v1/status and uses
+                               TUFF when it answers; any other server is
+                               refused). A llama.cpp server must be named
+                               with llamacpp. Its connector comes in
+                               Abschnitt 2b; for now it gets the plain
+                               non-streaming request.
+      --stream on|off          Read each model reply as a stream (default on
+                               for TUFF). Streaming lets Stop and the time
+                               limits make TUFF stop generating; with off,
+                               TUFF finishes an abandoned reply anyway. Not
+                               available for llamacpp yet.
       --sandbox <url>          Web sandbox (default: http://127.0.0.1:9100).
       --max-steps <1...100>    Model turns that may use tools (default 8).
       --max-tokens <n>         Completion tokens per model turn, 64...32768
@@ -159,6 +177,14 @@ public struct ResearchArguments: Equatable, Sendable {
                 parsed.model = try value(argument)
             case "--server":
                 parsed.serverURL = try ResearchEndpoint.loopbackURL(try value(argument), flag: argument)
+            case "--server-type":
+                let text = try value(argument)
+                guard let choice = ResearchServerChoice(rawValue: text) else {
+                    throw ResearchArgumentError("--server-type must be tuff, llamacpp or auto")
+                }
+                parsed.serverType = choice
+            case "--stream":
+                parsed.stream = try onOff(argument)
             case "--sandbox":
                 parsed.sandboxURL = try ResearchEndpoint.loopbackURL(try value(argument), flag: argument)
             case "--max-steps":
@@ -248,6 +274,9 @@ public struct ResearchArguments: Equatable, Sendable {
            URL(fileURLWithPath: output).standardizedFileURL
                == URL(fileURLWithPath: saved).standardizedFileURL {
             throw ResearchArgumentError("--output and --save-pages must name different files")
+        }
+        if parsed.serverType == .llamacpp, parsed.stream == true, !parsed.showHelp {
+            throw ResearchArgumentError(ResearchServerConnection.streamingNeedsConnectorMessage)
         }
         if !parsed.showHelp && parsed.replayFiguresPath == nil && parsed.question.isEmpty {
             throw ResearchArgumentError("a question is required")

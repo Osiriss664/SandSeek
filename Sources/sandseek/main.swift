@@ -61,6 +61,20 @@ let transport = URLSessionResearchTransport(
     timeout: TimeInterval(arguments.stepTimeoutMinutes * 60))
 let sandboxTransport = URLSessionResearchTransport()
 let quiet = arguments.quiet
+
+// Which server this is decides how it is asked (Abschnitt 2a: TUFF, with
+// streaming). A server that is not recognised is refused before any research
+// runs.
+let connection: ResearchServerConnection
+do {
+    connection = try await ResearchServerConnection.establish(
+        choice: arguments.serverType, stream: arguments.stream,
+        serverURL: arguments.serverURL, transport: transport)
+} catch {
+    writeProgress("error: \(error)")
+    exit(2)
+}
+if !quiet { writeProgress(connection.progressLine) }
 let showThinking = arguments.showThinking
 let agent = ResearchAgent(
     chat: ResearchChatClient(
@@ -68,6 +82,7 @@ let agent = ResearchAgent(
         model: arguments.model,
         maxTokens: arguments.maxTokens,
         enableThinking: arguments.enableThinking,
+        streaming: connection.streaming,
         transport: transport),
     sandbox: ResearchSandboxClient(baseURL: arguments.sandboxURL, transport: sandboxTransport),
     options: arguments.options,
