@@ -3308,6 +3308,7 @@ struct ResearchAgentTests {
     @Test func aRunWithCodeMarkersUsesOneCodePerRunInEveryBlock() async throws {
         var options = ResearchOptions()
         options.markers = .nonce
+        options.nudges = false
         var codes: [String] = []
         for _ in 0..<2 {
             let services = FakeServices(modelReplies: [
