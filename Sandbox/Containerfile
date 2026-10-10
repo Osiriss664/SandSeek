@@ -1,5 +1,5 @@
 # Web tool server for `sandseek`. Built and run with Apple `container`
-# by Scripts/research_sandbox.sh; see docs/WEB_RESEARCH.md.
+# by Scripts/research_sandbox.sh; see docs/SECURITY.md.
 #
 # The base image is pinned by digest (python:3.12-slim) and every Python
 # package by hash, so a rebuild installs the same code. To update, change the

@@ -13,7 +13,7 @@
 # firewall inside the VM lets it reach public internet addresses, plus DNS on
 # the Mac when the Mac is its name server, and the
 # server runs as a non-root user with no Linux capabilities. Its port is
-# published to the Mac's loopback address only. See docs/WEB_RESEARCH.md.
+# published to the Mac's loopback address only. See docs/SECURITY.md.
 
 set -euo pipefail
 

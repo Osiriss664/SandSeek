@@ -10,8 +10,17 @@ network tool.
 Status: pre-release, being moved out of a TUFF fork. The command-line tool,
 the core library and the Mac app (a window with the same research loop) are one
 Swift package. The app has not been compiled yet by the person who wrote it
-(see "Left undone" below). The guides in `docs/` still show some old TUFF
-names while they are rewritten.
+(see "Left undone" below).
+
+## Documentation
+
+- [docs/INSTALL.md](docs/INSTALL.md): requirements, build and package the app,
+  start TUFF or llama.cpp safely, first run, where reports live, uninstall.
+- [docs/ANLEITUNG.md](docs/ANLEITUNG.md): the same in plain German, for people
+  who do not program.
+- [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md): the research method.
+- [docs/SECURITY.md](docs/SECURITY.md): what the sandbox guarantees and what it
+  does not, the threat model, the tests and how to run them, known limits.
 
 ## Requirements
 
@@ -62,7 +71,10 @@ progress and answer side by side. Stop is visible while a question runs.
   command line, in the clipboard text or in a log. The `sandseek` command has
   `--api-key-file <path>` too. On a Mac with 16 GB, run only one model server
   with a loaded model at a time. If the server gives no context size, Settings
-  shows a Prompt budget and the card says so.
+  shows a Prompt budget and the card says so. On Check (not on the ten-second
+  look) the card also tries this Mac's own network addresses on the server's
+  port with a plain TCP connect, and warns "Reachable from the network at
+  <address>:<port>; start the server with --host 127.0.0.1" if one answers.
 - **Sandbox files.** The app carries `Scripts/research_sandbox.sh` and
   `Sandbox/` in `Contents/Resources/sandbox` and runs the script from there, in
   place: the folder is part of the signed bundle, and neither the script nor
@@ -111,6 +123,20 @@ The app does this itself. By hand:
 `sandseek --help` lists all options. Tests: `swift test`, and for the sandbox
 server `python3 -m unittest Sandbox/test_server.py`.
 
+Security checks (see [docs/SECURITY.md](docs/SECURITY.md)):
+
+    .build/release/sandseek --check-exposure --server http://127.0.0.1:8081
+    python3 Scripts/research_address_check.py
+    python3 Scripts/research_injection_check.py --base-url <public URL> --label "TUFF + Qwen"
+
+`--check-exposure` tries this Mac's own network addresses on the model server's
+port and the sandbox's port and exits 0 when nothing answered on the network,
+3 when something did, 4 when the model server does not answer on this Mac at
+all. `research_address_check.py` sends 98 tricky addresses straight to the
+sandbox and expects each to be refused. `research_injection_check.py` takes
+`--server-type llamacpp --api-key-file <path>` for llama-server, and `--label`
+and `--output` for a report that names the server type and model.
+
 The command finds out which kind of model server it talks to before the sandbox
 check: a model server that does not answer ends the run with exit code 1 (as
 before), a server that is not recognised as TUFF with exit code 2 (use
@@ -154,6 +180,10 @@ To record real streams from a running server for test fixtures, use
 - Both services stay on loopback; the sandbox refuses foreign `Host` headers.
 - Prompt-injection test pages are in `Sandbox/fixtures/injection`
   (`Scripts/research_injection_check.py`). A pass is evidence, not proof.
+- TUFF 8.3.1 and llama.cpp have no `Host` check; llama.cpp is used only with
+  `--host 127.0.0.1` and `--api-key-file`. `sandseek --check-exposure` and the
+  connection card tell you if a server is reachable from the network. The full
+  picture is in [docs/SECURITY.md](docs/SECURITY.md).
 - A model can still be misled by false content on a page, and search queries
   go to the search engine like any web search. Check the sources.
 

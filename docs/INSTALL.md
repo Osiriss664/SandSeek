@@ -1,0 +1,226 @@
+# Installing SandSeek
+
+SandSeek is built from source on your Mac. There is no installer and no
+download of a finished app yet. This page covers what you need, how to build and
+package the app, how to start a model server safely, the first run, where
+things are stored and how to remove everything again.
+
+A German guide for people who do not program is in [ANLEITUNG.md](ANLEITUNG.md).
+For what the security design does and does not promise, read
+[SECURITY.md](SECURITY.md).
+
+## Requirements
+
+- A Mac with Apple silicon and **macOS 26** (Apple `container` needs it).
+- **16 GB of memory** is the size the project was tested on. A model server with
+  a loaded model uses most of it, so run only one server at a time.
+- **Apple `container`**, from its
+  [releases page](https://github.com/apple/container/releases). After the
+  installer has run, `container system start` starts its background service
+  (SandSeek's scripts do this when it is not running).
+- A **Swift 6.2 toolchain** to build: Xcode 26, or the command line tools that
+  come with it. `swift --version` should print 6.2 or newer.
+- A **local model server** that SandSeek can connect to:
+  - **TUFF 8.3.1 or newer** (the official release), with a Qwen model for
+    research; or
+  - **llama.cpp** (`llama-server`), with a model that supports tool calls (the
+    project was tested with Bonsai). llama.cpp is only partly tested, see
+    [SECURITY.md](SECURITY.md).
+- Research makes many long prompts, so model speed matters. Qwen3.6 35B-A3B on
+  TUFF gives good answers and takes a few minutes per question; Gemma 4 E4B is
+  faster and weaker. A model that has to stream far more than the installed
+  memory is too slow for multi-step research on most Macs.
+- An internet connection. The first sandbox start downloads a base image and
+  builds the sandbox image, which takes a few minutes.
+
+## Build the command and the tests
+
+From the folder of your SandSeek checkout:
+
+```sh
+swift build -c release
+swift test
+python3 -m unittest Sandbox/test_server.py
+```
+
+The first build fetches nothing from the internet: SandSeek uses only Apple's
+own libraries. `swift build` produces the `sandseek` command in
+`.build/release/sandseek`.
+
+## Build and package the app
+
+```sh
+Scripts/package_app.sh
+open build/SandSeek.app
+```
+
+The script builds the app in release mode, assembles `build/SandSeek.app` with
+the sandbox files inside it and signs it ad hoc. That is enough to run it on
+the Mac that built it. It is not notarized: if you copy it to another Mac,
+macOS may refuse to open it, and you have to approve it in System Settings under
+Privacy & Security. You can drag `build/SandSeek.app` to the Applications
+folder.
+
+`swift run SandSeekApp` also opens the window, but a bare executable has no
+sandbox files inside it. Set `SANDSEEK_SOURCE_DIR=/path/to/checkout` to point
+such a debug build at your checkout.
+
+## Start a model server safely
+
+SandSeek never starts a model server. It connects to one that already runs, on
+this Mac's loopback address (127.0.0.1) only. **Start the server so that it
+listens on 127.0.0.1 only**, never on all addresses: a server that listens on
+the network can be used by every machine on it. SandSeek checks this for you
+(see below), but the safe start is the better protection.
+
+### TUFF
+
+Start TUFF's **Background API** on its Server screen, or run `tuff serve`.
+TUFF listens on 127.0.0.1:8080 and nowhere else; do not change that. Check it:
+
+```sh
+curl -s http://127.0.0.1:8080/tuff/v1/status
+```
+
+An answer with a version number means it runs. TUFF 8.3.1 has no check of the
+`Host` header, so quit the server when you are not using it (see
+[SECURITY.md](SECURITY.md)).
+
+### llama.cpp
+
+llama.cpp must be started with `--host 127.0.0.1` **and** a key file, because it
+has no host check either. The key is what stops a web page in your browser from
+using the server.
+
+1. Open SandSeek and choose **llama.cpp** on the model server card. The app
+   makes a random key once and keeps it in
+   `~/Library/Application Support/SandSeek/State/llamacpp-api-key` (readable
+   only by you), and the card shows a start command that names that file. **Copy
+   start command** copies it. The key itself is never in the command.
+
+   Without the app, make the key file by hand:
+
+   ```sh
+   mkdir -p ~/Library/Application\ Support/SandSeek/State
+   chmod 700 ~/Library/Application\ Support/SandSeek/State
+   openssl rand -hex 32 > ~/Library/Application\ Support/SandSeek/State/llamacpp-api-key
+   chmod 600 ~/Library/Application\ Support/SandSeek/State/llamacpp-api-key
+   ```
+
+2. Run the command in Terminal. It looks like this:
+
+   ```sh
+   llama-server -m <model.gguf> --alias <name> --host 127.0.0.1 --port 8081 \
+     -c 16384 -np 1 --jinja \
+     --api-key-file ~/Library/Application\ Support/SandSeek/State/llamacpp-api-key
+   ```
+
+   `--host 127.0.0.1` keeps it on this Mac, `-np 1` gives one slot the whole
+   context, `--jinja` turns on tool calls, and `--api-key-file` makes the server
+   ask for the key. Do not use `--api-key <key>`: it would show the key in the
+   process list and your shell history. The `sandseek` command takes the same
+   file: `--api-key-file <path>`.
+
+### Check that nothing else can reach the server
+
+With the server running:
+
+```sh
+.build/release/sandseek --check-exposure --server http://127.0.0.1:8081
+```
+
+Use the port of your server (8080 for TUFF). The command tries each of this
+Mac's own network addresses on that port and on the sandbox's port, and sends
+nothing. Exit code 0 means nothing answered on the network. Exit code 3 means
+something did: stop the server and start it again with `--host 127.0.0.1`. Exit
+code 4 means the server does not answer on this Mac at all. The app does the
+same check when you press **Check** on the model server card and shows a warning
+if the server is reachable.
+
+## First run
+
+1. Open `SandSeek.app`. The window has a sidebar (Research, Reports, Settings),
+   a **Model server** card and a **Sandbox** card.
+2. On the model server card, choose TUFF or llama.cpp, check the address, and
+   press **Check**. It should say **Connected** and list the models.
+3. On the sandbox card, press **Start Sandbox**. The first start builds the
+   image and takes a few minutes. When it says **Ready**, the app has checked the
+   firewall and the server's privileges from outside the VM.
+   **Security check** runs the longer self-test (about a minute).
+4. Pick the model, choose **Quick answer** or **Thorough**, type a question and
+   press **Research** (Command-Return). Progress and answer appear side by side;
+   **Stop** ends the question.
+
+From Terminal, with the sandbox started (`Scripts/research_sandbox.sh build`
+once, then `start`) and a server running:
+
+```sh
+.build/release/sandseek --server http://127.0.0.1:8080 "your question"
+```
+
+The answer is printed as Markdown with numbered sources. `--output notes.md`
+also writes it to a new file, `--show-thinking` prints the model's reasoning
+under each step, and `--max-steps <1...100>` sets how many search and read
+rounds the model may take (default 8). `sandseek --help` lists all options.
+`Scripts/research_sandbox.sh stop` stops the sandbox when you are done.
+
+## Where things are stored
+
+| What | Where |
+| --- | --- |
+| Finished reports (Markdown and JSON) | `~/Library/Application Support/SandSeek/Reports` |
+| The llama.cpp key file | `~/Library/Application Support/SandSeek/State/llamacpp-api-key` |
+| The app's settings (server choice, addresses, presets, last question) | the app's preferences file in `~/Library/Preferences` (its name contains `sandseek`) |
+| The sandbox image and VM | Apple `container`: image `sandseek-sandbox:latest`, VM `sandseek-sandbox` |
+| The built app and command | `build/SandSeek.app`, `.build/release/sandseek` in your checkout |
+
+Reports from TUFF's research screen (in `~/Library/Application Support/TUFF/Research
+Reports`) are copied into the Reports folder once each when the app starts. The
+originals are never changed or removed.
+
+## Update
+
+Fetch the new code, then build and package again. The app rebuilds the sandbox
+image by itself when anything in `Sandbox/` changed; by hand, run
+`Scripts/research_sandbox.sh build`. Quit the app and stop the sandbox first
+(**Stop Sandbox**, or `Scripts/research_sandbox.sh stop`).
+
+## Uninstall
+
+Nothing is installed outside your home folder and Apple `container`. Remove the
+parts you do not want, by hand. **Move things to the Trash instead of deleting
+them with a command**, so you can still get them back.
+
+1. Quit SandSeek. Stop the sandbox with **Stop Sandbox** or
+   `Scripts/research_sandbox.sh stop`, and the model server in its own window.
+2. Remove the sandbox image. List the images with `container image list`, then
+   remove `sandseek-sandbox:latest` with `container image delete
+   sandseek-sandbox:latest` (see `container image --help` if your version names
+   the command differently). This only removes the image, which can be built
+   again. If you no longer use Apple `container` at all, uninstall it by its
+   own instructions.
+3. In Finder, move `SandSeek.app` to the Trash (and the `build` folder of your
+   checkout, if you built it there).
+4. **Your reports are in `~/Library/Application Support/SandSeek/Reports`.** If
+   you want to keep them, copy that folder somewhere else first. Then, in
+   Finder, choose Go > Go to Folder, open `~/Library/Application Support` and
+   move the `SandSeek` folder to the Trash. It holds the reports and the key
+   file; move that folder only when you no longer need either. A llama.cpp
+   server started with that key file will not start again without it.
+5. In `~/Library/Preferences`, move the preferences file whose name contains
+   `sandseek` to the Trash.
+6. Move the checkout folder to the Trash if you no longer need the source code.
+
+## Troubleshooting
+
+- **"Apple container is not installed"**: install it from the releases page above.
+- **The sandbox does not become Ready, or "Not verified"**: stop it and start it
+  again. If it stays red, run `Scripts/research_sandbox.sh selftest` and read the
+  `FAIL` lines.
+- **The model server card says "Not running"**: start the server (see above) and
+  press **Check**. The address must be on 127.0.0.1 with a port, and not 9100,
+  which is the sandbox's.
+- **llama.cpp: "refused the key"**: the server was started without the key file
+  the app made. Start it again with the command on the card.
+- **A question is very slow**: a 16 GB Mac holds one model at a time. Quit other
+  servers and large apps. Thinking and long pages make steps slower.
