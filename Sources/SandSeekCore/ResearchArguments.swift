@@ -1,11 +1,9 @@
 import Foundation
-import TUFFModelCatalog
 
 public struct ResearchArguments: Equatable, Sendable {
     public var question: String = ""
     public var model: String = "default"
-    public var serverURL: URL = URL(
-        string: "http://127.0.0.1:\(TUFFBackgroundServerSettings.defaultPort)")!
+    public var serverURL: URL = URL(string: "http://127.0.0.1:8080")!
     public var sandboxURL: URL = URL(string: "http://127.0.0.1:9000")!
     public var outputPath: String?
     /// Test aids: write the answer and page texts of a finished run to a new

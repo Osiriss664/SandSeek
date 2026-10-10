@@ -2,7 +2,6 @@ import Foundation
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
-import TUFFModelCatalog
 
 public struct ResearchToolCall: Equatable, Sendable {
     public let id: String
@@ -119,11 +118,8 @@ public struct ResearchChatClient: Sendable {
     static func keepsReasoning(modelID: String?) -> Bool {
         guard let modelID, !modelID.isEmpty else { return true }
         let lowered = modelID.lowercased()
-        if let descriptor = TUFFModelCatalog.all.first(where: {
-            $0.selector.lowercased() == lowered || $0.apiModelID.lowercased() == lowered
-                || $0.aliases.contains { $0.lowercased() == lowered }
-        }) {
-            return descriptor.family != .gemma4
+        if let known = ResearchModelTable.model(matching: modelID) {
+            return known.family != .gemma4
         }
         if ["qwen", "minimax", "gpt-oss"].contains(where: { lowered.contains($0) }) { return true }
         return !lowered.contains("gemma")
@@ -209,7 +205,7 @@ public struct ResearchChatClient: Sendable {
     /// selector. A name the list does not hold, such as `default`, gets the
     /// smallest window until a reply says which model answered.
     public static func window(for model: String, in windows: [String: Int]) -> Int? {
-        let names = [model] + TUFFModelCatalog.all.filter { $0.selector == model }.map(\.apiModelID)
+        let names = [model] + ResearchModelTable.apiModelIDs(forSelector: model)
         return names.lazy.compactMap { windows[$0] }.first ?? windows.values.min()
     }
 
