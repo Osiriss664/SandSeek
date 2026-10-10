@@ -389,6 +389,10 @@ testing and are not in the app.
 | `--save-pages <file.json>` | After a finished run, also writes the question, the answer as the figure check saw it, the date it used as today, and for every source its number, URL, title and the full page text the check used. It writes only this one file, only to a path that does not exist yet, and no file for a run that ended early. |
 | `--replay-figures <file.json>` | Runs the figure check again on such a file, with no model, sandbox or question, and prints its section. |
 
+The saved file also holds the model's search queries, which the check of
+names that appear only in a query needs; files saved without them still
+replay.
+
 `--save-pages` cannot name the same file as `--output`, and `--replay-figures`
 takes no question and no other run option (only `--quiet`).
 
@@ -565,6 +569,16 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
   report still flags its unread citations, and an answer that is still in the
   wrong language gets a note (also with `--rewrite off`). This costs one more
   model turn, and only when it happens.
+- A question that names a number of sources (`mindestens 10 Quellen`,
+  `at least 10 sources`, `10–15 Quellen`, `minimum 30 max 40 Quellen`, `30
+  Quellen`) is noticed. Every `open_page` result then says "Page 12 of at
+  least 30 requested." (counting only pages that are sources; a made-up
+  address that redirected elsewhere does not count). If the model answers
+  with fewer pages read, it is asked once to keep reading (`--nudges off`
+  turns this off), and the report notes when the number was not reached.
+  A number with a cap only (`maximal 5 Quellen`) or one that counts something
+  else (`die letzten 30 Jahre`) is no request, and neither is a number below
+  2 or above 100.
 - The report flags figures, dates and names in the answer that the pages the
   same sentence cites do not back up. The run keeps the full text of each
   page it read (up to 200,000 characters per page and a million in all, so
@@ -630,6 +644,33 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
     up. A label right after a number (`100 M2`), labels of chemical formulas
     and units (`CO2`, `PM10`, `NO2`, `H1`, `H2`), words from the list of
     skipped words, and labels in the question are skipped.
+
+  Round A2 added to this check:
+  - A page's title and address count as page text, so `Februar 2026` in a
+    title or `HeizCenter` in a host are found. A three-digit number from 100
+    to 599 directly next to `HTTP`, `Fehler`, `error` or `Status` (any case)
+    is an error code and is skipped; `Fehlerquote 500` is still checked.
+  - Month names of German, English and Indonesian (`Januari`, `Maret`, `Mei`,
+    `Agustus`, `Desember`, ...) are the same month, so `Februar 2026`
+    matches `Februari 2026`.
+  - In the part of the answer that rates the sources (a heading or label such
+    as `Quellenbewertung`, `Bewertung der Quellen`, `source assessment`, up
+    to the next heading), a figure still has to be on the cited page, but it
+    need not stand near the sentence's names. The format comes from the
+    question, not from TUFF's prompt, so only these words are recognized.
+  - Office titles and common nouns (`Bürgermeister`, `Regierenden`, `Inhalte`,
+    `Nutzung`, `Minister`, `Senator`, `Präsident`, `Kanzler`, `Sondierungsgespräche`
+    and a few English ones) are left out of a name phrase and only the rest is
+    checked: `Bürgermeister Stiegert` checks `Stiegert`, and a phrase with
+    nothing else left is dropped. `Stiftung Warentest` is still checked.
+  - A name of two or three plain words whose last word is not a common noun
+    (a likely person) needs its surname as a whole word on a cited page,
+    with at most a case or plural ending: `Eral` is not found in `Eralp`.
+  - A name that is in one of the model's own search queries but on no page
+    read is listed separately ("only in a search query"), also in a sentence
+    without citation and also for the second kind of phrase. `--save-pages`
+    keeps the queries (older files without them still load), so
+    `--replay-figures` checks this too.
 
   The answer is not changed and the model is not asked again; the section is
   a hint, not proof, since a page can state a figure in words or in a

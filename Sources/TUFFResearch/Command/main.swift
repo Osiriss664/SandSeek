@@ -79,6 +79,7 @@ let agent = ResearchAgent(
         case .askingToSearchFirst: writeProgress("    answered without searching; asking it to search")
         case .askingToReadPages: writeProgress("    no page read yet; asking it to read pages")
         case .askingToSearchMore: writeProgress("    answered from one search or page; asking it to look wider")
+        case .askingToReadMoreSources: writeProgress("    fewer pages read than the question asks for; asking it to keep reading")
         case .openingTopResults: writeProgress("    few or no pages read; opening top search results")
         case .repeatedSearchRefused(let query): writeProgress("    repeated search refused: \(query)")
         case .repeatedPageRefused(let url): writeProgress("    repeated page refused: \(url)")

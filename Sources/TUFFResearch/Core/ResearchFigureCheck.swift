@@ -13,6 +13,10 @@ public struct ResearchUnverifiedFigure: Equatable, Sendable {
         /// on none of the cited pages, or, with no citation, on none of the
         /// pages read.
         case name
+        /// A name that is in one of the model's own search queries but on no
+        /// page read: the model may have taken it from its query, not from a
+        /// page. Also reported in a sentence without citation.
+        case nameOnlyInQuery
     }
 
     /// The figure, date or name as the answer wrote it, such as `4,74`,
@@ -87,15 +91,22 @@ enum ResearchFigureCheck {
     /// (not a year alone) looked up on all pages read, once any page was read
     /// (see `uncitedFindings`). A figure on none is `notOnPage` with no
     /// sources. Headings and source lists are not checked.
+    ///
+    /// `pageHeaders` holds a page's title and address per source number
+    /// (see `header`); they count as page text. `queries` are the model's own
+    /// search queries: a name that is in one of them, but on no page, is
+    /// `nameOnlyInQuery`, also in a sentence without citation.
     static func unverified(answer: String,
                            sourceTexts: [Int: String],
                            question: String = "",
-                           today: String = "") -> [ResearchUnverifiedFigure] {
+                           today: String = "",
+                           queries: [String] = [],
+                           pageHeaders: [Int: String] = [:]) -> [ResearchUnverifiedFigure] {
         var pages: [Int: PageFacts] = [:]
         func facts(_ number: Int) -> PageFacts? {
             if let known = pages[number] { return known }
             guard let text = sourceTexts[number] else { return nil }
-            let made = PageFacts(text)
+            let made = PageFacts(pageHeaders[number].map { text + "\n" + $0 } ?? text)
             pages[number] = made
             return made
         }
@@ -105,11 +116,20 @@ enum ResearchFigureCheck {
         let questionNumbers = Set(tokens(in: question).map { significant($0.digits) })
         let todayParts = today.split(separator: "-").compactMap { Int($0) }
         let answerLanguage = language(text[...])
+        let queryWords = queries.map { queryWordSet($0) }
         var found: [ResearchUnverifiedFigure] = []
         func add(_ item: ResearchUnverifiedFigure) {
+            // A name that is only in a query is the more telling note.
+            if item.kind == .nameOnlyInQuery {
+                found.removeAll { $0.kind == .name && $0.figure.lowercased() == item.figure.lowercased() }
+            } else if item.kind == .name, found.contains(where: {
+                $0.kind == .nameOnlyInQuery && $0.figure.lowercased() == item.figure.lowercased()
+            }) {
+                return
+            }
             let known = found.contains {
                 $0.kind == item.kind
-                    && (item.kind == .name
+                    && (item.kind == .name || item.kind == .nameOnlyInQuery
                         ? $0.figure.lowercased() == item.figure.lowercased()
                         : $0 == item)
             }
@@ -117,6 +137,7 @@ enum ResearchFigureCheck {
         }
         let allPieces = pieces(of: text)
         let notices = noticeFlags(for: allPieces)
+        let ratings = ratingFlags(for: allPieces)
         for (pieceIndex, piece) in allPieces.enumerated() {
             let cited = citations(in: piece)
             let usable = cited.filter { sourceTexts[$0] != nil }
@@ -130,7 +151,10 @@ enum ResearchFigureCheck {
             let checked: [(number: Int, page: PageFacts)] = usable.compactMap { number in
                 facts(number).map { (number: number, page: $0) }
             }
-            for item in figureFindings(scanned: scanned, words: sentenceWords, pages: checked) {
+            // In the part that rates the sources, a figure stands next to the
+            // source's name, not next to what the question is about.
+            for item in figureFindings(scanned: scanned, words: sentenceWords, pages: checked,
+                                       proximity: !ratings[pieceIndex]) {
                 add(item)
             }
             // Source lists and headings are lists of titles, not claims. A
@@ -174,19 +198,27 @@ enum ResearchFigureCheck {
             // checked. The others (two nouns in a row) are checked only when
             // the answer and the page are in the same language: a German
             // answer from an English page names things in its own words.
-            let named = phrases(in: nameWords).filter {
-                $0.strong || (!usable.isEmpty && answerLanguage != 0)
-            }
-            if named.isEmpty { continue }
             // The language only decides whether two nouns are checked; once
-            // they are, any cited page that has them counts.
-            for phrase in named {
-                if !phrase.strong, !namePages.contains(where: { $0.language == answerLanguage }) {
-                    continue
+            // they are, any cited page that has them counts. A name that is
+            // in one of the model's queries is checked in any case.
+            let sameLanguage = !usable.isEmpty && answerLanguage != 0
+                && namePages.contains { $0.language == answerLanguage }
+            for phrase in phrases(in: nameWords) {
+                // The answer's own caveats ("Nicht verifiziert: …") are not claims.
+                if notices[pieceIndex], !phrase.strong { continue }
+                let fromQuery = queryWords.contains { phrase.isIn($0) }
+                guard phrase.strong || sameLanguage || fromQuery else { continue }
+                guard isMissing(phrase, from: namePages, question: questionWords) else { continue }
+                var kind = ResearchUnverifiedFigure.Kind.name
+                if fromQuery {
+                    // A name on another page read was cited wrongly; one on
+                    // no page was taken from the query.
+                    let everyPage = sourceTexts.keys.sorted().compactMap(facts)
+                    let elsewhere = !usable.isEmpty
+                        && !isMissing(phrase, from: everyPage, question: questionWords)
+                    kind = elsewhere ? .name : .nameOnlyInQuery
                 }
-                if isMissing(phrase, from: namePages, question: questionWords) {
-                    add(ResearchUnverifiedFigure(figure: phrase.text, sources: usable, kind: .name))
-                }
+                add(ResearchUnverifiedFigure(figure: phrase.text, sources: usable, kind: kind))
             }
         }
         return found
@@ -195,7 +227,8 @@ enum ResearchFigureCheck {
     /// The figures and dates of one sentence that are not on the pages it
     /// cites, or not near what it names.
     private static func figureFindings(scanned: Scan, words: [Word],
-                                       pages: [(number: Int, page: PageFacts)])
+                                       pages: [(number: Int, page: PageFacts)],
+                                       proximity: Bool = true)
         -> [ResearchUnverifiedFigure] {
         guard !pages.isEmpty else { return [] }
         var candidates: [Candidate] = []
@@ -214,7 +247,8 @@ enum ResearchFigureCheck {
             let (figure, present) = candidate.check(in: pages.map { $0.page })
             if !present {
                 result.append(ResearchUnverifiedFigure(figure: figure, sources: pages.map { $0.number }))
-            } else if let elsewhere = elsewhereOnPage(candidate, figure: figure, names: names,
+            } else if proximity,
+                      let elsewhere = elsewhereOnPage(candidate, figure: figure, names: names,
                                                       pages: pages) {
                 result.append(elsewhere)
             }
@@ -271,6 +305,57 @@ enum ResearchFigureCheck {
             return inside
         }
     }
+
+    /// The words of a search query in lower case, with their stems.
+    private static func queryWordSet(_ query: String) -> Set<String> {
+        var result = Set<String>()
+        for word in query.precomposedStringWithCanonicalMapping
+            .split(whereSeparator: { !($0.isLetter || $0.isNumber) }) {
+            result.insert(word.lowercased())
+            result.insert(wordStem(String(word)))
+        }
+        return result
+    }
+
+    /// A page's title and address as text the check counts as page text
+    /// (`Februari 2026` in a title, `heizcenter` in a host). The address is
+    /// used decoded.
+    static func header(title: String, url: String) -> String {
+        title + "\n" + (url.removingPercentEncoding ?? url)
+    }
+
+    /// Whether each piece lies in a part of the answer that rates the
+    /// sources, from the line or heading that says so up to the next heading.
+    /// A figure there belongs to the source (a score, a date), not to what
+    /// the question is about, so it is not expected near the sentence's names.
+    private static func ratingFlags(for pieces: [String]) -> [Bool] {
+        var inside = false
+        return pieces.map { piece in
+            let line = piece.trimmingCharacters(in: .whitespaces)
+            let range = NSRange(line.startIndex..., in: line)
+            if line.hasPrefix("#") {
+                inside = ratingHeading.firstMatch(in: line, range: range) != nil
+                return false
+            }
+            if !inside, ratingLabel.firstMatch(in: line, range: range) != nil {
+                inside = true
+            }
+            return inside
+        }
+    }
+
+    private static let ratingWords = #"(?:quellen ?(?:bewertung|einschätzung|beurteilung|einstufung|qualität)|"#
+        + #"(?:bewertung|einschätzung|beurteilung|einstufung) (?:der|aller|dieser) (?:verwendeten )?quellen|"#
+        + #"sources? (?:assessment|rating|evaluation|quality|reliability)|"#
+        + #"(?:assessment|rating|evaluation) of (?:the )?sources)"#
+
+    private static let ratingHeading = try! NSRegularExpression(
+        pattern: #"^#{1,6}\s[^\n]{0,40}?"# + ratingWords, options: [.caseInsensitive])
+
+    /// A label line such as `**Quellenbewertung:**`.
+    private static let ratingLabel = try! NSRegularExpression(
+        pattern: #"^[\s*_>|-]*(?:\d+\.\s*)?"# + ratingWords + #"[\s*_]*(?:\([^)]{0,30}\))?[\s*_]*:"#,
+        options: [.caseInsensitive])
 
     /// The caveat words a notice line or heading names.
     private static let noticeWords = #"(?:nicht (?:verifiz|belegt|bestätig)|unbestätigt|"#
@@ -592,6 +677,12 @@ enum ResearchFigureCheck {
             return answer
         }
 
+        /// Whether the text has the word, or the word with a plural or case
+        /// ending (`Eral`, `Erals`, `Eralen`), but not a longer word (`Eralp`).
+        func hasInflection(of word: String) -> Bool {
+            ["", "s", "n", "en", "e", "er", "es", "in", "innen"].contains { has(word: word + $0) }
+        }
+
         /// Whether a word has `part` anywhere in it, as a compound has the
         /// words it is made of. Each part is scanned for once.
         func has(containing part: String) -> Bool {
@@ -627,7 +718,7 @@ enum ResearchFigureCheck {
         "februar": 2, "february": 2, "feb": 2,
         "märz": 3, "maerz": 3, "march": 3, "mär": 3, "mar": 3,
         "april": 4, "apr": 4,
-        "mai": 5, "may": 5,
+        "mai": 5, "may": 5, "mei": 5,
         "juni": 6, "june": 6, "jun": 6,
         "juli": 7, "july": 7, "jul": 7,
         "august": 8, "aug": 8,
@@ -635,6 +726,8 @@ enum ResearchFigureCheck {
         "oktober": 10, "october": 10, "okt": 10, "oct": 10,
         "november": 11, "nov": 11,
         "dezember": 12, "december": 12, "dez": 12, "dec": 12,
+        // Indonesian; the rest of its names are spelled like English or German.
+        "januari": 1, "februari": 2, "maret": 3, "agustus": 8, "desember": 12,
     ]
 
     /// A date format: the regular expression and the group of each part
@@ -759,6 +852,17 @@ enum ResearchFigureCheck {
         /// followed by a number, and what follows it. The rest (two nouns in
         /// a row) may be ordinary words.
         let strong: Bool
+        /// Looks like a person: two or three plain words in a row, the last
+        /// one not a common noun. The last word, the surname, must then be a
+        /// whole word on a page (`Eral` is not `Eralp`).
+        var person = false
+
+        /// Whether every word of the name is a word of the query.
+        func isIn(_ query: Set<String>) -> Bool {
+            !checked.isEmpty && checked.allSatisfy {
+                query.contains($0.lowercased()) || query.contains(ResearchFigureCheck.wordStem($0))
+            }
+        }
     }
 
     /// The words of a sentence. Letters and digits make a word; `:innen` and
@@ -852,7 +956,7 @@ enum ResearchFigureCheck {
             prozent euro dollar millionen million milliarden billion mio mrd jahr jahre jahren \
             monat monate monaten tag tage tagen woche wochen uhr stunde stunden minuten \
             sekunden kilometer meter percent euros dollars years months days hours \
-            eur usd chf gbp
+            eur usd chf gbp http https fehler error status
             """))
         result.formUnion(ResearchFigureCheck.wordSet("""
             artikel kapitel seite seiten tabelle abbildung abschnitt absatz nummer nr version \
@@ -1050,14 +1154,35 @@ enum ResearchFigureCheck {
     /// Albertina`, `Bund der Kommunist:innen`). German capitalizes every
     /// noun, so a single capitalized word is no name, and none starts at the
     /// sentence's first word unless that word has an inner capital.
+    private static let monthLeaders = wordSet(
+        "im am seit ab bis vom zum ende anfang mitte in since until by of on")
+
     private static func phrases(in words: [Word]) -> [Phrase] {
         let first = words.firstIndex { !$0.number }
         // The first word, and one after a colon or a bar, is capitalized
         // whatever it is.
         func atStart(_ index: Int) -> Bool { index == first || words[index].afterBreak }
+        /// A month word (`Jan`, `May`) can be a first name when a
+        /// capitalized word follows it; dates are already gone from the
+        /// text, so `Ende Mai` stays ignored.
+        func ignored(_ index: Int) -> Bool {
+            let text = words[index].text
+            guard isIgnored(text) else { return false }
+            // After a day or a preposition it is a date (`Am 3. Mai`, `Im Juni`).
+            if index > 0, words[index - 1].number
+                || monthLeaders.contains(words[index - 1].text.lowercased()) {
+                return true
+            }
+            if months[text.lowercased()] != nil, index + 1 < words.count,
+               words[index + 1].joined, words[index + 1].capitalized, !words[index + 1].number,
+               !isIgnored(words[index + 1].text) {
+                return false
+            }
+            return true
+        }
         func member(_ index: Int) -> Bool {
             let word = words[index]
-            guard !word.number, word.capitalized, !isIgnored(word.text),
+            guard !word.number, word.capitalized, !ignored(index),
                   word.letters >= 3 || word.allCaps else { return false }
             return !atStart(index) || word.internalCapital
         }
@@ -1070,15 +1195,32 @@ enum ResearchFigureCheck {
         /// name is not strong.
         func startsName(_ index: Int) -> Bool? {
             let word = words[index]
-            guard !word.number, !isIgnored(word.text), word.letters >= 2 else { return nil }
+            guard !word.number, !ignored(index), word.letters >= 2 else { return nil }
             if word.internalCapital { return true }
             guard word.capitalized, !atStart(index), index + 1 < words.count,
                   isPlainNumber(index + 1) else { return nil }
             return word.allCaps
         }
-        func phrase(_ indices: [Int], through last: Int, strong: Bool) -> Phrase {
-            Phrase(text: words[indices[0]...last].map { $0.text }.joined(separator: " "),
-                   checked: indices.map { words[$0].text }, strong: strong)
+        /// Office titles and common nouns are left out of a weak name, and
+        /// only the rest is checked; nil if nothing is left.
+        func phrase(_ indices: [Int], through last: Int, strong: Bool) -> Phrase? {
+            let text = words[indices[0]...last].map { $0.text }.joined(separator: " ")
+            guard !strong else {
+                return Phrase(text: text, checked: indices.map { words[$0].text }, strong: true)
+            }
+            let kept = indices.filter { !isDescriptive(words[$0].text) }
+            guard !kept.isEmpty else { return nil }
+            // Only a short acronym left (`Nutzung von WP`) says nothing.
+            if kept.count == 1, words[kept[0]].allCaps, words[kept[0]].letters <= 3 { return nil }
+            var result = Phrase(text: text, checked: kept.map { words[$0].text }, strong: false)
+            if (2...3).contains(indices.count), last == indices[indices.count - 1],
+                  kept[kept.count - 1] == indices[indices.count - 1],
+                  zip(indices, indices.dropFirst()).allSatisfy({ $1 == $0 + 1 && words[$1].joined }),
+                  indices.allSatisfy({ words[$0].letters == words[$0].text.count }),
+                  !endsLikeCommonNoun(words[indices[indices.count - 1]].text) {
+                result.person = true
+            }
+            return result
         }
         var result: [Phrase] = []
         var index = 0
@@ -1091,7 +1233,7 @@ enum ResearchFigureCheck {
                 }
                 var last = indices[indices.count - 1]
                 if last + 1 < words.count, isPlainNumber(last + 1) { last += 1 }
-                result.append(phrase(indices, through: last, strong: strong))
+                if let made = phrase(indices, through: last, strong: strong) { result.append(made) }
                 index = last + 1
             } else if member(index) {
                 var indices = [index]
@@ -1106,7 +1248,9 @@ enum ResearchFigureCheck {
                 }
                 if indices.count >= 2 {
                     let last = indices[indices.count - 1]
-                    result.append(phrase(indices, through: last, strong: false))
+                    if let made = phrase(indices, through: last, strong: false) {
+                        result.append(made)
+                    }
                     index = last + 1
                 } else {
                     index += 1
@@ -1144,8 +1288,60 @@ enum ResearchFigureCheck {
                 return false
             }
         }
+        // A surname is a whole word on the page, with at most an ending:
+        // `Eral` is not in `Eralp`.
+        if phrase.person, let surname = phrase.checked.last, !absent.contains(surname) {
+            let lower = surname.lowercased()
+            if !question.has(prefix: wordStem(surname)),
+               !pages.contains(where: {
+                   $0.words.hasInflection(of: lower)
+                       || $0.words.hasInflection(of: wordStem(surname))
+               }) {
+                absent.append(surname)
+            }
+        }
         return !absent.isEmpty
     }
+
+    /// Office titles and common nouns that are no part of a name: German
+    /// and English, as stems, matched with at most two letters more (words of up to five letters whole)
+    /// (`Bürgermeisterin`, `Regierenden`).
+    private static let descriptiveWords: [String] = {
+        let list = """
+            bürgermeister regierend ministerpräsident minister senator präsident kanzler \
+            bundeskanzler bundespräsident staatssekretär kandidat spitzenkandidat \
+            vorsitzend sprecher leiter direktor chef landesvorsitzend fraktionsvorsitzend \
+            abgeordnet herr frau dr prof professor doktor \
+            inhalt nutzung sondierung sondierungsgespräch koalitionsverhandlung gespräch \
+            verhandlung ergebnis thema bereich mitglied \
+            mayor governing secretary chancellor governor candidate chairman chairwoman \
+            director spokesperson leader prime deputy vice member president content \
+            contents usage talks negotiations results mr mrs ms
+            """
+        return ResearchFigureCheck.wordSet(list).map { $0 }
+    }()
+
+    /// Whether a word is an office title or a common noun (see
+    /// `descriptiveWords`).
+    private static func isDescriptive(_ word: String) -> Bool {
+        let lower = word.lowercased()
+        // A short word must match whole: `Dr` is not `Drei`, `Prof` not `Profit`.
+        return descriptiveWords.contains {
+            $0.count < 6 ? lower == $0 : lower.hasPrefix($0) && lower.count - $0.count <= 2
+        }
+    }
+
+    /// Whether a word ends like a common noun, so it is not taken for a
+    /// surname.
+    private static func endsLikeCommonNoun(_ word: String) -> Bool {
+        let lower = word.lowercased()
+        return nounEndings.contains { lower.hasSuffix($0) && lower.count > $0.count }
+    }
+
+    private static let nounEndings = ["ung", "heit", "keit", "schaft", "tion", "tät", "ismus",
+        "ment", "ie", "ik", "ur", "enz", "anz", "pumpe", "werk", "amt", "haus", "stoff",
+        "kraft", "markt", "preis", "gesetz", "plan", "system", "programm", "zentrum",
+        "verband", "partei", "tion", "ity", "ness", "ship", "ment"]
 
     /// Characters between a word matched by prefix and the other words of its
     /// name on the page.
@@ -1308,12 +1504,16 @@ enum ResearchFigureCheck {
         pattern: #"\[(\d+(?:\s*[,;]\s*\d+)*)\](?!\()"#)
     private static let link = try! NSRegularExpression(
         pattern: #"(?:https?://|www\.)\S+"#)
+    private static let httpVersion = try! NSRegularExpression(
+        pattern: #"(?<=HTTP|HTTPS)/\d+(?:\.\d+)?"#, options: [.caseInsensitive])
     private static let isoDate = try! NSRegularExpression(
         pattern: #"\d{4}-\d{2}-\d{2}"#)
 
     /// The text without citations, web addresses and ISO dates.
     static func withoutNoise(_ text: String) -> String {
-        var result = text
+        // `HTTP/1.1 403`: the version is no number, the word stays.
+        var result = httpVersion.stringByReplacingMatches(
+            in: text, range: NSRange(text.startIndex..., in: text), withTemplate: " ")
         for expression in [citation, link, isoDate] {
             result = expression.stringByReplacingMatches(
                 in: result, range: NSRange(result.startIndex..., in: result), withTemplate: " ")
@@ -1374,10 +1574,50 @@ enum ResearchFigureCheck {
                 || isYear(written) || isDate(written, following: following)
                 || (written.count <= 2 && following == ".")
                 || isTime(characters, start: start, end: index)
+                || isStatusCode(characters, written: written, start: start, end: index)
             result.append(Token(text: written, digits: digits, ignored: ignored,
                                 location: offsets[start]))
         }
         return result
+    }
+
+    private static let statusWords: Set<String> = [
+        "http", "fehler", "error", "status", "statuscode", "fehlercode", "errorcode",
+    ]
+
+    /// A three-digit code from 100 to 599 directly next to `HTTP`, `Fehler`,
+    /// `error` or `Status` (`HTTP 403`, `Fehler 404`, `403 error`), in any
+    /// case. `Fehlerquote 5 %` is no code, and a longer word is another word.
+    private static func isStatusCode(_ characters: [Character], written: String,
+                                     start: Int, end: Int) -> Bool {
+        guard written.count == 3, let value = Int(written), (100...599).contains(value) else {
+            return false
+        }
+        func word(before position: Int) -> String {
+            var index = position
+            while index > 0, isSpace(characters[index - 1]) || characters[index - 1] == ":" {
+                index -= 1
+            }
+            // `HTTP/1.1 403`, `HTTP/2 200`: the version belongs to the word.
+            if index > 0, isDigit(characters[index - 1]) {
+                var back = index
+                while back > 0, isDigit(characters[back - 1]) || characters[back - 1] == "." {
+                    back -= 1
+                }
+                if back > 0, characters[back - 1] == "/" { index = back - 1 }
+            }
+            var low = index
+            while low > 0, characters[low - 1].isLetter { low -= 1 }
+            return String(characters[low..<index]).lowercased()
+        }
+        func word(after position: Int) -> String {
+            var index = position
+            while index < characters.count, isSpace(characters[index]) { index += 1 }
+            var high = index
+            while high < characters.count, characters[high].isLetter { high += 1 }
+            return String(characters[index..<high]).lowercased()
+        }
+        return statusWords.contains(word(before: start)) || statusWords.contains(word(after: end))
     }
 
     private static func isDigit(_ character: Character) -> Bool {

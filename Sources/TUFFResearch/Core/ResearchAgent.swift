@@ -109,6 +109,12 @@ public struct ResearchReport: Equatable, Sendable {
     /// asks for it.
     public var checkedPages: [Int: String] = [:]
     public var checkedOn = ""
+    /// The model's own search queries as the figure check used them, set
+    /// with `checkedPages`.
+    public var checkedQueries: [String] = []
+    /// The least number of sources the question asked for, when it names a
+    /// number (`mindestens 10 Quellen`).
+    public var requestedSources: Int? = nil
 
     /// The report as Markdown that is safe to print and to open in a viewer:
     /// no control or invisible characters, no images, no loading HTML tags.
@@ -165,6 +171,10 @@ public struct ResearchReport: Equatable, Sendable {
         if answerLanguageMismatch {
             text += "\n_The answer may not be in the language the question asks for._\n"
         }
+        if let wanted = requestedSources, sources.count < wanted, endedEarly == nil {
+            text += "\n_The question asked for at least \(wanted) sources; "
+                + "\(sources.count) \(sources.count == 1 ? "was" : "were") read._\n"
+        }
         if searchQueries.count == 1, endedEarly == nil {
             text += "\n_Only one search was run, so other sources may have been missed._\n"
         }
@@ -199,6 +209,8 @@ public struct ResearchReport: Equatable, Sendable {
     static let figureCheckLists: [(ResearchUnverifiedFigure.Kind, String)] = [
         (.notOnPage, "These figures or dates were not found on the pages they cite, or for "
             + "a sentence without citation, on any page read; check them before relying on them:"),
+        (.nameOnlyInQuery, "These names are in the model's own search queries, but on no page "
+            + "read; the model may have taken them from its query. Check them:"),
         (.elsewhereOnPage, "These figures or dates are on a cited page, but not next to "
             + "what the sentence names; check that they belong to it:"),
         (.name, "These names were not found on the pages they cite, or for a sentence "
@@ -221,6 +233,10 @@ public struct ResearchReport: Equatable, Sendable {
         case .name:
             return cited.isEmpty
                 ? "\(figure) — not on any page read" : "\(figure) — not on \(cited)"
+        case .nameOnlyInQuery:
+            return cited.isEmpty
+                ? "\(figure) — only in a search query, not on any page read"
+                : "\(figure) — only in a search query, not on \(cited)"
         }
     }
 
@@ -284,6 +300,9 @@ public enum ResearchEvent: Equatable, Sendable {
     /// The model answered after one search or one page, and is asked once to
     /// search with other words and read another source.
     case askingToSearchMore
+    /// The question asks for a number of sources, and the model answered
+    /// with fewer pages read. It is asked once to keep reading.
+    case askingToReadMoreSources
     /// The model read no page (it answered from search previews again after
     /// it was asked to read, kept repeating searches it already ran, or kept
     /// searching after it was asked to open pages), or
@@ -515,6 +534,7 @@ public struct ResearchAgent: Sendable {
         var askedToSearch = false
         var askedToRead = false
         var askedToSearchMore = false
+        var askedForSources = false
         var openedTopResults = false
         // The answer given before the model was asked to look wider. It is
         // kept if the next answer comes back empty or cut off.
@@ -581,6 +601,15 @@ public struct ResearchAgent: Sendable {
                         answerBeforeSearchingMore = content
                         request = Self.searchMoreRequest
                         onEvent(.askingToSearchMore)
+                    } else if options.nudges, !askedForSources, options.maxSteps - step >= 2,
+                              let wanted = state.requested,
+                              state.sources.count < wanted.minimum,
+                              turn.finishReason != "length",
+                              let content = turn.content, !Self.isBlank(content) {
+                        askedForSources = true
+                        answerBeforeSearchingMore = content
+                        request = Self.moreSourcesRequest(read: state.sources.count, wanted: wanted)
+                        onEvent(.askingToReadMoreSources)
                     }
                 }
                 if let request {
@@ -785,12 +814,14 @@ public struct ResearchAgent: Sendable {
         var checked = report
         checked.unverifiedFigures = ResearchFigureCheck.unverified(
             answer: report.answer, sourceTexts: state.pageTexts, question: state.question,
-            today: options.currentDate)
+            today: options.currentDate, queries: state.queries,
+            pageHeaders: state.pageHeaders())
         if !checked.unverifiedFigures.isEmpty {
             onEvent(.unverifiedFigures(checked.unverifiedFigures.count))
         }
         if options.keepPageTexts {
             checked.checkedPages = state.pageTexts
+            checked.checkedQueries = state.queries
             checked.checkedOn = options.currentDate
         }
         checked.answerLanguageMismatch = Self.wrongLanguage(
@@ -1166,6 +1197,16 @@ public struct ResearchAgent: Sendable {
     /// A top-up page shorter than this is not worth the fetch.
     static let minimumTopUpCharacters = 500
 
+    /// The reminder when the question asks for a number of sources and fewer
+    /// pages were read.
+    static func moreSourcesRequest(read: Int, wanted: ResearchSourceRequest) -> String {
+        let cap = wanted.maximum.map { " (at most \($0))" } ?? ""
+        return "The question asks for at least \(wanted.minimum) sources\(cap), and you have "
+            + "read \(read). Keep searching and open more independent pages with open_page "
+            + "until you have read that many, then answer, citing the source numbers "
+            + "open_page gives."
+    }
+
     static let searchMoreRequest = "Before you answer, look wider if you can: one search or one "
         + "page can miss facts or be out of date. Run one or two more web_search calls with "
         + "different words, or in another language, open at least one more independent page "
@@ -1270,6 +1311,8 @@ public struct ResearchAgent: Sendable {
     /// `complete`).
     private func completeAnswer(_ state: inout State,
                                 thinking: Bool? = nil) async throws -> ResearchAssistantTurn {
+        state.answering = true
+        defer { state.answering = false }
         let turn = try await complete(&state, toolUse: .discouraged, thinking: thinking)
         guard !turn.toolCalls.isEmpty else { return turn }
         try Task.checkCancellation()
@@ -1400,8 +1443,14 @@ public struct ResearchAgent: Sendable {
         // Once a reply to the request for an answer called a tool, the prompt
         // is not shortened any more, so each request extends the last; only a
         // context overflow or a timeout (see `complete`) still shortens it.
+        // A request for the answer is shortened only when it would not fit
+        // the context window. The speed cap of `promptBudget` is for the
+        // steps of the research: shortening right before the final request
+        // rewrote 21 messages and made the server miss its cache (0 of
+        // 9,857 tokens), for a prompt that fitted.
+        let routineBudget = state.answering ? contextLimit(state) : promptBudget(state)
         if state.sealedFrom == nil,
-           state.compact(toFit: promptBudget(state), overhead: Self.toolCharacters) {
+           state.compact(toFit: routineBudget, overhead: Self.toolCharacters) {
             onEvent(.shortenedOlderResults)
         }
         var sent = state.size(overhead: Self.toolCharacters)
@@ -1572,7 +1621,8 @@ public struct ResearchAgent: Sendable {
             let source = state.source(for: page)
             state.recordText(page.text, for: source)
             state.recordRead(requested: url, page: page, offset: offset)
-            return Self.formatPage(page, source: source, alreadyNumbered: alreadyNumbered)
+            return Self.formatPage(page, source: source, alreadyNumbered: alreadyNumbered,
+                                   requested: state.requested, pagesRead: state.sources.count)
         } catch let failure as ResearchToolFailure {
             onEvent(.toolFailed(failure.message))
             return "Tool error: \(Self.sanitized(failure.message))"
@@ -1694,7 +1744,9 @@ public struct ResearchAgent: Sendable {
 
     static func formatPage(_ page: ResearchPageSlice,
                            source: ResearchSource,
-                           alreadyNumbered: Bool = false) -> String {
+                           alreadyNumbered: Bool = false,
+                           requested: ResearchSourceRequest? = nil,
+                           pagesRead: Int = 0) -> String {
         // The sandbox counts Unicode scalars (Python code points), not
         // grapheme clusters, so offsets match what it expects.
         let end = page.offset + page.text.unicodeScalars.count
@@ -1711,6 +1763,10 @@ public struct ResearchAgent: Sendable {
             + "Characters \(page.offset)-\(end) of \(page.totalCharacters)."
         if let next = page.nextOffset {
             header += " More text: call open_page with offset \(next)."
+        }
+        // After the Characters line, which `pageKeys` reads with the URL.
+        if let requested {
+            header += "\nPage \(pagesRead) of at least \(requested.minimum) requested."
         }
         let body = page.text.isEmpty ? "(no readable text on this page)" : sanitized(page.text)
         return [header, untrustedOpen, body, untrustedClose].joined(separator: "\n")
@@ -1746,6 +1802,8 @@ public struct ResearchAgent: Sendable {
         /// Set while the continuation of a cut-off answer is asked: no
         /// emergency shortening, which would cut the answer itself.
         var keepsHistoryWhole = false
+        /// Set while a request for the answer is sent (see `completeAnswer`).
+        var answering = false
         private var pageTextTotal = 0
         static let pageTextPerSource = 200_000
         static let pageTextTotalLimit = 1_000_000
@@ -1819,8 +1877,22 @@ public struct ResearchAgent: Sendable {
             }
         }
 
+        /// The number of sources the question asks for, if it names one.
+        let requested: ResearchSourceRequest?
+
         init(question: String) {
             self.question = question
+            requested = ResearchSourceCount.requested(in: question)
+        }
+
+        /// Each source's title and address, which count as page text for the
+        /// figure check.
+        func pageHeaders() -> [Int: String] {
+            var result: [Int: String] = [:]
+            for source in sources {
+                result[source.number] = ResearchFigureCheck.header(title: source.title, url: source.url)
+            }
+            return result
         }
 
         /// Whether `text` holds `address` as a whole link: with or without
@@ -1913,9 +1985,12 @@ public struct ResearchAgent: Sendable {
 
         func report(answer: String, turns: Int, exhausted: Bool,
                     cutOff: Bool = false) -> ResearchReport {
-            ResearchReport(question: question, answer: answer, sources: sources,
-                           modelTurns: turns, budgetExhausted: exhausted, answerCutOff: cutOff,
-                           searchQueries: shownQueries)
+            var report = ResearchReport(
+                question: question, answer: answer, sources: sources,
+                modelTurns: turns, budgetExhausted: exhausted, answerCutOff: cutOff,
+                searchQueries: shownQueries)
+            report.requestedSources = requested?.minimum
+            return report
         }
 
         /// Case, spacing, quotation marks and word order do not make a query
@@ -1947,8 +2022,9 @@ public struct ResearchAgent: Sendable {
                 line += "\(queries.count) \(queries.count == 1 ? "search" : "searches") "
                     + "(\(earlier)\(shown.joined(separator: ", ")))"
             }
-            line += ", \(sources.count) \(sources.count == 1 ? "page" : "pages") read, "
-                + "step \(step) of \(maxSteps)."
+            let asked = requested.map { " (at least \($0.minimum) requested)" } ?? ""
+            line += ", \(sources.count) \(sources.count == 1 ? "page" : "pages") read"
+            line += asked + ", step \(step) of \(maxSteps)."
             return line
         }
 

@@ -26,12 +26,17 @@ public struct ResearchSavedPages: Codable, Equatable, Sendable {
     /// Today's date as the check used it, `yyyy-MM-dd`.
     public var date: String
     public var pages: [Page]
+    /// The model's own search queries, for the check of names that are only
+    /// in a query. Files saved before this was kept have none.
+    public var queries: [String]?
 
-    public init(question: String, answer: String, date: String, pages: [Page]) {
+    public init(question: String, answer: String, date: String, pages: [Page],
+                queries: [String]? = nil) {
         self.question = question
         self.answer = answer
         self.date = date
         self.pages = pages
+        self.queries = queries
     }
 
     /// The saved form of a finished report, or nil for a partial report, which
@@ -43,7 +48,8 @@ public struct ResearchSavedPages: Codable, Equatable, Sendable {
             pages: report.sources.map { source in
                 Page(number: source.number, url: source.url, title: source.title,
                      text: report.checkedPages[source.number] ?? "")
-            })
+            },
+            queries: report.checkedQueries)
     }
 
     public func encoded() throws -> Data {
@@ -64,10 +70,14 @@ public enum ResearchFigureReplay {
     /// The points the check finds on the saved answer.
     static func check(_ saved: ResearchSavedPages) -> [ResearchUnverifiedFigure] {
         var texts: [Int: String] = [:]
-        for page in saved.pages { texts[page.number] = page.text }
+        var headers: [Int: String] = [:]
+        for page in saved.pages {
+            texts[page.number] = page.text
+            headers[page.number] = ResearchFigureCheck.header(title: page.title, url: page.url)
+        }
         return ResearchFigureCheck.unverified(
             answer: saved.answer, sourceTexts: texts, question: saved.question,
-            today: saved.date)
+            today: saved.date, queries: saved.queries ?? [], pageHeaders: headers)
     }
 
     /// The figure-check section for the saved answer.

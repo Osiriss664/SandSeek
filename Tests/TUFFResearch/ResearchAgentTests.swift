@@ -3859,3 +3859,389 @@ struct ResearchFigureCheckTests {
         #expect(ResearchFigureReplay.render(fine).contains("nothing flagged"))
     }
 }
+
+@Suite("Web research figure check, round A2")
+struct ResearchFigureCheckRoundA2Tests {
+    private func check(_ answer: String, _ texts: [Int: String], question: String = "",
+                       queries: [String] = [], headers: [Int: String] = [:])
+        -> [ResearchUnverifiedFigure] {
+        ResearchFigureCheck.unverified(
+            answer: answer, sourceTexts: texts, question: question, queries: queries,
+            pageHeaders: headers)
+    }
+
+    /// German text with enough function words to count as German.
+    private let german = "Die Liste wird von Steffen Krach geführt und ist nicht klein, mit der "
+        + "Zeit für die Leute."
+
+    private let filler = String(repeating: "lorem ipsum dolor sit amet. ", count: 40)
+
+    // MARK: 4. Names only from the model's own queries
+
+    @Test func aNameOnlyInASearchQueryIsReportedAlsoWithoutCitation() {
+        let answer = "Die Liste führt Jan Stiegert an."
+        let found = check(answer, [1: german], queries: ["Jan Stiegert SPD Berlin"])
+        #expect(found.map(\.kind) == [.nameOnlyInQuery])
+        #expect(found.first?.figure == "Jan Stiegert")
+        #expect(found.first?.sources == [])
+        // The same name is not reported when no query has it (a sentence without
+        // citation checks only the sure kinds of names), or when a page has it.
+        #expect(check(answer, [1: german], queries: ["Berlin Wahl"]).isEmpty)
+        #expect(check(answer, [1: german + " Jan Stiegert kandidiert."],
+                      queries: ["Jan Stiegert"]).isEmpty)
+        // With a citation it is the same kind, with the source.
+        let cited = check("Die Liste führt Jan Stiegert an [1].", [1: german],
+                          queries: ["Jan Stiegert"])
+        #expect(cited == [ResearchUnverifiedFigure(
+            figure: "Jan Stiegert", sources: [1], kind: .nameOnlyInQuery)])
+        let line = ResearchReport.figureCheckLine(cited[0])
+        #expect(line == "Jan Stiegert — only in a search query, not on [1]")
+    }
+
+    @Test func aSurnameMustBeAWholeWordOnThePage() {
+        let page = "Die Liste wird von Elif Eralp geführt und ist nicht klein, mit der Zeit "
+            + "für die Leute."
+        let answer = "Die Liste führt Elif Eral an und ist nicht klein, mit der Zeit für die "
+            + "Leute [1]."
+        let found = check(answer, [1: page])
+        #expect(found == [ResearchUnverifiedFigure(
+            figure: "Elif Eral", sources: [1], kind: .name)])
+        #expect(check(answer, [1: page.replacingOccurrences(of: "Eralp", with: "Eral")]).isEmpty)
+        // An ending is fine: the genitive.
+        #expect(check(answer, [1: page.replacingOccurrences(of: "Eralp", with: "Erals")]).isEmpty)
+        // A name made of a capitalized common noun is still found inside a compound.
+        let compound = "Die Wärmepumpenförderung ist nicht klein, mit der Zeit für die Leute."
+        let nouns = "Die Wärmepumpe Förderung ist nicht klein, mit der Zeit für die Leute [1]."
+        #expect(check(nouns, [1: compound]).isEmpty)
+    }
+
+    @Test func aQueryNameOnAnotherPageReadIsAWrongCitationAndCaveatsAreSkipped() {
+        let tail = " und ist nicht klein, mit der Zeit für die Leute [1]."
+        let answer = "Die Liste führt Jan Stiegert an" + tail
+        let pages = [1: german, 2: german + " Jan Stiegert kandidiert."]
+        let found = check(answer, pages, queries: ["Jan Stiegert"])
+        #expect(found == [ResearchUnverifiedFigure(
+            figure: "Jan Stiegert", sources: [1], kind: .name)])
+        // On no page: only in the query.
+        #expect(check(answer, [1: german], queries: ["Jan Stiegert"]).map(\.kind)
+            == [.nameOnlyInQuery])
+        // The answer's own caveat is not a claim.
+        #expect(check("Nicht verifiziert: Die Liste führt Jan Stiegert an.", [1: german],
+                      queries: ["Jan Stiegert"]).isEmpty)
+        // A month word stays ignored when no name follows it.
+        #expect(check("Das endet Ende Mai und ist nicht klein, mit der Zeit für die Leute [1].",
+                      [1: german]).isEmpty)
+    }
+
+    @Test func aMonthAfterADayOrAPrepositionIsNoNamePart() {
+        let tail = " und ist nicht klein, mit der Zeit für die Leute [1]."
+        let found = check("Am 3. Mai Kanzler Merz sprach" + tail, [1: german])
+        #expect(found.allSatisfy { !$0.figure.contains("Mai") })
+        #expect(check("Im Juni Bundestag sprach" + tail, [1: german],
+                      queries: ["Juni Bundestag"]).isEmpty)
+        #expect(check("In May Parliament sat and the court is not small, with the time for "
+            + "the people [1].", [1: german], queries: ["May Parliament"]).isEmpty)
+        #expect(check("Die Liste führt Jan Stiegert an" + tail, [1: german],
+                      queries: ["Jan Stiegert"]).map(\.kind) == [.nameOnlyInQuery])
+    }
+
+    @Test func aSurnameMayHaveAnEndingOnEitherSide() {
+        let tail = " und ist nicht klein, mit der Zeit für die Leute [1]."
+        let page = "Die Liste wird von Angela Merkel geführt und ist nicht klein, mit der Zeit "
+            + "für die Leute. Erneuerbare Energie ist viel."
+        #expect(check("Die Liste führt Angela Merkels an" + tail, [1: page]).isEmpty)
+        #expect(check("Die Liste nennt Erneuerbare Energien" + tail, [1: page]).isEmpty)
+        #expect(check("Die Liste führt Elif Eral an" + tail,
+                      [1: page + " Elif Eralp spricht."]).map(\.figure) == ["Elif Eral"])
+        // A lone short acronym left after the titles are removed says nothing.
+        #expect(check("Die Nutzung von WP ist nicht klein, mit der Zeit für die Leute [1].",
+                      [1: german]).isEmpty)
+    }
+
+    // MARK: 5. Title, address, status codes, months, source rating
+
+    @Test func theTitleAndTheAddressCountAsPageText() {
+        let answer = "Der Bericht vom Februar 2026 erschien bei HeizCenter und ist nicht klein, "
+            + "mit der Zeit für die Leute [1]."
+        let page = [1: "Die Zahlen sind nicht klein, mit der Zeit für die Leute."]
+        let without = check(answer, page).map(\.figure)
+        #expect(without.contains("Februar 2026"))
+        #expect(without.contains("HeizCenter"))
+        let header = ResearchFigureCheck.header(
+            title: "Laporan Februari 2026", url: "https://www.heizcenter.de/foerderung")
+        #expect(check(answer, page, headers: [1: header]).isEmpty)
+    }
+
+    @Test func monthNamesOfAnotherLanguageAreTheSameMonth() {
+        #expect(check("Stand Februar 2026 [1]", [1: "Laporan Februari 2026"]).isEmpty)
+        #expect(check("Stand August 2026 [1]", [1: "Laporan Agustus 2026"]).isEmpty)
+        #expect(check("Am 3. März 2026 [1]", [1: "Tanggal 3 Maret 2026"]).isEmpty)
+        #expect(check("Am 3 Maret 2026 [1]", [1: "Published March 3, 2026"]).isEmpty)
+        #expect(check("Stand Desember 2025 [1]", [1: "December 2025"]).isEmpty)
+        #expect(check("Stand Mei 2026 [1]", [1: "Stand Mai 2026"]).isEmpty)
+        #expect(check("Stand Februar 2026 [1]", [1: "Laporan Maret 2026"]).map(\.figure)
+            == ["Februar 2026"])
+    }
+
+    @Test func httpStatusCodesAreSkippedOnlyNextToTheirWords() {
+        let page = [1: "nichts"]
+        for text in ["Der Server meldet HTTP 403 [1].", "Der Server meldet Fehler 404 [1].",
+                     "Der Server meldet 403 error [1].", "Der Server meldet Status: 500 [1].",
+                     "Der Server meldet http 503 [1].", "Der Server meldet ERROR 429 [1].",
+                     "Der Server meldet HTTP/1.1 403 [1].", "Der Server meldet HTTP/2 200 [1].",
+                     "Der Server meldet Statuscode 404 [1]."] {
+            #expect(check(text, page).isEmpty, "\(text)")
+        }
+        #expect(check("Die Fehlerquote 502 lag hoch [1].", page).map(\.figure) == ["502"])
+        #expect(check("Es gab 403 Fälle [1].", page).map(\.figure) == ["403"])
+        #expect(check("Die Fehlerquote 50 % lag hoch [1].", page).map(\.figure) == ["50"])
+        // Only three digits from 100 to 599.
+        #expect(check("Der Server meldet Status 999 [1].", page).map(\.figure) == ["999"])
+    }
+
+    @Test func aFigureInTheSourceRatingNeedsNoNameNearIt() {
+        let page = [2: "Indonesia ist ein Land. " + filler + " Wert 3,27 . " + filler]
+        let line = "- Quelle [2] nennt Indonesia 3,27 Punkte [2]."
+        let plain = check("Ergebnis:\n" + line, page)
+        #expect(plain.map(\.kind) == [.elsewhereOnPage])
+        for heading in ["## Quellenbewertung", "### Bewertung der Quellen", "**Quellenbewertung:**",
+                        "## Source assessment"] {
+            #expect(check(heading + "\n" + line, page).isEmpty, "\(heading)")
+        }
+        // The presence check stays.
+        let missing = check("## Quellenbewertung\n- Quelle [2] nennt Indonesia 9,99 Punkte [2].", page)
+        #expect(missing.map(\.kind) == [.notOnPage])
+        // A sentence that only mentions the word is no label.
+        let mention = check("Die Quellenbewertung hat Folgen:\n" + line, page)
+        #expect(mention.map(\.kind) == [.elsewhereOnPage])
+        // A heading after it ends the part.
+        let after = check("## Quellenbewertung\nKurz.\n## Ergebnis\n" + line, page)
+        #expect(after.map(\.kind) == [.elsewhereOnPage])
+    }
+
+    // MARK: 6. Descriptive phrases
+
+    @Test func officeTitlesAndCommonNounsAreNotNames() {
+        let tail = " und ist nicht klein, mit der Zeit für die Leute [1]."
+        #expect(check("Die Inhalte der Sondierungsgespräche zeigen viel" + tail, [1: german]).isEmpty)
+        #expect(check("Der Regierende Bürgermeister spricht viel" + tail, [1: german]).isEmpty)
+        #expect(check("Die Nutzung Minister Senator Präsident Kanzler sind viel" + tail,
+                      [1: german]).isEmpty)
+        // The rest is checked.
+        let name = check("Der Bürgermeister Stiegert spricht viel" + tail, [1: german])
+        #expect(name.map(\.kind) == [.name])
+        #expect(name.first?.figure.contains("Stiegert") == true)
+        #expect(check("Der Bürgermeister Stiegert spricht viel" + tail,
+                      [1: german + " Stiegert spricht."]).isEmpty)
+        // Real names with such endings are still checked.
+        #expect(check("Die Stiftung Warentest nennt viel" + tail, [1: german]).map(\.figure)
+            == ["Stiftung Warentest"])
+        #expect(check("Die Europäische Kommission nennt viel" + tail, [1: german]).map(\.figure)
+            == ["Europäische Kommission"])
+        // A short title word matches whole.
+        #expect(check("Die Drei Bundesrat nennt viel" + tail, [1: german]).map(\.figure)
+            == ["Drei Bundesrat"])
+    }
+
+    // MARK: Saved pages and replay
+
+    @Test func aReplayChecksNamesAgainstTheSavedQueries() throws {
+        let saved = ResearchSavedPages(
+            question: "Wer führt die Liste?", answer: "Die Liste führt Jan Stiegert an.",
+            date: "2026-10-09",
+            pages: [ResearchSavedPages.Page(number: 1, url: "https://example.com/liste",
+                                            title: "Liste", text: german)],
+            queries: ["Jan Stiegert SPD"])
+        let again = try JSONDecoder().decode(ResearchSavedPages.self, from: saved.encoded())
+        #expect(again == saved)
+        #expect(again.queries == ["Jan Stiegert SPD"])
+        #expect(ResearchFigureReplay.check(saved).map(\.kind) == [.nameOnlyInQuery])
+        #expect(ResearchFigureReplay.render(saved).contains("only in a search query"))
+        var plain = saved
+        plain.queries = nil
+        #expect(ResearchFigureReplay.check(plain).isEmpty)
+    }
+
+    @Test func aReplayCountsTheSavedTitleAndAddress() {
+        let saved = ResearchSavedPages(
+            question: "q", answer: "Stand Februar 2026 [1]", date: "2026-10-09",
+            pages: [ResearchSavedPages.Page(number: 1, url: "https://example.com/laporan",
+                                            title: "Laporan Februari 2026", text: "nichts")])
+        #expect(ResearchFigureReplay.check(saved).isEmpty)
+    }
+
+    @Test func savedPagesWithoutQueriesStillLoad() throws {
+        let old = #"""
+        {"question":"q","answer":"a","date":"2026-10-09",
+         "pages":[{"number":1,"url":"https://example.com/","title":"t","text":"x"}]}
+        """#
+        let saved = try JSONDecoder().decode(ResearchSavedPages.self, from: Data(old.utf8))
+        #expect(saved.queries == nil)
+        #expect(saved.pages.count == 1)
+        // A file written without queries has no such key.
+        let data = try ResearchSavedPages(
+            question: "q", answer: "a", date: "d", pages: []).encoded()
+        #expect(!String(decoding: data, as: UTF8.self).contains("queries"))
+    }
+}
+
+@Suite("Web research requested source count")
+struct ResearchSourceCountTests {
+    private func request(_ question: String) -> ResearchSourceRequest? {
+        ResearchSourceCount.requested(in: question)
+    }
+
+    @Test func aNumberOfSourcesIsRead() {
+        #expect(request("Nenne mindestens 10 Quellen zu Wasser")
+            == ResearchSourceRequest(minimum: 10, maximum: nil))
+        #expect(request("Use at least 10 sources.") == ResearchSourceRequest(minimum: 10, maximum: nil))
+        #expect(request("min. 12 Quellen bitte") == ResearchSourceRequest(minimum: 12, maximum: nil))
+        #expect(request("Gib 30 Quellen an") == ResearchSourceRequest(minimum: 30, maximum: nil))
+        #expect(request("Mindestens 5 unabhängige Quellen") == ResearchSourceRequest(minimum: 5, maximum: nil))
+        #expect(request("Recherchiere mit 10–15 Quellen")
+            == ResearchSourceRequest(minimum: 10, maximum: 15))
+        #expect(request("10 bis 15 Quellen") == ResearchSourceRequest(minimum: 10, maximum: 15))
+        #expect(request("10-15 sources") == ResearchSourceRequest(minimum: 10, maximum: 15))
+        #expect(request("minimum 30 max 40 Quellen")
+            == ResearchSourceRequest(minimum: 30, maximum: 40))
+        #expect(request("Berlin Wahl, minimum 30 max 40 Quellen, auf Deutsch")
+            == ResearchSourceRequest(minimum: 30, maximum: 40))
+        #expect(request("at least 20, at most 25 sources")
+            == ResearchSourceRequest(minimum: 20, maximum: 25))
+        #expect(request("mindestens 10 unabhängige und seriöse Quellen")
+            == ResearchSourceRequest(minimum: 10, maximum: nil))
+        #expect(request("at least 10 reliable and independent sources")
+            == ResearchSourceRequest(minimum: 10, maximum: nil))
+        #expect(request("Nutze 10 aktuelle oder offizielle Quellen")
+            == ResearchSourceRequest(minimum: 10, maximum: nil))
+        #expect(request("at least 10 sources of information")
+            == ResearchSourceRequest(minimum: 10, maximum: nil))
+        #expect(request("between 10 and 20 sources")
+            == ResearchSourceRequest(minimum: 10, maximum: 20))
+        #expect(request("zwischen 10 und 20 Quellen")
+            == ResearchSourceRequest(minimum: 10, maximum: 20))
+        #expect(request("Quellen: mindestens 10") == ResearchSourceRequest(minimum: 10, maximum: nil))
+    }
+
+    @Test func otherNumbersAreNoSourceCount() {
+        #expect(request("Wie hat sich Berlin in die letzten 30 Jahre verändert?") == nil)
+        #expect(request("Quellen der letzten 30 Jahre") == nil)
+        #expect(request("Nutze Quellen aus den letzten 30 Jahren") == nil)
+        #expect(request("Nutze 30 Jahre alte Quellen") == nil)
+        #expect(request("Was kostet es in 2026 mit 5 % Zinsen?") == nil)
+        #expect(request("Nenne die Quellen") == nil)
+        #expect(request("Nenne 5 Firmen mit Quellen") == nil)
+        #expect(request("List 5 companies with sources") == nil)
+        #expect(request("Gib mir 3 Beispiele und Quellen") == nil)
+        #expect(request("Fasse in 3 Sätzen mit Quellen zusammen") == nil)
+        #expect(request("What are 5 good sources of iron?") == nil)
+        #expect(request("Datenquellen: 3 Tabellen") == nil)
+        // A cap alone asks for no minimum.
+        #expect(request("maximal 5 Quellen") == nil)
+        #expect(request("use up to 5 sources") == nil)
+        #expect(request("höchstens 8 Quellen") == nil)
+        // One source is nothing to ask for, and a huge number cannot be met.
+        #expect(request("eine Quelle, 1 Quelle") == nil)
+        #expect(request("500 Quellen") == nil)
+        #expect(request("") == nil)
+    }
+}
+
+@Suite("Web research requested sources in the loop")
+struct ResearchRequestedSourcesLoopTests {
+    @Test func aQuestionWithASourceCountMarksEveryPageAndRemindsOnce() async throws {
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
+            FakeServices.answer("Ein Satz [1]."),
+            FakeServices.answer("Noch ein Satz [1]."),
+            FakeServices.answer("Der letzte Satz [1]."),
+        ])
+        let log = EventLog()
+        let report = try await agent(services, events: log)
+            .run(question: "Nenne mindestens 3 Quellen zu Containern")
+        #expect(report.answer == "Der letzte Satz [1].")
+        #expect(report.requestedSources == 3)
+        #expect(log.events.filter { $0 == .askingToReadMoreSources }.count == 1)
+        let reminder = messages(services.modelRequests[3]).suffix(2)
+        #expect(reminder.last?["content"] == .string(ResearchAgent.moreSourcesRequest(
+            read: 1, wanted: ResearchSourceRequest(minimum: 3, maximum: nil))))
+        let page = messages(services.modelRequests[1])
+            .compactMap { $0["content"]?.stringValue }
+            .first { $0.contains("Source [1]") }
+        #expect(page?.contains("Page 1 of at least 3 requested.") == true)
+        #expect(report.markdown.contains(
+            "The question asked for at least 3 sources; 1 was read."))
+    }
+
+    @Test func noRemindersWithoutNudgesAndNoNoteWhenReached() async throws {
+        var options = ResearchOptions()
+        options.nudges = false
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
+            FakeServices.answer("Ein Satz [1]."),
+        ])
+        let log = EventLog()
+        let report = try await agent(services, options: options, events: log)
+            .run(question: "Nenne mindestens 3 Quellen zu Containern")
+        #expect(!log.events.contains(.askingToReadMoreSources))
+        #expect(report.markdown.contains("The question asked for at least 3 sources"))
+
+        let reached = FakeServices(modelReplies: [
+            FakeServices.calls([
+                ("a", "open_page", #"{"url":"https://a.example/"}"#),
+                ("b", "open_page", #"{"url":"https://b.example/"}"#),
+            ]),
+            FakeServices.answer("Beide [1][2]."),
+        ])
+        let done = try await agent(reached, options: options)
+            .run(question: "Nenne mindestens 2 Quellen zu Containern")
+        #expect(!done.markdown.contains("The question asked for"))
+
+        // No number in the question: no mark on the page, no note.
+        let plain = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "open_page", #"{"url":"https://a.example/"}"#)]),
+            FakeServices.answer("Einer [1]."),
+        ])
+        let none = try await agent(plain, options: options).run(question: "Die letzten 30 Jahre?")
+        #expect(none.requestedSources == nil)
+        #expect(!messages(plain.modelRequests[1]).compactMap { $0["content"]?.stringValue }
+            .contains { $0.contains("requested.") })
+    }
+
+    @Test func theFinalRequestIsShortenedOnlyWhenTheContextWindowOverflows() async throws {
+        let page = String(repeating: "Wasser fließt bergab und trägt Sand. ", count: 1_200)
+        var options = ResearchOptions()
+        options.maxSteps = 2
+        options.nudges = false
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "open_page", #"{"url":"https://a.example/"}"#)]),
+            FakeServices.calls([("b", "open_page", #"{"url":"https://b.example/"}"#)]),
+            FakeServices.answer("Wasser fließt [1][2]."),
+        ]) { path, body in
+            switch path {
+            case "/v1/models":
+                return FakeServices.json(200, .object(["object": .string("list"), "data": .array([
+                    .object(["id": .string("qwen3.6-35b-a3b"), "context_length": .integer(400_000)]),
+                ])]))
+            case "/v1/fetch":
+                return FakeServices.json(200, .object([
+                    "url": body?["url"] ?? .string(""), "title": .string("Wasser"),
+                    "text": .string(page), "offset": .integer(0),
+                    "total_chars": .integer(page.unicodeScalars.count),
+                ]))
+            default:
+                return FakeServices.webPages(path, body)
+            }
+        }
+        let log = EventLog()
+        let report = try await agent(services, options: options, events: log).run(question: "q")
+        #expect(report.sources.count == 2)
+        // Two pages are over the 64,000 character speed cap, but the window holds them.
+        #expect(!log.events.contains(.shortenedOlderResults))
+        let tools = messages(try #require(services.modelRequests.last))
+            .filter { $0["role"] == .string("tool") }
+            .compactMap { $0["content"]?.stringValue }
+        #expect(tools.count == 2)
+        #expect(tools.allSatisfy { $0.contains(page) })
+    }
+}
