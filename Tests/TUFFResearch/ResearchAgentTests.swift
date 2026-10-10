@@ -2709,7 +2709,8 @@ struct ResearchAgentTests {
             #expect(!log.events.contains { if case .unseenURLRefused = $0 { true } else { false } })
             let answer = messages(fake.modelRequests[3])
                 .first { $0["tool_call_id"] == .string("c") }?["content"]?.stringValue ?? ""
-            #expect(answer == ResearchAgent.privateAddressRefusal)
+            // The refusal comes first; the usual progress footer follows it.
+            #expect(answer.hasPrefix(ResearchAgent.privateAddressRefusal))
             #expect(answer.contains("local or private network"))
         }
     }
