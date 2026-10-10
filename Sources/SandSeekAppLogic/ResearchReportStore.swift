@@ -96,15 +96,25 @@ public struct SavedResearchReport: Codable, Equatable, Identifiable, Sendable {
     public var unverifiedFigureCount: Int { unverifiedFigureTotal ?? 0 }
     public let unknownCitations: [Int]
     public let steps: [ResearchStep]
-    /// The report as `tuff research` prints it, made inert for viewers.
+    /// The report as `sandseek` prints it, made inert for viewers.
     public let markdown: String
+    /// The kind of model server that answered, as `ResearchServerKind`'s raw
+    /// value (`tuff` or `llamacpp`). Optional so reports saved before it
+    /// existed, such as those imported from TUFF, still load.
+    public let serverKind: String?
+    /// The server's name for people ("TUFF", "llama.cpp"), when the report
+    /// says which one answered.
+    public var serverDisplayName: String? {
+        serverKind.flatMap { ResearchServerKind(rawValue: $0) }?.displayName
+    }
 
     public init(id: UUID = UUID(),
                 report: ResearchReport,
                 model: String,
                 createdAt: Date,
                 durationSeconds: Double,
-                steps: [ResearchStep]) {
+                steps: [ResearchStep],
+                serverKind: ResearchServerKind? = nil) {
         self.id = id
         question = ResearchText.terminalSafe(report.question)
         answer = ResearchText.terminalSafe(report.answer)
@@ -127,6 +137,7 @@ public struct SavedResearchReport: Codable, Equatable, Identifiable, Sendable {
         unknownCitations = report.unknownCitations
         self.steps = steps
         markdown = report.markdown
+        self.serverKind = serverKind?.rawValue
     }
 }
 
@@ -147,7 +158,7 @@ public final class ResearchReportStore {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first ?? FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent("Library/Application Support", isDirectory: true)
-        return support.appendingPathComponent("TUFF/Research Reports", isDirectory: true)
+        return support.appendingPathComponent("SandSeek/Reports", isDirectory: true)
     }
 
     public func reload() {
@@ -193,16 +204,16 @@ public final class ResearchReportStore {
     }
 
     public func markdownURL(for report: SavedResearchReport) -> URL {
-        directory.appendingPathComponent(fileStem(for: report) + ".md")
+        directory.appendingPathComponent(Self.fileStem(for: report) + ".md")
     }
 
     func jsonURL(for report: SavedResearchReport) -> URL {
-        directory.appendingPathComponent(fileStem(for: report) + ".json")
+        directory.appendingPathComponent(Self.fileStem(for: report) + ".json")
     }
 
     /// The date and the start of the id: sortable in Finder and never taken
     /// from the question, which could hold anything.
-    private func fileStem(for report: SavedResearchReport) -> String {
+    nonisolated static func fileStem(for report: SavedResearchReport) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
         formatter.dateFormat = "yyyy-MM-dd HHmmss"
@@ -216,7 +227,7 @@ public final class ResearchReportStore {
         return encoder
     }
 
-    private static var decoder: JSONDecoder {
+    nonisolated static var decoder: JSONDecoder {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return decoder

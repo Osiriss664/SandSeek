@@ -2,12 +2,12 @@ import Foundation
 import Observation
 import SandSeekCore
 
-/// The same settings as the `tuff research` options, with the same
+/// The same settings as the `sandseek` command's options, with the same
 /// defaults and ranges (`ResearchOptions`).
 public struct ResearchRunSettings: Equatable, Sendable {
     public var model: String
     /// Turns reasoning on and shows it in the progress list, as
-    /// `tuff research --show-thinking` does.
+    /// `sandseek --show-thinking` does.
     public var showThinking: Bool
     public var maxSteps: Int
     public var pageCharacters: Int
@@ -147,8 +147,8 @@ public final class ProcessInfoWakeAssertion: ResearchWakeAssertion, @unchecked S
     }
 }
 
-/// Runs one research question at a time with the same loop as `tuff
-/// research`, and turns its events into a progress list.
+/// Runs one research question at a time with the same loop as the `sandseek`
+/// command, and turns its events into a progress list.
 @MainActor @Observable
 public final class ResearchRunController {
     public enum Phase: Equatable, Sendable {
@@ -191,10 +191,18 @@ public final class ResearchRunController {
 
     public var isRunning: Bool { phase == .running }
 
+    /// Starts a question. `connection` says which kind of server answers and
+    /// whether its replies are streamed (the default is TUFF's plain request,
+    /// which every fake in the tests answers). `authorization` is the
+    /// `Authorization` header value for the model server, if it needs one; it
+    /// goes into that header only, and never to the sandbox.
     public func start(question: String,
                       settings: ResearchRunSettings,
                       serverURL: URL,
-                      sandboxURL: URL) {
+                      sandboxURL: URL,
+                      connection: ResearchServerConnection = ResearchServerConnection(
+                          kind: .tuff, version: nil, streaming: false),
+                      authorization: String? = nil) {
         let question = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !isRunning, !question.isEmpty else { return }
         let id = UUID()
@@ -221,6 +229,8 @@ public final class ResearchRunController {
                 model: settings.model,
                 maxTokens: settings.maxTokens,
                 enableThinking: settings.enableThinking,
+                streaming: connection.streaming,
+                authorization: authorization,
                 transport: transport),
             sandbox: ResearchSandboxClient(baseURL: sandboxURL, transport: sandboxTransport),
             options: options,
@@ -246,12 +256,13 @@ public final class ResearchRunController {
             wake.end(wakeToken)
             continuation.finish()
             await listener.value
-            self?.finish(outcome, runID: id, started: started, model: settings.model)
+            self?.finish(outcome, runID: id, started: started, model: settings.model,
+                         serverKind: connection.kind)
         }
     }
 
     /// Stops the run. Its model request is cancelled, which closes the
-    /// connection, and TUFF stops generating the reply. The run then winds
+    /// connection, and the model server stops generating the reply. The run then winds
     /// down, and `finish` saves what it had read, if anything.
     public func stop() {
         guard isRunning else { return }
@@ -371,7 +382,8 @@ public final class ResearchRunController {
     private func finish(_ outcome: Result<ResearchReport, any Error>,
                         runID: UUID,
                         started: Date,
-                        model: String) {
+                        model: String,
+                        serverKind: ResearchServerKind) {
         // A stopped run still ends here, so what it read can be saved.
         guard runID == self.runID, isRunning || phase == .stopped else { return }
         task = nil
@@ -383,7 +395,7 @@ public final class ResearchRunController {
                 replaceStoppedStep("Stopped. Nothing was saved.")
                 return
             }
-            save(result, started: started, model: model)
+            save(result, started: started, model: model, serverKind: serverKind)
             phase = .finished
         case .failure(let error):
             guard let ended = error as? ResearchRunEndedEarly,
@@ -396,7 +408,7 @@ public final class ResearchRunController {
                 return
             }
             // The pages and searches so far are kept, with the reason and no answer.
-            save(ended.partial, started: started, model: model)
+            save(ended.partial, started: started, model: model, serverKind: serverKind)
             if stopped {
                 replaceStoppedStep("Stopped. Saved what was read so far.")
             } else {
@@ -407,13 +419,15 @@ public final class ResearchRunController {
         }
     }
 
-    private func save(_ result: ResearchReport, started: Date, model: String) {
+    private func save(_ result: ResearchReport, started: Date, model: String,
+                      serverKind: ResearchServerKind) {
         let saved = SavedResearchReport(
             report: result,
             model: model,
             createdAt: started,
             durationSeconds: max(0, now().timeIntervalSince(started)),
-            steps: steps)
+            steps: steps,
+            serverKind: serverKind)
         report = saved
         do {
             try store.save(saved)

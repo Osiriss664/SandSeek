@@ -1,8 +1,6 @@
-import Darwin
 import Foundation
 import Testing
-@testable import TUFFAppResearch
-import TUFFAppServer
+@testable import SandSeekAppLogic
 @testable import SandSeekCore
 
 @Suite struct ResearchAnswerFormatterTests {
@@ -41,7 +39,7 @@ import TUFFAppServer
 
     @Test func onlyCitationLinksMapToSources() {
         #expect(ResearchAnswerFormatter.sourceNumber(
-            from: URL(string: "tuff-research-source://4")!) == 4)
+            from: URL(string: "sandseek-source://4")!) == 4)
         #expect(ResearchAnswerFormatter.sourceNumber(from: URL(string: "https://4.example")!) == nil)
     }
 }
@@ -165,13 +163,13 @@ import TUFFAppServer
             question: "q", answer: "",
             sources: [ResearchSource(number: 1, title: "t", url: "https://example.com")],
             modelTurns: 3, budgetExhausted: false, searchQueries: ["q"])
-        partial.endedEarly = "the TUFF server refused the request (HTTP 500)"
+        partial.endedEarly = "the model server refused the request (HTTP 500)"
         let saved = SavedResearchReport(
             report: partial, model: "m", createdAt: Date(timeIntervalSince1970: 1_790_000_000),
             durationSeconds: 1, steps: [])
         try store.save(saved)
         let reloaded = ResearchReportStore(directory: directory)
-        #expect(reloaded.reports.first?.endedEarly == "the TUFF server refused the request (HTTP 500)")
+        #expect(reloaded.reports.first?.endedEarly == "the model server refused the request (HTTP 500)")
         #expect(reloaded.reports.first?.markdown.contains("ended early") == true)
 
         // A report saved before the field existed has none.
@@ -183,6 +181,39 @@ import TUFFAppServer
         let older = ResearchReportStore(directory: directory)
         #expect(older.reports.map(\.id) == [saved.id])
         #expect(older.reports.first?.endedEarly == nil)
+    }
+
+    @Test func theServerKindIsKeptAndOldReportsHaveNone() throws {
+        let directory = temporaryDirectory()
+        let store = ResearchReportStore(directory: directory)
+        let plain = report("No server named")
+        #expect(plain.serverKind == nil)
+        #expect(plain.serverDisplayName == nil)
+        let named = SavedResearchReport(
+            report: ResearchReport(
+                question: "q", answer: "A.", sources: [], modelTurns: 1, budgetExhausted: false),
+            model: "m", createdAt: Date(timeIntervalSince1970: 1_790_000_100),
+            durationSeconds: 1, steps: [], serverKind: .llamacpp)
+        try store.save(named)
+        let reloaded = ResearchReportStore(directory: directory)
+        #expect(reloaded.reports.first?.serverKind == "llamacpp")
+        #expect(reloaded.reports.first?.serverDisplayName == "llama.cpp")
+
+        // A report saved before the field existed loads without it.
+        let url = store.jsonURL(for: named)
+        var object = try #require(
+            try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
+        #expect(object.removeValue(forKey: "serverKind") != nil)
+        try JSONSerialization.data(withJSONObject: object).write(to: url)
+        let older = ResearchReportStore(directory: directory)
+        #expect(older.reports.map(\.id) == [named.id])
+        #expect(older.reports.first?.serverKind == nil)
+    }
+
+    @Test func reportsGoToSandSeeksOwnFolder() {
+        let path = ResearchReportStore.defaultDirectory().path
+        #expect(path.hasSuffix("Application Support/SandSeek/Reports"))
+        #expect(!path.contains("TUFF"))
     }
 
     @Test func neverWritesOverAnExistingReport() throws {
@@ -249,7 +280,7 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
 
 @Suite @MainActor struct ResearchRunControllerTests {
     private let server = URL(string: "http://127.0.0.1:8080")!
-    private let sandbox = URL(string: "http://127.0.0.1:9000")!
+    private let sandbox = URL(string: "http://127.0.0.1:9100")!
 
     @Test func runShowsProgressAndSavesTheReport() async throws {
         let services = FakeResearchServices(modelReplies: [
@@ -337,6 +368,55 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
         #expect(run.phase == .finished)
         #expect(run.steps.contains { $0.text == "Answered without searching; asking it to search" })
         #expect(try #require(run.report).answer.contains("From the page"))
+    }
+
+    @Test func theRunNamesTheServerKindAndSendsTheKeyOnlyToTheModelServer() async throws {
+        let services = FakeResearchServices(modelReplies: [
+            FakeResearchServices.call("open_page", #"{"url": "https://github.com/apple/container"}"#),
+            FakeResearchServices.answer("From the page [1]."),
+            FakeResearchServices.answer("From the page [1]."),
+        ])
+        let store = ResearchReportStore(directory: temporaryDirectory())
+        let run = ResearchRunController(store: store, transport: services)
+        run.start(question: "Anything about https://github.com/apple/container",
+                  settings: ResearchRunSettings(model: "m"),
+                  serverURL: server, sandboxURL: sandbox,
+                  connection: ResearchServerConnection(
+                      kind: .llamacpp, version: nil, streaming: false),
+                  authorization: "Bearer run-key")
+        await waitUntil { !run.isRunning }
+
+        #expect(run.phase == .finished)
+        let saved = try #require(run.report)
+        #expect(saved.serverKind == "llamacpp")
+        #expect(saved.serverDisplayName == "llama.cpp")
+        // The model requests carried the header; the sandbox requests (health,
+        // search, fetch) go through the plain `send` and never carry it.
+        let chat = services.authorizations
+        #expect(!chat.isEmpty)
+        #expect(chat.allSatisfy { $0.path == "/v1/chat/completions" || $0.path == "/v1/models" })
+        #expect(chat.allSatisfy { $0.value == "Bearer run-key" })
+        // And the key is not in the saved report.
+        let json = try String(contentsOf: store.jsonURL(for: saved), encoding: .utf8)
+        #expect(!json.contains("run-key"))
+        #expect(!saved.markdown.contains("run-key"))
+    }
+
+    @Test func aTuffRunIsSavedAsTuffWithNoKey() async throws {
+        let services = FakeResearchServices(modelReplies: [
+            FakeResearchServices.call("open_page", #"{"url": "https://github.com/apple/container"}"#),
+            FakeResearchServices.answer("From the page [1]."),
+            FakeResearchServices.answer("From the page [1]."),
+        ])
+        let run = ResearchRunController(
+            store: ResearchReportStore(directory: temporaryDirectory()), transport: services)
+        run.start(question: "Anything about https://github.com/apple/container",
+                  settings: ResearchRunSettings(model: "m"),
+                  serverURL: server, sandboxURL: sandbox,
+                  connection: ResearchServerConnection(kind: .tuff, version: "8.3.1", streaming: false))
+        await waitUntil { !run.isRunning }
+        #expect(run.report?.serverKind == "tuff")
+        #expect(services.authorizations.allSatisfy { $0.value == nil })
     }
 
     @Test func stoppingDiscardsTheRun() async {
@@ -506,20 +586,6 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
     }
 }
 
-/// Settings kept in memory, so tests never touch real preferences.
-private final class MemorySettings: ResearchSettingsStore {
-    private let lock = NSLock()
-    private var values: [String: String] = [:]
-
-    func savedString(forKey key: String) -> String? {
-        lock.withLock { values[key] }
-    }
-
-    func save(_ value: String, forKey key: String) {
-        lock.withLock { values[key] = value }
-    }
-}
-
 @Suite @MainActor struct ResearchSandboxControllerTests {
     private func defaults() -> MemorySettings {
         MemorySettings()
@@ -527,39 +593,40 @@ private final class MemorySettings: ResearchSettingsStore {
 
     private func controller(runner: FakeProcessRunner = FakeProcessRunner(),
                             services: FakeResearchServices = FakeResearchServices(),
-                            checkout: URL? = nil,
+                            bundle: URL? = nil,
                             stateDirectory: URL = temporaryDirectory()) throws
         -> ResearchSandboxController {
         ResearchSandboxController(
             runner: runner, transport: services, defaults: defaults(),
-            environment: [:], searchStart: [try checkout ?? fakeCheckout()],
+            environment: [:], resources: try testResources(bundle: bundle),
             stateDirectory: stateDirectory)
     }
 
-    @Test func findsTheCheckoutAboveABuildFolder() throws {
-        let root = try fakeCheckout()
-        let build = root.appendingPathComponent(".build/arm64-apple-macosx/release", isDirectory: true)
-        try FileManager.default.createDirectory(at: build, withIntermediateDirectories: true)
-        let found = ResearchSandboxController.findRepository(
-            startingAt: build, fileExists: FileManager.default.fileExists(atPath:))
-        #expect(found?.standardizedFileURL.path == root.standardizedFileURL.path)
-        #expect(ResearchSandboxController.findRepository(
-            startingAt: temporaryDirectory(), fileExists: { _ in false }) == nil)
+    @Test func theNamesAndThePortAreSandSeeks() {
+        #expect(ResearchSandboxController.imageName == "sandseek-sandbox:latest")
+        #expect(ResearchSandboxController.containerName == "sandseek-sandbox")
+        #expect(ResearchSandboxController.firewallTable == "sandseek_sandbox")
+        #expect(ResearchSandboxController.defaultURL.absoluteString == "http://127.0.0.1:9100")
+        #expect(ResearchSandboxController.port == 9100)
     }
 
     @Test func firstStartBuildsTheImageThenStartsAndChecksProtection() async throws {
-        let root = try fakeCheckout()
+        let root = try fakeSandboxBundle()
         let runner = FakeProcessRunner()
-        let sandbox = try controller(runner: runner, checkout: root)
-        #expect(sandbox.repository != nil)
+        let sandbox = try controller(runner: runner, bundle: root)
+        #expect(sandbox.files == nil)
 
         await sandbox.start()
+        #expect(sandbox.files?.origin == .installedCopy)
+        // The script runs from the copy, not from the files in the app.
+        #expect(runner.commands.contains { $0.contains(sandbox.files?.script.path ?? "-") })
         #expect(sandbox.state == .ready)
         #expect(sandbox.protection == .verified)
         #expect(sandbox.startedByApp)
         #expect(runner.scriptCommands == ["build", "start"])
         #expect(runner.commands.contains {
-            $0.starts(with: ["env", "container", "exec", "tuff-web-research", "nft"])
+            $0.starts(with: ["env", "container", "exec", "sandseek-sandbox", "nft",
+                             "list", "table", "inet", "sandseek_sandbox"])
         })
 
         // Unchanged files and an existing image: no rebuild.
@@ -573,7 +640,7 @@ private final class MemorySettings: ResearchSettingsStore {
         // A changed sandbox file is rebuilt before the next start.
         await sandbox.stop()
         try Data("print('changed')\n".utf8).write(
-            to: root.appendingPathComponent("Sandbox/web-research/server.py"))
+            to: root.appendingPathComponent("Sandbox/server.py"))
         await sandbox.start()
         #expect(runner.scriptCommands.suffix(2) == ["build", "start"])
     }
@@ -583,7 +650,7 @@ private final class MemorySettings: ResearchSettingsStore {
         stillThere.value = true
         let runner = FakeProcessRunner { command in
             command.contains("list") && stillThere.value
-                ? ResearchProcessResult(status: 0, output: "ID                 IMAGE\ntuff-web-research  tuff-web-research:latest\n")
+                ? ResearchProcessResult(status: 0, output: "ID                 IMAGE\nsandseek-sandbox   sandseek-sandbox:latest\n")
                 : FakeProcessRunner.healthy(command)
         }
         let sandbox = try controller(runner: runner)
@@ -606,11 +673,11 @@ private final class MemorySettings: ResearchSettingsStore {
     @Test func onlyTheIDColumnCountsAsTheSandbox() {
         let header = "ID                 IMAGE                     OS     STATE\n"
         #expect(ResearchSandboxController.listsContainer(
-            header + "tuff-web-research  tuff-web-research:latest  linux  running\n"))
+            header + "sandseek-sandbox  sandseek-sandbox:latest  linux  running\n"))
         #expect(!ResearchSandboxController.listsContainer(
-            header + "other              tuff-web-research:latest  linux  running\n"))
+            header + "other             sandseek-sandbox:latest  linux  running\n"))
         #expect(!ResearchSandboxController.listsContainer(
-            header + "buildkit           builder                   linux  tuff-web-research\n"))
+            header + "buildkit          builder                  linux  sandseek-sandbox\n"))
         #expect(!ResearchSandboxController.listsContainer(""))
     }
 
@@ -748,14 +815,14 @@ private final class MemorySettings: ResearchSettingsStore {
 
     @Test func aSandboxLeftFromACrashIsAdoptedAndStoppedAtQuit() async throws {
         let state = temporaryDirectory()
-        let checkout = try fakeCheckout()
-        let first = try controller(checkout: checkout, stateDirectory: state)
+        let checkout = try fakeSandboxBundle()
+        let first = try controller(bundle: checkout, stateDirectory: state)
         await first.start()
         #expect(first.startedByApp)
 
         // The app "crashed": a new controller finds the marker.
         let services = FakeResearchServices(sandboxHealthy: true)
-        let second = try controller(services: services, checkout: checkout, stateDirectory: state)
+        let second = try controller(services: services, bundle: checkout, stateDirectory: state)
         #expect(second.startedByApp)
         #expect(second.adoptedFromLastRun)
         await second.refresh()
@@ -764,11 +831,11 @@ private final class MemorySettings: ResearchSettingsStore {
         // If the VM is gone, the marker is dropped.
         let third = try controller(
             services: FakeResearchServices(sandboxHealthy: false),
-            checkout: checkout, stateDirectory: state)
+            bundle: checkout, stateDirectory: state)
         await third.refresh()
         #expect(!third.startedByApp)
         #expect(!third.adoptedFromLastRun)
-        let fourth = try controller(checkout: checkout, stateDirectory: state)
+        let fourth = try controller(bundle: checkout, stateDirectory: state)
         #expect(!fourth.startedByApp)
     }
 
@@ -789,18 +856,61 @@ private final class MemorySettings: ResearchSettingsStore {
         #expect(!sandbox.startedByApp)
     }
 
-    @Test func withoutACheckoutItAsksForTheFolder() async {
+    @Test func withoutSandboxFilesInTheAppItSaysHowToGetThem() async {
+        let runner = FakeProcessRunner()
         let sandbox = ResearchSandboxController(
-            runner: FakeProcessRunner(), transport: FakeResearchServices(sandboxHealthy: false),
-            defaults: defaults(), environment: [:], searchStart: [temporaryDirectory()],
+            runner: runner, transport: FakeResearchServices(sandboxHealthy: false),
+            defaults: defaults(), environment: [:],
+            resources: SandboxResources(
+                bundledRoot: nil, installRoot: temporaryDirectory("SandSeekInstall"),
+                environment: [:]),
             stateDirectory: temporaryDirectory())
-        #expect(sandbox.repository == nil)
         await sandbox.start()
         guard case .failed(let message) = sandbox.state else {
             Issue.record("expected a failure, got \(sandbox.state)")
             return
         }
-        #expect(message.contains("TUFF folder"))
+        #expect(message.contains("Scripts/package_app.sh"))
+        #expect(runner.commands.isEmpty)
+    }
+
+    @Test func aSandboxStartedWithADeveloperCheckoutRunsItsScriptInPlace() async throws {
+        let checkout = try fakeSandboxBundle()
+        let install = temporaryDirectory("SandSeekInstall")
+        let runner = FakeProcessRunner()
+        let sandbox = ResearchSandboxController(
+            runner: runner, transport: FakeResearchServices(), defaults: defaults(),
+            environment: [:],
+            resources: SandboxResources(
+                bundledRoot: nil, installRoot: install,
+                environment: [SandboxResources.overrideVariable: checkout.path]),
+            stateDirectory: temporaryDirectory())
+        await sandbox.start()
+        #expect(sandbox.state == .ready)
+        #expect(sandbox.files?.origin == .checkout)
+        #expect(runner.commands.contains {
+            $0.contains(checkout.appendingPathComponent("Scripts/research_sandbox.sh").path)
+        })
+        // Nothing was copied.
+        #expect(!FileManager.default.fileExists(atPath: install.path))
+    }
+
+    @Test func aScriptThatWasAlteredAfterTheCopyIsReplacedBeforeItRuns() async throws {
+        let bundle = try fakeSandboxBundle()
+        let install = temporaryDirectory("SandSeekInstall")
+        let runner = FakeProcessRunner()
+        let sandbox = ResearchSandboxController(
+            runner: runner, transport: FakeResearchServices(), defaults: defaults(),
+            environment: [:],
+            resources: try testResources(bundle: bundle, install: install),
+            stateDirectory: temporaryDirectory())
+        await sandbox.start()
+        await sandbox.stop()
+        let script = install.appendingPathComponent("Scripts/research_sandbox.sh")
+        try Data("#!/bin/bash\necho tampered\n".utf8).write(to: script)
+        await sandbox.start()
+        #expect(try String(contentsOf: script, encoding: .utf8) == "#!/bin/bash\n")
+        #expect(sandbox.files?.didCopy == true)
     }
 
     @Test func pathIncludesWhereContainerInstalls() {
@@ -846,21 +956,21 @@ private final class SlowStartRunner: ResearchProcessRunning, @unchecked Sendable
         let run: ResearchRunController
         let runServices: FakeResearchServices
         let stateDirectory: URL
+        let bundle: URL
     }
 
     private func setup(runner: any ResearchProcessRunning) async throws -> Setup {
         let stateDirectory = temporaryDirectory()
+        let bundle = try fakeSandboxBundle()
         let sandbox = ResearchSandboxController(
             runner: runner, transport: FakeResearchServices(), defaults: MemorySettings(),
-            environment: [:], searchStart: [try fakeCheckout()], stateDirectory: stateDirectory)
-        let server = ResearchModelServerController(
-            backgroundAPI: AppBackgroundAPIController(
-                settingsURL: temporaryDirectory().appendingPathComponent("server.json")),
+            environment: [:], resources: try testResources(bundle: bundle),
+            stateDirectory: stateDirectory)
+        let server = ResearchServerController(
+            defaults: MemorySettings(), keyStore: MemoryKeyStore(key: "k"),
             transport: FakeResearchServices(listedModels: ["m"]),
-            serverExecutable: nil, modelsRoot: nil,
-            logURL: temporaryDirectory().appendingPathComponent("server.log"),
-            stateDirectory: temporaryDirectory(),
-            processInfo: { _ in nil })
+            // The fakes answer with whole replies, not streams.
+            tuffStreaming: false)
         let reports = ResearchReportStore(directory: temporaryDirectory())
         // One reply per question is enough with the nudges and rewrites off,
         // so no request reaches the fake with nothing scripted.
@@ -868,9 +978,12 @@ private final class SlowStartRunner: ResearchProcessRunning, @unchecked Sendable
             modelReplies: Array(repeating: FakeResearchServices.answer("An answer."), count: 8))
         let run = ResearchRunController(store: reports, transport: runServices)
         await server.refresh()
+        let presets = ResearchPresetStore(defaults: MemorySettings())
         return Setup(
-            workspace: ResearchWorkspace(sandbox: sandbox, server: server, reports: reports, run: run),
-            sandbox: sandbox, run: run, runServices: runServices, stateDirectory: stateDirectory)
+            workspace: ResearchWorkspace(
+                sandbox: sandbox, server: server, reports: reports, run: run, presets: presets),
+            sandbox: sandbox, run: run, runServices: runServices, stateDirectory: stateDirectory,
+            bundle: bundle)
     }
 
     private static let settings = ResearchRunSettings(
@@ -986,224 +1099,10 @@ private final class SlowStartRunner: ResearchProcessRunning, @unchecked Sendable
         let setup = try await setup(runner: runner)
         await setup.sandbox.start()
         await ask(setup)
-        let root = try #require(setup.sandbox.repository)
         try Data("print('changed')\n".utf8).write(
-            to: root.appendingPathComponent("Sandbox/web-research/server.py"))
+            to: setup.bundle.appendingPathComponent("Sandbox/server.py"))
         await ask(setup)
         #expect(runner.scriptCommands == ["build", "start", "build", "start"])
         #expect(setup.sandbox.state == .ready)
-    }
-}
-
-@Suite @MainActor struct ResearchModelServerControllerTests {
-    private static let executable = URL(fileURLWithPath: "/Applications/TUFF.app/Contents/MacOS/TUFF")
-    /// Where the server executable is looked up; a real symlink is tested
-    /// separately, so this is the binary itself.
-    private static let serverPath = executable
-
-    private func server(listedModels: [String]?,
-                        stateDirectory: URL = temporaryDirectory(),
-                        serverExecutable: URL? = nil,
-                        processInfo: @escaping (pid_t) -> ResearchProcessInfo? = { _ in nil })
-        -> ResearchModelServerController {
-        ResearchModelServerController(
-            backgroundAPI: backgroundAPI(),
-            transport: FakeResearchServices(listedModels: listedModels),
-            serverExecutable: serverExecutable, modelsRoot: nil,
-            logURL: temporaryDirectory().appendingPathComponent("server.log"),
-            stateDirectory: stateDirectory,
-            processInfo: processInfo)
-    }
-
-    private func port() -> Int { backgroundAPI().settings.port }
-
-    /// The server as the system shows it: the multi-call binary, started
-    /// under the name TUFFServer with the port.
-    private func runningServer(start: Int64 = 1_700_000_000_000_000,
-                               arguments: [String]? = nil) -> ResearchProcessInfo {
-        ResearchProcessInfo(
-            name: "TUFF", startMicroseconds: start, path: Self.executable.path,
-            arguments: arguments ?? ["TUFFServer", "--port", String(port())])
-    }
-
-    @Test func aServerLeftFromACrashIsTakenOver() async throws {
-        let state = temporaryDirectory()
-        try FileManager.default.createDirectory(at: state, withIntermediateDirectories: true)
-        try Data("4242 1700000000000000".utf8).write(to: state.appendingPathComponent("server.pid"))
-        let info = runningServer()
-        let controller = server(listedModels: ["gemma-4-e4b-it"], stateDirectory: state,
-                                serverExecutable: Self.serverPath,
-                                processInfo: { $0 == 4242 ? info : nil })
-        #expect(controller.adoptedFromLastRun)
-        await controller.refresh()
-        #expect(controller.owner == .app)
-    }
-
-    @Test func aMarkerNamingAnotherProgramIsIgnored() throws {
-        let state = temporaryDirectory()
-        try FileManager.default.createDirectory(at: state, withIntermediateDirectories: true)
-        let marker = state.appendingPathComponent("server.pid")
-        try Data("4242 1700000000000000".utf8).write(to: marker)
-        let safari = ResearchProcessInfo(
-            name: "Safari", startMicroseconds: 1_700_000_000_000_000,
-            path: "/Applications/Safari.app/Contents/MacOS/Safari", arguments: ["Safari"])
-        let controller = server(listedModels: nil, stateDirectory: state,
-                                serverExecutable: Self.serverPath,
-                                processInfo: { _ in safari })
-        #expect(!controller.adoptedFromLastRun)
-        #expect(!FileManager.default.fileExists(atPath: marker.path))
-    }
-
-    @Test func anOldMarkerWithoutAStartTimeIsNotOurs() throws {
-        let state = temporaryDirectory()
-        try FileManager.default.createDirectory(at: state, withIntermediateDirectories: true)
-        let marker = state.appendingPathComponent("server.pid")
-        try Data("4242".utf8).write(to: marker)
-        let info = runningServer()
-        let controller = server(listedModels: nil, stateDirectory: state,
-                                serverExecutable: Self.serverPath,
-                                processInfo: { _ in info })
-        #expect(!controller.adoptedFromLastRun)
-        #expect(!FileManager.default.fileExists(atPath: marker.path))
-    }
-
-    @Test func theMarkerHoldsTheProcessIdAndStartTime() {
-        let marker = ResearchServerMarker(pid: 4242, startMicroseconds: 1_700_000_000_123_456)
-        #expect(marker.text == "4242 1700000000123456")
-        #expect(ResearchServerMarker.parse(marker.text) == marker)
-        #expect(ResearchServerMarker.parse("4242 1700000000123456\n") == marker)
-        // Old format, and anything malformed, is not a marker.
-        #expect(ResearchServerMarker.parse("4242") == nil)
-        #expect(ResearchServerMarker.parse("") == nil)
-        #expect(ResearchServerMarker.parse("1 1700000000123456") == nil)
-        #expect(ResearchServerMarker.parse("4242 0") == nil)
-        #expect(ResearchServerMarker.parse("4242 abc") == nil)
-        #expect(ResearchServerMarker.parse("4242 1 2") == nil)
-    }
-
-    @Test func onlyTheServerThisAppStartedIsNamed() {
-        let marker = ResearchServerMarker(pid: 4242, startMicroseconds: 1_700_000_000_000_000)
-        let port = port()
-        func names(_ info: ResearchProcessInfo?, executable: URL? = Self.serverPath) -> Bool {
-            marker.names(info, executable: executable, port: port, processID: 1)
-        }
-        #expect(names(runningServer()))
-        #expect(names(nil) == false)
-        // Another process that reused the id has another start time.
-        #expect(!names(runningServer(start: 1_700_000_000_000_001)))
-        // The app itself: the same binary, but not started as TUFFServer.
-        #expect(!names(runningServer(arguments: ["/Applications/TUFF.app/Contents/MacOS/TUFF"])))
-        // The launch agent: started as TUFFServer --background.
-        #expect(!names(runningServer(arguments: ["TUFFServer", "--background"])))
-        #expect(!names(runningServer(arguments: ["TUFFServer", "--background", "--port", String(port)])))
-        // Another port, no port, or no arguments at all.
-        #expect(!names(runningServer(arguments: ["TUFFServer", "--port", String(port + 1)])))
-        #expect(!names(runningServer(arguments: ["TUFFServer"])))
-        #expect(!names(runningServer(arguments: [])))
-        // Another executable, or none known.
-        var elsewhere = runningServer()
-        elsewhere.path = "/usr/bin/python3"
-        #expect(!names(elsewhere))
-        elsewhere.path = nil
-        #expect(!names(elsewhere))
-        #expect(!names(runningServer(), executable: nil))
-        // This very process is never named.
-        #expect(!marker.names(runningServer(), executable: Self.serverPath, port: port,
-                              processID: 4242))
-        // A development build runs its own TUFFServer binary.
-        var development = runningServer()
-        development.path = "/repo/.build/debug/TUFFServer"
-        #expect(marker.names(development,
-                             executable: URL(fileURLWithPath: "/repo/.build/debug/TUFFServer"),
-                             port: port, processID: 1))
-    }
-
-    @Test func theSymlinkedServerExecutableIsFollowedToTheBinary() throws {
-        let directory = temporaryDirectory()
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let binary = directory.appendingPathComponent("TUFF")
-        let link = directory.appendingPathComponent("TUFFServer")
-        try Data("x".utf8).write(to: binary)
-        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: binary)
-        let marker = ResearchServerMarker(pid: 4242, startMicroseconds: 1_700_000_000_000_000)
-        var info = runningServer()
-        // The system reports the resolved path of the running binary.
-        info.path = binary.resolvingSymlinksInPath().path
-        #expect(marker.names(info, executable: link, port: port(), processID: 1))
-        #expect(!marker.names(info, executable: directory.appendingPathComponent("other"),
-                              port: port(), processID: 1))
-    }
-
-    @Test func parsesTheProcessArgumentsOfASysctlBuffer() {
-        func buffer(count: Int32, path: String, arguments: [String], environment: [String]) -> [UInt8] {
-            var bytes = withUnsafeBytes(of: count) { Array($0) }
-            bytes += Array(path.utf8) + [0, 0, 0]
-            for argument in arguments { bytes += Array(argument.utf8) + [0] }
-            for entry in environment { bytes += Array(entry.utf8) + [0] }
-            return bytes
-        }
-        let parsed = ResearchProcessInfo.parseProcessArguments(buffer(
-            count: 3, path: "/Applications/TUFF.app/Contents/MacOS/TUFF",
-            arguments: ["TUFFServer", "--port", "8080"], environment: ["PATH=/usr/bin"]))
-        #expect(parsed?.executablePath == "/Applications/TUFF.app/Contents/MacOS/TUFF")
-        #expect(parsed?.arguments == ["TUFFServer", "--port", "8080"])
-        // Fewer arguments than the count says, and a buffer too short.
-        #expect(ResearchProcessInfo.parseProcessArguments(buffer(
-            count: 4, path: "/x", arguments: ["a"], environment: [])) == nil)
-        #expect(ResearchProcessInfo.parseProcessArguments([1, 0]) == nil)
-        #expect(ResearchProcessInfo.parseProcessArguments([]) == nil)
-        #expect(ResearchProcessInfo.parseProcessArguments(buffer(
-            count: -1, path: "/x", arguments: [], environment: [])) == nil)
-    }
-
-    @Test func readsARunningProcess() {
-        let info = ResearchProcessInfo.read(getpid())
-        #expect(info?.name.isEmpty == false)
-        #expect((info?.startMicroseconds ?? 0) > 0)
-        #expect(info?.path?.isEmpty == false)
-        #expect(info?.arguments?.isEmpty == false)
-        #expect(ResearchProcessInfo.read(999_999) == nil)
-    }
-
-    private func backgroundAPI() -> AppBackgroundAPIController {
-        AppBackgroundAPIController(
-            settingsURL: temporaryDirectory().appendingPathComponent("server.json"))
-    }
-
-    @Test func aServerStartedElsewhereIsUsedButNotStopped() async {
-        let controller = server(listedModels: ["gemma-4-e4b-it", "qwen-x"])
-        await controller.refresh()
-        #expect(controller.state == .ready)
-        #expect(controller.owner == .outside)
-        #expect(controller.models.map(\.id) == ["gemma-4-e4b-it", "qwen-x"])
-        #expect(controller.models.first?.displayName != "gemma-4-e4b-it")
-
-        await controller.stop()
-        guard case .failed(let message) = controller.state else {
-            Issue.record("expected an explanation, got \(controller.state)")
-            return
-        }
-        #expect(message.contains("outside TUFF"))
-    }
-
-    @Test func withNoServerToStartItSaysHowToBuildOne() async {
-        let controller = server(listedModels: nil)
-        #expect(!controller.canStart)
-        await controller.refresh()
-        #expect(controller.state == .off)
-        await controller.start()
-        guard case .failed(let message) = controller.state else {
-            Issue.record("expected a failure, got \(controller.state)")
-            return
-        }
-        #expect(message.contains("swift build"))
-    }
-
-    @Test func findsTheServerBuiltBesideTheApp() {
-        let found = ResearchModelServerController.findServerExecutable(
-            bundle: .main, isExecutable: { $0.hasSuffix("/TUFFServer") })
-        #expect(found?.lastPathComponent == "TUFFServer")
-        #expect(ResearchModelServerController.findServerExecutable(
-            bundle: .main, isExecutable: { _ in false }) == nil)
     }
 }

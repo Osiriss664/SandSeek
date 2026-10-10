@@ -1,5 +1,5 @@
 import Foundation
-@testable import TUFFAppResearch
+@testable import SandSeekAppLogic
 @testable import SandSeekCore
 
 /// Answers the model server and the sandbox from scripts, like the fakes in
@@ -9,29 +9,62 @@ final class FakeResearchServices: ResearchHTTPTransport, @unchecked Sendable {
     private var modelReplies: [ResearchHTTPResponse]
     private var sandboxHealthy: Bool
     private var listedModels: [String]?
+    private var tuffStatus: Bool
+    private var requiredKey: String?
     private(set) var paths: [String] = []
+    /// The `Authorization` value of each request, by path, in order.
+    private var seenAuthorization: [(path: String, value: String?)] = []
 
+    /// `tuffStatus`: whether `/tuff/v1/status` answers like TUFF. A
+    /// `requiredKey` makes `/v1/models` answer 401 unless the request carries
+    /// `Authorization: Bearer <key>`, as llama-server does with `--api-key`.
     init(modelReplies: [ResearchHTTPResponse] = [],
          sandboxHealthy: Bool = true,
-         listedModels: [String]? = ["gemma-4-e4b-it"]) {
+         listedModels: [String]? = ["gemma-4-e4b-it"],
+         tuffStatus: Bool = true,
+         requiredKey: String? = nil) {
         self.modelReplies = modelReplies
         self.sandboxHealthy = sandboxHealthy
         self.listedModels = listedModels
+        self.tuffStatus = tuffStatus
+        self.requiredKey = requiredKey
     }
 
     func setSandboxHealthy(_ healthy: Bool) { lock.withLock { sandboxHealthy = healthy } }
+    func setListedModels(_ models: [String]?) { lock.withLock { listedModels = models } }
+
+    var authorizations: [(path: String, value: String?)] { lock.withLock { seenAuthorization } }
+
+    func send(method: String, url: URL, body: Data?, timeout: TimeInterval?,
+              authorization: String?) async throws -> ResearchHTTPResponse {
+        lock.withLock { seenAuthorization.append((url.path, authorization)) }
+        return try await respond(url: url, body: body, authorization: authorization)
+    }
 
     func send(method: String, url: URL, body: Data?) async throws -> ResearchHTTPResponse {
+        try await respond(url: url, body: body, authorization: nil)
+    }
+
+    private func respond(url: URL, body: Data?,
+                         authorization: String?) async throws -> ResearchHTTPResponse {
         let json = try body.map { try ResearchJSON.decode($0) }
         return lock.withLock {
             paths.append(url.path)
             switch url.path {
+            case "/tuff/v1/status":
+                return tuffStatus
+                    ? Self.json(.object(["version": .string("8.3.1")]))
+                    : ResearchHTTPResponse(status: 404, body: Data())
             case "/v1/chat/completions":
                 guard !modelReplies.isEmpty else {
                     return ResearchHTTPResponse(status: 500, body: Data("no reply scripted".utf8))
                 }
                 return modelReplies.removeFirst()
             case "/v1/models":
+                if let requiredKey, authorization != "Bearer " + requiredKey {
+                    return ResearchHTTPResponse(status: 401, body: Data(
+                        #"{"error":{"message":"Invalid API Key","type":"authentication_error","code":401}}"#.utf8))
+                }
                 guard let listedModels else { return ResearchHTTPResponse(status: 404, body: Data()) }
                 return Self.json(.object([
                     "object": .string("list"),
@@ -113,10 +146,10 @@ final class FakeProcessRunner: ResearchProcessRunning, @unchecked Sendable {
         return ResearchProcessResult(status: 0, output: "")
     }
 
-    /// What `nft list table inet tuff_sandbox` prints for firewall.nft with
+    /// What `nft list table inet sandseek_sandbox` prints for firewall.nft with
     /// the Mac as DNS server.
     static let firewallListing = """
-    table inet tuff_sandbox {
+    table inet sandseek_sandbox {
     \tset private4 {
     \t\ttype ipv4_addr
     \t\tflags interval
@@ -179,15 +212,16 @@ final class LockedFlag: @unchecked Sendable {
     }
 }
 
-func temporaryDirectory(_ name: String = "TUFFResearchTests") -> URL {
+func temporaryDirectory(_ name: String = "SandSeekAppTests") -> URL {
     FileManager.default.temporaryDirectory
         .appendingPathComponent("\(name)-\(UUID().uuidString)", isDirectory: true)
 }
 
-/// A folder laid out like a TUFF checkout, as far as the sandbox needs.
-func fakeCheckout() throws -> URL {
-    let root = temporaryDirectory("TUFFCheckout")
-    let sandbox = root.appendingPathComponent("Sandbox/web-research", isDirectory: true)
+/// A folder laid out like the sandbox files in the app (and in a checkout):
+/// `Scripts/research_sandbox.sh` and the build context in `Sandbox/`.
+func fakeSandboxBundle() throws -> URL {
+    let root = temporaryDirectory("SandSeekBundle")
+    let sandbox = root.appendingPathComponent("Sandbox", isDirectory: true)
     try FileManager.default.createDirectory(at: sandbox, withIntermediateDirectories: true)
     try FileManager.default.createDirectory(
         at: root.appendingPathComponent("Scripts", isDirectory: true),
@@ -197,6 +231,49 @@ func fakeCheckout() throws -> URL {
     try Data("#!/bin/bash\n".utf8).write(
         to: root.appendingPathComponent("Scripts/research_sandbox.sh"))
     return root
+}
+
+/// Sandbox files from `bundle` (a new fake one when none is given), copied
+/// to a new install folder; no developer override.
+func testResources(bundle: URL? = nil,
+                   install: URL = temporaryDirectory("SandSeekInstall")) throws -> SandboxResources {
+    SandboxResources(bundledRoot: try bundle ?? fakeSandboxBundle(), installRoot: install,
+                     environment: [:])
+}
+
+/// Settings kept in memory, so tests never touch real preferences.
+final class MemorySettings: ResearchSettingsStore {
+    private let lock = NSLock()
+    private var values: [String: String] = [:]
+
+    func savedString(forKey key: String) -> String? {
+        lock.withLock { values[key] }
+    }
+
+    func save(_ value: String, forKey key: String) {
+        lock.withLock { values[key] = value }
+    }
+}
+
+/// The llama.cpp key kept in memory.
+final class MemoryKeyStore: ResearchKeyStoring {
+    private let lock = NSLock()
+    private var key: String?
+    private let failsToSave: Bool
+
+    init(key: String? = nil, failsToSave: Bool = false) {
+        self.key = key
+        self.failsToSave = failsToSave
+    }
+
+    var stored: String? { lock.withLock { key } }
+
+    func loadKey() -> String? { lock.withLock { key } }
+
+    func saveKey(_ key: String) throws {
+        if failsToSave { throw CocoaError(.fileWriteNoPermission) }
+        lock.withLock { self.key = key }
+    }
 }
 
 @MainActor

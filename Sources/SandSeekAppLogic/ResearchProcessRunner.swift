@@ -39,7 +39,7 @@ public struct FoundationProcessRunner: ResearchProcessRunning {
                     environment: [String: String],
                     timeout: TimeInterval) async throws -> ResearchProcessResult {
         let log = FileManager.default.temporaryDirectory
-            .appendingPathComponent("tuff-research-\(UUID().uuidString).log")
+            .appendingPathComponent("sandseek-research-\(UUID().uuidString).log")
         guard FileManager.default.createFile(atPath: log.path, contents: nil) else {
             throw CocoaError(.fileWriteUnknown)
         }

@@ -1,46 +1,52 @@
 import Foundation
 import Observation
-import TUFFAppServer
 
-/// Everything the Research screen works with: the two local services, the
-/// run in progress and the saved reports.
+/// Everything the Research screen works with: the model server connection,
+/// the sandbox, the run in progress, the saved reports and the presets.
 @MainActor @Observable
 public final class ResearchWorkspace {
     public let sandbox: ResearchSandboxController
-    public let server: ResearchModelServerController
+    public let server: ResearchServerController
     public let reports: ResearchReportStore
     public let run: ResearchRunController
+    public let presets: ResearchPresetStore
     /// The saved report on screen, when no run is.
     public var selectedReportID: UUID?
+    /// How many reports the last import took over from TUFF; nil before it ran.
+    public private(set) var importedFromTUFF: Int?
     /// The `sandbox.freshStarts` of the VM that a question last ran in.
     private var lastUsedStart: Int?
     private var isPreparingQuestion = false
 
     public init(sandbox: ResearchSandboxController,
-                server: ResearchModelServerController,
+                server: ResearchServerController,
                 reports: ResearchReportStore,
-                run: ResearchRunController) {
+                run: ResearchRunController,
+                presets: ResearchPresetStore) {
         self.sandbox = sandbox
         self.server = server
         self.reports = reports
         self.run = run
+        self.presets = presets
     }
 
-    public convenience init(backgroundAPI: AppBackgroundAPIController,
-                            reportsDirectory: URL = ResearchReportStore.defaultDirectory()) {
+    public convenience init(reportsDirectory: URL = ResearchReportStore.defaultDirectory(),
+                            defaults: any ResearchSettingsStore = UserDefaults.standard) {
         let reports = ResearchReportStore(directory: reportsDirectory)
         self.init(
-            sandbox: ResearchSandboxController(),
-            server: ResearchModelServerController(backgroundAPI: backgroundAPI),
+            sandbox: ResearchSandboxController(defaults: defaults),
+            server: ResearchServerController(defaults: defaults),
             reports: reports,
-            run: ResearchRunController(store: reports))
+            run: ResearchRunController(store: reports),
+            presets: ResearchPresetStore(defaults: defaults))
     }
 
-    /// Questions need both services, and a sandbox whose firewall and
+    /// Questions need the model server and a sandbox whose firewall and
     /// privileges were checked from outside the VM.
     public var servicesReady: Bool {
         sandbox.state == .ready && sandbox.protection == .verified
             && server.state == .ready && !server.models.isEmpty
+            && server.serverURL != nil
     }
 
     /// True when a question already ran in the sandbox VM that is up now, or
@@ -49,27 +55,31 @@ public final class ResearchWorkspace {
         sandbox.adoptedFromLastRun || lastUsedStart == sandbox.freshStarts
     }
 
-    public var anyServiceOn: Bool {
-        sandbox.state != .off || server.state != .off
-    }
-
+    /// Looks at both services. The model server is left alone while a
+    /// question runs: it is busy with that question, and a slow answer to a
+    /// status check must not look like a server that went away.
     public func refresh() async {
-        async let sandboxRefresh: Void = sandbox.refresh()
-        async let serverRefresh: Void = server.refresh()
-        _ = await (sandboxRefresh, serverRefresh)
+        if run.isRunning {
+            await sandbox.refresh()
+        } else {
+            async let sandboxRefresh: Void = sandbox.refresh()
+            async let serverRefresh: Void = server.refresh()
+            _ = await (sandboxRefresh, serverRefresh)
+        }
     }
 
-    public func startServices() async {
-        async let sandboxStart: Void = sandbox.start()
-        async let serverStart: Void = server.start()
-        _ = await (sandboxStart, serverStart)
-    }
-
-    public func stopServices() async {
-        run.stop()
-        async let sandboxStop: Void = sandbox.stop()
-        async let serverStop: Void = server.stop()
-        _ = await (sandboxStop, serverStop)
+    /// Takes over the reports TUFF's research screen saved, once each. The
+    /// originals stay where they are. The copying runs off the main thread.
+    public func importTUFFReports(
+        from source: URL = ResearchReportImporter.tuffReportsDirectory(),
+        ledger: URL = ResearchReportImporter.defaultLedgerURL()
+    ) async {
+        let destination = reports.directory
+        let outcome = await Task.detached {
+            ResearchReportImporter.importReports(from: source, into: destination, ledger: ledger)
+        }.value
+        importedFromTUFF = outcome.copied
+        if outcome.copied > 0 { reports.reload() }
     }
 
     /// A sandbox the app started and a question already used is replaced by a
@@ -90,14 +100,17 @@ public final class ResearchWorkspace {
         } else {
             await sandbox.recheckProtection()
         }
-        guard servicesReady, !run.isRunning else { return }
+        guard servicesReady, !run.isRunning,
+              let serverURL = server.serverURL, let connection = server.connection else { return }
         lastUsedStart = sandbox.freshStarts
         selectedReportID = nil
         run.start(
             question: question,
             settings: settings,
-            serverURL: server.serverURL,
-            sandboxURL: sandbox.baseURL)
+            serverURL: serverURL,
+            sandboxURL: sandbox.baseURL,
+            connection: connection,
+            authorization: server.authorization)
     }
 
     /// The report to show: the run's own while it is the latest thing done,
@@ -119,10 +132,16 @@ public final class ResearchWorkspace {
         if run.report?.id == report.id { run.reset() }
     }
 
-    /// Called when the app quits: stops what this app started.
+    /// Stops the question and the sandbox this app started.
+    public func stopSandbox() async {
+        run.stop()
+        await sandbox.stop()
+    }
+
+    /// Called when the app quits: stops what this app started. The model
+    /// server is never ours to stop.
     public func shutdown() {
         run.stop()
-        server.stopWhenQuitting()
         sandbox.stopWhenQuitting()
     }
 }

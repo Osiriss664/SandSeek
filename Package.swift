@@ -1,9 +1,12 @@
 // swift-tools-version: 6.2
 import PackageDescription
 
-// The App/ folder (SwiftUI app, run controllers and their tests) is not part
-// of this package yet: it still depends on TUFF app modules and is rebuilt in
-// Abschnitt 3 of the plan. See App/README.md.
+// SandSeekCore is the research loop, and `sandseek` is the command that runs
+// it. SandSeekAppLogic holds what the app does apart from drawing (runs,
+// sandbox, reports, server connection, presets), so it can be tested without
+// a window; SandSeekApp is the SwiftUI window. The app targets need macOS
+// (SwiftUI, AppKit, CryptoKit), so they are added on macOS only and the core
+// and the command still build and test elsewhere.
 let package = Package(
     name: "SandSeek",
     platforms: [
@@ -30,3 +33,21 @@ let package = Package(
         ),
     ]
 )
+
+#if os(macOS)
+package.products += [
+    .library(name: "SandSeekAppLogic", targets: ["SandSeekAppLogic"]),
+]
+package.targets += [
+    .target(
+        name: "SandSeekAppLogic",
+        dependencies: ["SandSeekCore"],
+        path: "Sources/SandSeekAppLogic"
+    ),
+    .testTarget(
+        name: "SandSeekAppLogicTests",
+        dependencies: ["SandSeekAppLogic", "SandSeekCore"],
+        path: "Tests/SandSeekAppLogicTests"
+    ),
+]
+#endif

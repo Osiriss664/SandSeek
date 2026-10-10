@@ -3,8 +3,9 @@ import Foundation
 import Observation
 import SandSeekCore
 
-/// The two string settings the sandbox controller remembers. Tests pass an
-/// in-memory store so a run never writes real preferences.
+/// The few string settings the controllers remember (the sandbox image's
+/// fingerprint, the chosen server, the presets). Tests pass an in-memory
+/// store so a run never writes real preferences.
 public protocol ResearchSettingsStore {
     func savedString(forKey key: String) -> String?
     func save(_ value: String, forKey key: String)
@@ -79,9 +80,10 @@ public struct ResearchSelfTestResult: Equatable, Sendable {
 }
 
 /// Starts and stops the web sandbox VM with the same commands as
-/// `Scripts/research_sandbox.sh`, which it runs from the TUFF checkout. The
-/// script holds every security option for the VM, so the app never builds
-/// its own `container run` command.
+/// `Scripts/research_sandbox.sh`, which it runs from the copy of the app's
+/// sandbox files in Application Support (see `SandboxResources`). The script
+/// holds every security option for the VM, so the app never builds its own
+/// `container run` command.
 @MainActor @Observable
 public final class ResearchSandboxController {
     public enum State: Equatable, Sendable {
@@ -108,10 +110,12 @@ public final class ResearchSandboxController {
         case notVerified(String)
     }
 
-    public static let imageName = "tuff-web-research:latest"
-    public static let containerName = "tuff-web-research"
-    public static let defaultURL = URL(string: "http://127.0.0.1:9000")!
-    static let repositoryKey = "ResearchRepositoryPath"
+    public static let imageName = "sandseek-sandbox:latest"
+    public static let containerName = "sandseek-sandbox"
+    /// The nft table `firewall.nft` loads inside the VM.
+    public static let firewallTable = "sandseek_sandbox"
+    public static let port = 9100
+    public static let defaultURL = URL(string: "http://127.0.0.1:9100")!
     static let fingerprintKey = "ResearchSandboxImageFingerprint"
     static let markerName = "sandbox-started-by-app"
 
@@ -124,7 +128,8 @@ public final class ResearchSandboxController {
     /// True when a sandbox this app started was still running from an
     /// earlier session that did not quit normally.
     public private(set) var adoptedFromLastRun = false
-    public private(set) var repository: URL?
+    /// The files the script runs from, once they were prepared.
+    public private(set) var files: SandboxFiles?
     public private(set) var selfTest: ResearchSelfTestResult?
     public private(set) var isRunningSelfTest = false
     /// True once this app started the sandbox, so quitting stops it again.
@@ -145,13 +150,14 @@ public final class ResearchSandboxController {
     private let transport: any ResearchHTTPTransport
     private let defaults: any ResearchSettingsStore
     private let environment: [String: String]
+    private let resources: SandboxResources
 
     public init(baseURL: URL = ResearchSandboxController.defaultURL,
                 runner: any ResearchProcessRunning = FoundationProcessRunner(),
                 transport: any ResearchHTTPTransport = URLSessionResearchTransport(timeout: 3),
                 defaults: any ResearchSettingsStore = UserDefaults.standard,
                 environment: [String: String] = ResearchCommandEnvironment.environment(),
-                searchStart: [URL] = ResearchSandboxController.defaultSearchStart(),
+                resources: SandboxResources = SandboxResources(),
                 stateDirectory: URL = ResearchSandboxController.defaultStateDirectory()) {
         self.baseURL = baseURL
         self.stateDirectory = stateDirectory
@@ -159,13 +165,7 @@ public final class ResearchSandboxController {
         self.transport = transport
         self.defaults = defaults
         self.environment = environment
-        var candidates = searchStart
-        if let saved = defaults.savedString(forKey: Self.repositoryKey) {
-            candidates.insert(URL(fileURLWithPath: saved, isDirectory: true), at: 0)
-        }
-        repository = candidates.lazy.compactMap {
-            Self.findRepository(startingAt: $0, fileExists: FileManager.default.fileExists(atPath:))
-        }.first
+        self.resources = resources
         // Set directly: didSet observers do not run in an initializer.
         startedByApp = FileManager.default.fileExists(atPath: markerURL.path)
         adoptedFromLastRun = startedByApp
@@ -176,7 +176,7 @@ public final class ResearchSandboxController {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first ?? FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent("Library/Application Support", isDirectory: true)
-        return support.appendingPathComponent("TUFF/Research", isDirectory: true)
+        return support.appendingPathComponent("SandSeek/State", isDirectory: true)
     }
 
     private var markerURL: URL { stateDirectory.appendingPathComponent(Self.markerName) }
@@ -190,50 +190,22 @@ public final class ResearchSandboxController {
         }
     }
 
-    /// Where a TUFF checkout is likely to be: above the running app when it
-    /// was built from one, then the usual clone location.
-    public nonisolated static func defaultSearchStart() -> [URL] {
-        var starts: [URL] = []
-        if let executable = Bundle.main.executableURL {
-            starts.append(executable.deletingLastPathComponent())
-        }
-        starts.append(FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Developer/TUFF", isDirectory: true))
-        return starts
-    }
-
-    public nonisolated static func findRepository(startingAt start: URL,
-                                                  fileExists: (String) -> Bool) -> URL? {
-        var path = start.standardizedFileURL.path
-        while true {
-            let directory = URL(fileURLWithPath: path, isDirectory: true)
-            if fileExists(directory.appendingPathComponent("Scripts/research_sandbox.sh").path),
-               fileExists(directory.appendingPathComponent("Sandbox/web-research/Containerfile").path) {
-                return directory
-            }
-            let parent = (path as NSString).deletingLastPathComponent
-            if parent.isEmpty || parent == path { return nil }
-            path = parent
-        }
-    }
-
-    /// Uses a folder the person picked. Returns false when it is not a TUFF
-    /// checkout with the sandbox in it.
+    /// Makes the files the script runs from ready: copies the app's files
+    /// when this is the first use or they changed (or the copy was altered),
+    /// or takes the checkout named by `SANDSEEK_SOURCE_DIR`. Sets the state
+    /// to a failure with the reason when `reportFailure` is set and the files
+    /// are not available.
     @discardableResult
-    public func chooseRepository(_ url: URL) -> Bool {
-        guard let found = Self.findRepository(
-            startingAt: url, fileExists: FileManager.default.fileExists(atPath:)) else {
-            state = .failed("That folder is not a TUFF checkout with the web sandbox in it.")
-            return false
+    private func prepareFiles(reportFailure: Bool) -> SandboxFiles? {
+        do {
+            let prepared = try resources.prepare()
+            files = prepared
+            return prepared
+        } catch {
+            files = nil
+            if reportFailure { state = .failed(String(describing: error)) }
+            return nil
         }
-        repository = found
-        defaults.save(found.path, forKey: Self.repositoryKey)
-        if case .failed = state { state = .off }
-        return true
-    }
-
-    private var script: URL? {
-        repository?.appendingPathComponent("Scripts/research_sandbox.sh")
     }
 
     /// Asks the sandbox whether it answers. Leaves a start or stop in
@@ -258,24 +230,24 @@ public final class ResearchSandboxController {
     /// Checks from outside the VM that its firewall is loaded and that the
     /// web server runs as the unprivileged user with no capabilities. The
     /// screen only allows questions once this passes, whatever the folder's
-    /// script did, and it also shows that port 9000 really is this sandbox.
+    /// script did, and it also shows that port 9100 really is this sandbox.
     public func verifyProtection() async {
         guard state == .ready, protection != .checking else { return }
         protection = .checking
         let firewall = try? await runner.run(
             executable: URL(fileURLWithPath: "/usr/bin/env"),
             arguments: ["container", "exec", Self.containerName,
-                        "nft", "list", "table", "inet", "tuff_sandbox"],
+                        "nft", "list", "table", "inet", Self.firewallTable],
             environment: environment, timeout: 30)
         guard state == .ready else { return }
         guard let firewall, firewall.status == 0 else {
             protection = .notVerified("The sandbox's firewall is not loaded, or this is not "
-                + "the TUFF sandbox. Stop it, then start it again.")
+                + "the SandSeek sandbox. Stop it, then start it again.")
             return
         }
         if let problem = Self.firewallProblem(firewall.output) {
             protection = .notVerified("The sandbox's firewall is loaded but \(problem). "
-                + "Check that your TUFF folder is up to date, then start the sandbox again.")
+                + "Check that SandSeek is up to date, then start the sandbox again.")
             return
         }
         let privileges = try? await runner.run(
@@ -309,16 +281,16 @@ public final class ResearchSandboxController {
         "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/3",
     ]
 
-    /// Reads `nft list table inet tuff_sandbox` and says what is wrong with
+    /// Reads `nft list table inet sandseek_sandbox` and says what is wrong with
     /// it, or nil when it has the shape `firewall.nft` gives it: outbound
     /// traffic dropped unless allowed, the private ranges refused, and no
-    /// rule but TUFF's own: loopback, replies, DNS to the name servers, one
+    /// rule but SandSeek's own: loopback, replies, DNS to the name servers, one
     /// SearXNG address and port, and public addresses after the refusals.
     static func firewallProblem(_ listing: String) -> String? {
         let lines = listing.split(whereSeparator: \.isNewline)
             .map { $0.trimmingCharacters(in: .whitespaces) }
         if lines.contains(where: { $0.contains("jump ") || $0.contains("goto ") }) {
-            return "sends traffic to other rules TUFF does not check"
+            return "sends traffic to other rules SandSeek does not check"
         }
         guard let chainStart = lines.firstIndex(where: {
             $0.contains("hook output") && $0.contains("policy drop")
@@ -344,7 +316,7 @@ public final class ResearchSandboxController {
             if line == "}" { break }
             if line.isEmpty { continue }
             if line.contains("!=") || line.contains("comment") {
-                return "has a rule TUFF does not expect (\(String(line.prefix(80))))"
+                return "has a rule SandSeek does not expect (\(String(line.prefix(80))))"
             }
             if isRefusal(line) {
                 // Only a refusal of every destination in the set counts.
@@ -372,7 +344,7 @@ public final class ResearchSandboxController {
                 .contains(line), refusesRefused6 {
                 continue
             }
-            return "allows more than TUFF's own rules (\(String(line.prefix(80))))"
+            return "allows more than SandSeek's own rules (\(String(line.prefix(80))))"
         }
         guard refusesPrivate4 else { return "does not refuse the private addresses" }
         // Only SearXNG gets a port other than DNS, and never on a DNS
@@ -449,13 +421,10 @@ public final class ResearchSandboxController {
     /// since the last build, then starts a fresh VM.
     public func start() async {
         guard !state.isBusy, state != .ready else { return }
-        guard let script, let repository else {
-            state = .failed("Choose your TUFF folder so the app can find the web sandbox.")
-            return
-        }
+        guard let files = prepareFiles(reportFailure: true) else { return }
+        let script = files.script
         selfTest = nil
-        let fingerprint = Self.fingerprint(
-            of: repository.appendingPathComponent("Sandbox/web-research", isDirectory: true))
+        let fingerprint = Self.fingerprint(of: files.sandboxFolder)
         if await needsBuild(fingerprint: fingerprint) {
             state = .preparing
             guard let built = await runScript(script, "build") else { return }
@@ -495,16 +464,15 @@ public final class ResearchSandboxController {
     @discardableResult
     public func restart() async -> Bool {
         guard !state.isBusy, startedByApp else { return false }
-        guard let script, let repository else {
-            state = .failed("Choose your TUFF folder so the app can find the web sandbox.")
-            return false
-        }
+        // Before any state change: the files are checked against the app's
+        // own, and a copy that was altered is replaced.
+        guard let files = prepareFiles(reportFailure: true) else { return false }
+        let script = files.script
         selfTest = nil
         state = .starting
         restartNote = "Restarting the sandbox for this question"
         defer { restartNote = nil }
-        let fingerprint = Self.fingerprint(
-            of: repository.appendingPathComponent("Sandbox/web-research", isDirectory: true))
+        let fingerprint = Self.fingerprint(of: files.sandboxFolder)
         if await needsBuild(fingerprint: fingerprint) {
             restartNote = "Rebuilding the sandbox"
             state = .preparing
@@ -534,7 +502,7 @@ public final class ResearchSandboxController {
 
     public func stop() async {
         guard !state.isBusy else { return }
-        guard let script else {
+        guard let script = prepareFiles(reportFailure: false)?.script else {
             state = .off
             return
         }
@@ -556,7 +524,7 @@ public final class ResearchSandboxController {
         state = .off
     }
 
-    /// Nil when no container named `tuff-web-research` exists, running or
+    /// Nil when no container named `sandseek-sandbox` exists, running or
     /// stopped; otherwise what to tell the user.
     private func containerLeftOver() async -> String? {
         // `--rm` may still be removing the container just after it stopped,
@@ -567,7 +535,7 @@ public final class ResearchSandboxController {
                 arguments: ["container", "list", "--all"],
                 environment: environment, timeout: 30)
             guard let listed, listed.status == 0 else {
-                return "The sandbox was stopped, but TUFF could not check that its container is "
+                return "The sandbox was stopped, but SandSeek could not check that its container is "
                     + "gone. Run `container list --all` in Terminal to look."
             }
             guard Self.listsContainer(listed.output) else { return nil }
@@ -588,7 +556,8 @@ public final class ResearchSandboxController {
     }
 
     public func runSelfTest() async {
-        guard state == .ready, !isRunningSelfTest, let script else { return }
+        guard state == .ready, !isRunningSelfTest,
+              let script = prepareFiles(reportFailure: false)?.script else { return }
         isRunningSelfTest = true
         defer { isRunningSelfTest = false }
         selfTest = nil
@@ -609,7 +578,7 @@ public final class ResearchSandboxController {
     /// The marker is only removed once the container is confirmed gone, so
     /// the next launch can still take over anything left running.
     public func stopWhenQuitting() {
-        guard startedByApp, let script else { return }
+        guard startedByApp, let script = prepareFiles(reportFailure: false)?.script else { return }
         guard Self.runAndWait("/bin/bash", [script.path, "stop"],
                               environment: environment, timeout: 10)?.status == 0
         else { return }
@@ -683,19 +652,17 @@ public final class ResearchSandboxController {
     }
 
     /// A hash of every file in the sandbox folder, so a changed Containerfile,
-    /// server or firewall rule triggers a rebuild.
+    /// server or firewall rule triggers a rebuild. Relative paths come from
+    /// the file manager, so a symbolic link above the folder (/var, /tmp)
+    /// cannot change them.
     public nonisolated static func fingerprint(of directory: URL) -> String {
         let fileManager = FileManager.default
-        guard let enumerator = fileManager.enumerator(
-            at: directory, includingPropertiesForKeys: [.isRegularFileKey]) else { return "" }
         var files: [(String, URL)] = []
-        let base = directory.standardizedFileURL.path
-        for case let url as URL in enumerator {
-            guard (try? url.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true
-            else { continue }
-            let path = url.standardizedFileURL.path
-            let relative = path.hasPrefix(base) ? String(path.dropFirst(base.count)) : path
+        for relative in (try? fileManager.subpathsOfDirectory(atPath: directory.path)) ?? [] {
             if relative.contains("__pycache__") || relative.hasSuffix(".pyc") { continue }
+            let url = directory.appendingPathComponent(relative)
+            guard let attributes = try? fileManager.attributesOfItem(atPath: url.path),
+                  (attributes[.type] as? FileAttributeType) == .typeRegular else { continue }
             files.append((relative, url))
         }
         var hasher = SHA256()

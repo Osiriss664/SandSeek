@@ -6,7 +6,7 @@ import SandSeekCore
 /// the model wrote do nothing, images are never loaded, and the only active
 /// parts are citation numbers, which point at the report's own source list.
 public enum ResearchAnswerFormatter {
-    public static let citationScheme = "tuff-research-source"
+    public static let citationScheme = "sandseek-source"
 
     public static func attributed(_ answer: String, sourceNumbers: Set<Int>) -> AttributedString {
         let clean = ResearchText.terminalSafe(answer)
