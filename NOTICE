@@ -1,0 +1,4 @@
+SandSeek
+Copyright 2026 the SandSeek authors.
+This project was first developed in a fork of TUFF (https://github.com/rexmhall09/TUFF), licensed under the Apache License 2.0.
+The prompt-injection test pages in Sandbox/fixtures/injection include text from BIPIA and AgentDojo (MIT License); see Sandbox/fixtures/injection/THIRD_PARTY_NOTICES.md.
