@@ -64,7 +64,9 @@ let quiet = arguments.quiet
 
 // Which server this is decides how it is asked (Abschnitt 2a: TUFF, with
 // streaming). A server that is not recognised is refused before any research
-// runs.
+// runs. A model server that does not answer ends the run with exit code 1, as
+// it always did (it is now found before the sandbox check, not after); a
+// server that is not recognised is a usage error, exit code 2.
 let connection: ResearchServerConnection
 do {
     connection = try await ResearchServerConnection.establish(
@@ -72,8 +74,10 @@ do {
         serverURL: arguments.serverURL, transport: transport)
 } catch {
     writeProgress("error: \(error)")
+    if case ResearchError.modelUnavailable = error { exit(1) }
     exit(2)
 }
+if let warning = connection.warning { writeProgress("warning: \(warning)") }
 if !quiet { writeProgress(connection.progressLine) }
 let showThinking = arguments.showThinking
 let agent = ResearchAgent(

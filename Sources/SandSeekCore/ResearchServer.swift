@@ -40,11 +40,16 @@ public struct ResearchServerConnection: Equatable, Sendable {
     public let version: String?
     /// Whether model replies are read as a stream.
     public let streaming: Bool
+    /// Something the run should say before it starts, such as a server that
+    /// was named as TUFF but did not answer TUFF's status route.
+    public let warning: String?
 
-    public init(kind: ResearchServerKind, version: String?, streaming: Bool) {
+    public init(kind: ResearchServerKind, version: String?, streaming: Bool,
+                warning: String? = nil) {
         self.kind = kind
         self.version = version
         self.streaming = streaming
+        self.warning = warning
     }
 
     /// The one progress line a run prints before it starts.
@@ -98,9 +103,11 @@ public struct ResearchServerConnection: Equatable, Sendable {
     /// - `auto`: TUFF when the status route says so. Anything else is
     ///   refused, with the way out: llama.cpp must be named, because its
     ///   connector (Abschnitt 2b) is not detected yet.
-    /// - `tuff`: used as named. The status route is still asked once, to
-    ///   record the version, but an answer that is not TUFF's does not stop
-    ///   the run.
+    /// - `tuff`: used as named. The status route is asked once, to record the
+    ///   version. A server that does not answer at all is an error, as for
+    ///   `auto`. Every TUFF 8.3.1 server has the route (the Background API and
+    ///   `tuff serve` run the same server), so an answer that is not TUFF's
+    ///   only gives a warning: the run goes on as TUFF because it was named.
     /// - `llamacpp`: used as named, with today's plain request. It cannot
     ///   stream before its connector exists (`stream` on is refused).
     ///
@@ -118,10 +125,18 @@ public struct ResearchServerConnection: Equatable, Sendable {
             }
             return ResearchServerConnection(kind: .llamacpp, version: nil, streaming: false)
         case .tuff:
-            let probed = await probe(serverURL: serverURL, transport: transport)
-            var version: String?
-            if case .tuff(let reported) = probed { version = reported }
-            return ResearchServerConnection(kind: .tuff, version: version, streaming: stream ?? true)
+            switch await probe(serverURL: serverURL, transport: transport) {
+            case .tuff(let version):
+                return ResearchServerConnection(
+                    kind: .tuff, version: version, streaming: stream ?? true)
+            case .unreachable(let message):
+                throw ResearchError.modelUnavailable(message)
+            case .other(let status):
+                return ResearchServerConnection(
+                    kind: .tuff, version: nil, streaming: stream ?? true,
+                    warning: "the server did not answer TUFF's /tuff/v1/status (HTTP \(status)); "
+                        + "continuing as TUFF because --server-type tuff was given")
+            }
         case .auto:
             let probed = await probe(serverURL: serverURL, transport: transport)
             switch probed {

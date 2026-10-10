@@ -39,6 +39,12 @@ show some old TUFF names while they are rewritten.
 `sandseek --help` lists all options. Tests: `swift test`, and for the sandbox
 server `python3 -m unittest Sandbox/test_server.py`.
 
+The command finds out which kind of model server it talks to before the sandbox
+check: a model server that does not answer ends the run with exit code 1 (as
+before), a server that is not recognised as TUFF with exit code 2 (use
+`--server-type llamacpp` for llama-server; `research_question_set.py run` and
+`research_injection_check.py` pass the option on).
+
 To record real streams from a running server for test fixtures, use
 `Scripts/record_stream.py` with the example requests in
 `Tests/Fixtures/requests/` (loopback only).

@@ -42,6 +42,10 @@ public struct ResearchStreamAssembler: Sendable {
     private var promptTokens: Int?
     private var model: String?
     private var sawChoice = false
+    private var sawDataLine = false
+    /// The first non-empty line that is no part of server-sent events, such
+    /// as the `{` that opens a plain JSON reply.
+    private var firstForeignLine: String?
 
     /// True once `data: [DONE]` has been read.
     public private(set) var isDone = false
@@ -59,7 +63,13 @@ public struct ResearchStreamAssembler: Sendable {
         let text = line.hasSuffix("\r") ? String(line.dropLast()) : line
         // Skipped: empty lines (the end of an event), comments (`: ping`),
         // and other SSE fields (`event:`, `id:`, `retry:`).
-        guard text.hasPrefix("data:") else { return false }
+        guard text.hasPrefix("data:") else {
+            if firstForeignLine == nil, !Self.isServerSentEventsLine(text) {
+                firstForeignLine = String(text.prefix(100))
+            }
+            return false
+        }
+        sawDataLine = true
         var payload = text.dropFirst("data:".count)
         if payload.first == " " { payload = payload.dropFirst() }
         let trimmed = payload.trimmingCharacters(in: .whitespaces)
@@ -91,6 +101,12 @@ public struct ResearchStreamAssembler: Sendable {
     /// the non-streaming path does.
     public func finish() throws -> ResearchAssistantTurn {
         guard sawChoice else {
+            if !sawDataLine, let foreign = firstForeignLine {
+                throw ResearchError.malformedModelReply(
+                    "the server did not stream its reply: it answered with plain text and "
+                        + "not server-sent events (it starts with: \(foreign)). "
+                        + "Try --stream off.")
+            }
             throw ResearchError.malformedModelReply("the stream held no choices[0]")
         }
         guard isDone || finishReason != nil else {
@@ -105,7 +121,11 @@ public struct ResearchStreamAssembler: Sendable {
             }
             return ResearchToolCall(id: id, name: name, arguments: arguments)
         }
-        return ResearchAssistantTurn(content: content, toolCalls: toolCalls,
+        // TUFF's non-streamed reply has `content: ""` unless the reply holds
+        // tool calls and no text, then `null`; a stream sends no content
+        // delta for empty text, so the same rule is applied here.
+        return ResearchAssistantTurn(content: content ?? (toolCalls.isEmpty ? "" : nil),
+                                     toolCalls: toolCalls,
                                      reasoning: reasoning, finishReason: finishReason,
                                      promptTokens: promptTokens, model: model)
     }
@@ -169,22 +189,53 @@ public struct ResearchStreamAssembler: Sendable {
         }
     }
 
+    /// Whether a line that is not `data:` belongs to server-sent events: an
+    /// empty line, a comment, or one of the other fields.
+    private static func isServerSentEventsLine(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty || text.hasPrefix(":") { return true }
+        return ["data", "event", "id", "retry"].contains { field in
+            text == field || text.hasPrefix(field + ":")
+        }
+    }
+
     private static func nonEmpty(_ text: String?) -> String? {
         guard let text, !text.isEmpty else { return nil }
         return text
     }
 
-    /// An error in the stream, as the agent already knows it. The status is
-    /// derived because the stream carries none: 500 for a `server_error`
-    /// (read as a code or as a type), 400 for everything else. The code is
-    /// `error.code` when it is a string (TUFF), else `error.type` (llama.cpp
-    /// has a number in `code`).
+    /// The HTTP status TUFF 8.3.1 gives each error code it can write
+    /// (`ServerRequestError.httpStatus` in HTTPServer.swift at 58ae663,
+    /// `handleAsyncError` for the internal error). A stream carries no
+    /// status, so the same statuses are derived from the code, and the agent
+    /// reacts as it does without streaming: a status of 500 or more is
+    /// retried (`model_memory_busy` is 503), and `context_length_exceeded`
+    /// (400) shortens the conversation. In Abschnitt 2b this table belongs
+    /// to the TUFF connector, and llama.cpp gets its own.
+    static let tuffStatus: [String: Int] = [
+        "model_not_found": 404,
+        "queue_full": 429,
+        "model_memory_busy": 503,
+        "request_too_large": 413,
+        "image_too_large": 413,
+        "too_many_images": 413,
+        "context_length_exceeded": 400,
+        "internal_error": 500,
+        "server_error": 500,
+    ]
+
+    /// An error in the stream, as the agent already knows it. The stream
+    /// carries no status, so it is derived: from `tuffStatus` by the code;
+    /// else 500 for a `server_error` (read as a code or as a type); else 400.
+    /// The code is `error.code` when it is a string (TUFF), else `error.type`
+    /// (llama.cpp has a number in `code`).
     static func failure(_ error: ResearchJSON, payload: Substring) -> ResearchError {
         let type = error["type"]?.stringValue
         let code = error["code"]?.stringValue
         let serverError = code == "server_error" || type == "server_error"
+        let status = code.flatMap { tuffStatus[$0] } ?? (serverError ? 500 : 400)
         return .modelRequestFailed(
-            status: serverError ? 500 : 400,
+            status: status,
             message: error["message"]?.stringValue ?? String(payload.prefix(500)),
             code: code ?? type)
     }

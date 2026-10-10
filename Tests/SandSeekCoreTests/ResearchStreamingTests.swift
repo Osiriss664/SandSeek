@@ -117,6 +117,36 @@ private enum Fixture {
 
     """#
 
+    /// A request that waited in the queue and then could not load its model:
+    /// TUFF started the stream at once (`: ping`), then wrote the error,
+    /// whose HTTP status without streaming would be 503.
+    static let memoryBusy = #"""
+    : ping
+
+    : ping
+
+    data: {"error":{"message":"not enough free memory to load the model now","type":"invalid_request_error","code":"model_memory_busy"}}
+
+    data: [DONE]
+
+
+    """#
+
+    /// All the tokens went to reasoning: no text, `finish_reason` "length".
+    static let reasoningOnlyCutOff = #"""
+    data: {"id":"chatcmpl-1e57","object":"chat.completion.chunk","created":1760105500,"model":"qwen3.6-35b-a3b","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+
+    data: {"id":"chatcmpl-1e57","object":"chat.completion.chunk","created":1760105500,"model":"qwen3.6-35b-a3b","choices":[{"index":0,"delta":{"reasoning_content":"Let me think about this for a long time"},"finish_reason":null}]}
+
+    data: {"id":"chatcmpl-1e57","object":"chat.completion.chunk","created":1760105500,"model":"qwen3.6-35b-a3b","choices":[{"index":0,"delta":{},"finish_reason":"length"}]}
+
+    data: {"id":"chatcmpl-1e57","object":"chat.completion.chunk","created":1760105500,"model":"qwen3.6-35b-a3b","choices":[],"usage":{"prompt_tokens":77,"completion_tokens":512,"total_tokens":589}}
+
+    data: [DONE]
+
+
+    """#
+
     /// The connection ends in the middle of the answer.
     static let endsEarly = #"""
     data: {"id":"chatcmpl-dead0001","object":"chat.completion.chunk","created":1760105400,"model":"qwen3.6-35b-a3b","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
@@ -129,26 +159,30 @@ private enum Fixture {
 }
 
 /// Answers the chat endpoint from a stream fixture (through the streaming
-/// method) or from a ready response (through `send`), and records the
-/// requests it got.
+/// method, which cuts it into lines with the production splitter, in pieces
+/// of `chunkSize` bytes when that is given) or from a ready response (through
+/// `send`), and records the requests it got.
 private final class StreamFake: ResearchHTTPTransport, @unchecked Sendable {
     private let lock = NSLock()
     private let status: Int
     private let stream: String?
+    private let chunkSize: Int?
     private let plain: ResearchHTTPResponse?
     private var bodies: [Data] = []
     private var limits: [TimeInterval?] = []
     private var streamed = 0
 
-    init(stream: String, status: Int = 200) {
+    init(stream: String, status: Int = 200, chunkSize: Int? = nil) {
         self.status = status
         self.stream = stream
+        self.chunkSize = chunkSize
         plain = nil
     }
 
     init(plain: ResearchHTTPResponse) {
         status = plain.status
         stream = nil
+        chunkSize = nil
         self.plain = plain
     }
 
@@ -168,7 +202,18 @@ private final class StreamFake: ResearchHTTPTransport, @unchecked Sendable {
             limits.append(timeout)
             streamed += 1
         }
-        return ResearchHTTPLineResponse(status: status, body: Data((stream ?? "").utf8))
+        let bytes = Data((stream ?? "").utf8)
+        guard let size = chunkSize, size > 0 else {
+            return ResearchHTTPLineResponse(status: status, body: bytes)
+        }
+        var chunks: [Data] = []
+        var start = bytes.startIndex
+        while start < bytes.endIndex {
+            let end = bytes.index(start, offsetBy: size, limitedBy: bytes.endIndex) ?? bytes.endIndex
+            chunks.append(bytes[start..<end])
+            start = end
+        }
+        return ResearchHTTPLineResponse(status: status, chunks: chunks)
     }
 }
 
@@ -209,6 +254,26 @@ private final class HangingStream: ResearchHTTPTransport, @unchecked Sendable {
             }
         }
         return ResearchHTTPLineResponse(status: 200, lines: lines)
+    }
+}
+
+/// A request that is still waiting for its headers (queued, loading a model)
+/// when it is cancelled: URLSession then fails with `URLError(.cancelled)`.
+private final class WaitingForHeaders: ResearchHTTPTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private var isWaiting = false
+
+    var waiting: Bool { lock.withLock { isWaiting } }
+
+    func send(method: String, url: URL, body: Data?) async throws -> ResearchHTTPResponse {
+        ResearchHTTPResponse(status: 500, body: Data())
+    }
+
+    func sendStreaming(method: String, url: URL, body: Data?,
+                       timeout: TimeInterval?) async throws -> ResearchHTTPLineResponse {
+        lock.withLock { isWaiting = true }
+        try? await Task.sleep(nanoseconds: 60_000_000_000)
+        throw URLError(.cancelled)
     }
 }
 
@@ -352,6 +417,19 @@ struct ResearchStreamingTests {
         #expect(turn.finishReason == "stop")
     }
 
+    @Test func aReplyWithOnlyReasoningAndLengthEqualsTheNonStreamedTurn() async throws {
+        let streamed = try await complete(client(
+            StreamFake(stream: Fixture.reasoningOnlyCutOff), streaming: true))
+        // TUFF's plain reply has `content: ""` here, not null.
+        let plain = try await complete(client(StreamFake(plain: plainReply(
+            content: "", reasoning: "Let me think about this for a long time",
+            finishReason: "length", promptTokens: 77, model: "qwen3.6-35b-a3b")),
+            streaming: false))
+        #expect(streamed == plain)
+        #expect(streamed.content == "")
+        #expect(streamed.finishReason == "length")
+    }
+
     // MARK: errors
 
     @Test func anErrorAfterSomeTextIsTheErrorTheAgentActsOn() async {
@@ -381,6 +459,35 @@ struct ResearchStreamingTests {
         // not one of ResearchAgent.answeredErrors.
         #expect(status >= 500)
         #expect(!ResearchAgent.answeredErrors.contains(code ?? ""))
+    }
+
+    @Test func memoryBusyInTheStreamIs503AndIsRetried() async {
+        let error = await failure(client(StreamFake(stream: Fixture.memoryBusy), streaming: true))
+        #expect(error == .modelRequestFailed(
+            status: 503, message: "not enough free memory to load the model now",
+            code: "model_memory_busy"))
+        guard case .modelRequestFailed(let status, _, let code)? = error else {
+            Issue.record("expected modelRequestFailed, got \(String(describing: error))")
+            return
+        }
+        // Without streaming TUFF answers 503, and ResearchAgent.complete
+        // retries every status >= 500 that is not an answered error.
+        #expect(status >= 500)
+        #expect(!ResearchAgent.answeredErrors.contains(code ?? ""))
+    }
+
+    @Test func aPlainJSONReplyWithStatus200SaysTheServerDidNotStream() async {
+        let compact = #"{"id":"x","choices":[{"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}]}"#
+        let pretty = "{\n  \"id\": \"x\",\n  \"choices\": []\n}\n"
+        for body in [compact, pretty] {
+            let error = await failure(client(StreamFake(stream: body), streaming: true))
+            guard case .malformedModelReply(let message)? = error else {
+                Issue.record("expected malformedModelReply, got \(String(describing: error))")
+                continue
+            }
+            #expect(message.contains("did not stream"), "\(message)")
+            #expect(message.contains("--stream off"), "\(message)")
+        }
     }
 
     @Test func aStreamEndingEarlyIsAMalformedReply() async {
@@ -450,6 +557,23 @@ struct ResearchStreamingTests {
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
         #expect(transport.closed, "the transport must be told to close the connection")
+    }
+
+    @Test func cancellingBeforeTheHeadersArriveIsACancellation() async {
+        let transport = WaitingForHeaders()
+        let chat = client(transport, streaming: true)
+        let task = Task { try await complete(chat) }
+        for _ in 0..<300 where !transport.waiting {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        #expect(transport.waiting)
+        task.cancel()
+        let result = await task.result
+        if case .failure(let error) = result {
+            #expect(error is CancellationError, "\(error)")
+        } else {
+            Issue.record("a cancelled request must not return a turn")
+        }
     }
 
     @Test func theTimeLimitIsPassedToTheTransport() async throws {
@@ -645,6 +769,15 @@ struct ResearchStreamAssemblerTests {
             == .modelRequestFailed(status: 500, message: "m", code: "internal_error"))
         #expect(error(#"{"error":{"message":"m","type":"x","code":"server_error"}}"#)
             == .modelRequestFailed(status: 500, message: "m", code: "server_error"))
+        // TUFF's own statuses (HTTPServer.swift, ServerRequestError.httpStatus).
+        for (code, status) in [("model_not_found", 404), ("queue_full", 429),
+                               ("model_memory_busy", 503), ("request_too_large", 413),
+                               ("image_too_large", 413), ("too_many_images", 413),
+                               ("internal_error", 500), ("context_length_exceeded", 400),
+                               ("invalid_image", 400), ("unknown_parameter", 400)] {
+            #expect(error(#"{"error":{"message":"m","type":"invalid_request_error","code":"\#(code)"}}"#)
+                == .modelRequestFailed(status: status, message: "m", code: code), "\(code)")
+        }
         // llama.cpp: the code is a number, so the type names the error.
         #expect(error(#"{"error":{"code":400,"message":"m","type":"exceed_context_size_error"}}"#)
             == .modelRequestFailed(status: 400, message: "m", code: "exceed_context_size_error"))
@@ -689,12 +822,125 @@ struct ResearchStreamAssemblerTests {
 
 @Suite("Web research line splitting")
 struct ResearchLineSplittingTests {
+    /// U+2028, U+2029 and U+0085: JSON does not escape them, and
+    /// Foundation's line splitter would cut at them.
+    private static let separators = "a\u{2028}b\u{2029}c\u{85}d"
+
+    /// A stream whose content, reasoning and tool call arguments hold the
+    /// separators, with the given line end, written the way TUFF writes it
+    /// (the characters are raw in the JSON).
+    private static func separatorStream(lineEnd: String) -> String {
+        let text = separators
+        let lines: [String] = [
+            #"data: {"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}"#,
+            "",
+            ": ping",
+            "",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"think \(text)\"},\"finish_reason\":null}]}",
+            "",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"say \(text)\"},\"finish_reason\":null}]}",
+            "",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"web_search\",\"arguments\":\"{\\\"query\\\":\\\"\(text)\"}}]},\"finish_reason\":null}]}",
+            "",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\(text)\\\"}\"}}]},\"finish_reason\":null}]}",
+            "",
+            #"data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
+            "",
+            "data: [DONE]",
+            "",
+        ]
+        return lines.joined(separator: lineEnd) + lineEnd
+    }
+
+    private static var expectedSeparatorTurn: ResearchAssistantTurn {
+        ResearchAssistantTurn(
+            content: "say \(separators)",
+            toolCalls: [ResearchToolCall(
+                id: "call_1", name: "web_search",
+                arguments: "{\"query\":\"\(separators)\(separators)\"}")],
+            reasoning: "think \(separators)", finishReason: "tool_calls")
+    }
+
     @Test func linesAreSplitAtServerSentEventLineEndsOnly() async throws {
-        let body = "a\r\nb\n\nc\rd\u{2028}e\u{85}f"
+        let body = "a\r\nb\n\nc\rd\u{2028}e\u{85}f\u{2029}g"
         let lines = try await collect(ResearchHTTPLineResponse(status: 200, body: Data(body.utf8)))
-        #expect(lines == ["a", "b", "", "c", "d\u{2028}e\u{85}f"])
+        #expect(lines == ["a", "b", "", "c", "d\u{2028}e\u{85}f\u{2029}g"])
         #expect(try await collect(ResearchHTTPLineResponse(status: 200, body: Data())) == [])
         #expect(try await collect(ResearchHTTPLineResponse(status: 200, body: Data("x\n".utf8))) == ["x"])
+        #expect(try await collect(ResearchHTTPLineResponse(status: 200, body: Data("x\r\n\r\n".utf8)))
+            == ["x", ""])
+    }
+
+    @Test func separatorsInContentReasoningAndToolArgumentsSurviveEveryLineEnd() async throws {
+        for lineEnd in ["\n", "\r\n", "\r"] {
+            let stream = Self.separatorStream(lineEnd: lineEnd)
+            let turn = try await complete(client(StreamFake(stream: stream), streaming: true))
+            #expect(turn == Self.expectedSeparatorTurn, "line end \(Array(lineEnd.utf8))")
+        }
+    }
+
+    @Test func aStreamCutIntoPiecesAnywhereGivesTheSameTurn() async throws {
+        // Every size from one byte up cuts inside multi-byte characters and
+        // between a CR and its LF.
+        for lineEnd in ["\n", "\r\n"] {
+            let stream = Self.separatorStream(lineEnd: lineEnd)
+            for size in [1, 2, 3, 5, 7, 64] {
+                let turn = try await complete(client(
+                    StreamFake(stream: stream, chunkSize: size), streaming: true))
+                #expect(turn == Self.expectedSeparatorTurn, "size \(size)")
+            }
+        }
+    }
+
+    @Test func theByteSplitterHandlesPiecesCutInsideCharactersAndBetweenCRAndLF() {
+        var buffer = SSELineBuffer()
+        // "a", U+2028 (E2 80 A8) cut in two, "b", CR | LF, "c", LF, "d".
+        var lines = buffer.read(contentsOf: [0x61, 0xE2])
+        lines += buffer.read(contentsOf: [0x80, 0xA8, 0x62, 0x0D])
+        lines += buffer.read(contentsOf: [0x0A, 0x63, 0x0A, 0x0A])
+        lines += buffer.read(contentsOf: [0x64])
+        #expect(lines == ["a\u{2028}b", "c", "", ])
+        #expect(buffer.finish() == "d")
+        #expect(buffer.finish() == nil)
+        // U+0085 is C2 85 and U+2029 is E2 80 A9: no byte of them is 0x0A or 0x0D.
+        var other = SSELineBuffer()
+        #expect(other.read(contentsOf: Array("x\u{85}y\u{2029}z\n".utf8)) == ["x\u{85}y\u{2029}z"])
+    }
+
+    @Test func theAsyncSplitterGivesTheSameLinesAndTurnForABytePerByteSequence() async throws {
+        let stream = Self.separatorStream(lineEnd: "\r\n")
+        let bytes = AsyncStream<UInt8> { continuation in
+            for byte in stream.utf8 { continuation.yield(byte) }
+            continuation.finish()
+        }
+        let turn = try await ResearchStreamAssembler.assemble(SSELines(bytes))
+        #expect(turn == Self.expectedSeparatorTurn)
+    }
+
+    @Test func aCarriageReturnEndsItsLineWithoutWaitingForTheNextByte() async throws {
+        let (bytes, continuation) = AsyncStream<UInt8>.makeStream()
+        for byte in "data: 1\r".utf8 { continuation.yield(byte) }
+        // The stream stays open: the line must come out all the same.
+        var iterator = SSELines(bytes).makeAsyncIterator()
+        #expect(try await iterator.next() == "data: 1")
+        for byte in "\ndata: 2\n".utf8 { continuation.yield(byte) }
+        #expect(try await iterator.next() == "data: 2")
+        continuation.finish()
+        #expect(try await iterator.next() == nil)
+    }
+
+    @Test func aRefusalBodyWithSeparatorsKeepsItsCodeAndMessage() async {
+        let message = "bad \(Self.separators) input"
+        let body = "{\"error\":{\"message\":\"\(message)\",\"type\":\"invalid_request_error\","
+            + "\"param\":null,\"code\":\"unknown_parameter\"}}"
+        let expected = ResearchError.modelRequestFailed(
+            status: 400, message: message, code: "unknown_parameter")
+        #expect(await failure(client(StreamFake(stream: body, status: 400), streaming: true)) == expected)
+        #expect(await failure(client(StreamFake(stream: body + "\r\n", status: 400, chunkSize: 3),
+                                     streaming: true)) == expected)
+        let plain = ResearchHTTPResponse(status: 400, body: Data(body.utf8))
+        #expect(await failure(client(SendOnly(plain), streaming: true)) == expected)
+        #expect(await failure(client(SendOnly(plain), streaming: false)) == expected)
     }
 
     @Test func aTransportWithOnlySendStillStreams() async throws {
@@ -819,15 +1065,38 @@ struct ResearchServerConnectionTests {
         }
     }
 
-    @Test func namingTUFFSkipsDetectionButRecordsTheVersion() async throws {
+    @Test func namingTUFFRecordsTheVersion() async throws {
         let named = try await ResearchServerConnection.establish(
             choice: .tuff, stream: nil, serverURL: serverURL,
             transport: StatusScript.tuff(version: "8.3.1"))
         #expect(named == ResearchServerConnection(kind: .tuff, version: "8.3.1", streaming: true))
-        // A TUFF without the status route (no background server) still runs.
+        #expect(named.warning == nil)
+    }
+
+    @Test func namingTUFFWhenItsStatusRouteAnswersSomethingElseWarnsAndGoesOn() async throws {
+        // Every TUFF 8.3.1 server has the status route, so a 404 means that
+        // this is probably not TUFF: the run goes on as TUFF, with a warning.
         let without = try await ResearchServerConnection.establish(
             choice: .tuff, stream: nil, serverURL: serverURL, transport: StatusScript.llamaServer)
-        #expect(without == ResearchServerConnection(kind: .tuff, version: nil, streaming: true))
+        #expect(without.kind == .tuff)
+        #expect(without.version == nil)
+        #expect(without.streaming)
+        let warning = try #require(without.warning)
+        #expect(warning.contains("/tuff/v1/status"), "\(warning)")
+        #expect(warning.contains("HTTP 404"), "\(warning)")
+        #expect(warning.contains("--server-type tuff"), "\(warning)")
+    }
+
+    @Test func namingTUFFWhenTheServerDoesNotAnswerIsAnError() async {
+        let silent = StatusScript({ _ in throw URLError(.cannotConnectToHost) })
+        do {
+            _ = try await ResearchServerConnection.establish(
+                choice: .tuff, stream: nil, serverURL: serverURL, transport: silent)
+            Issue.record("expected an error")
+        } catch ResearchError.modelUnavailable(_) {
+        } catch {
+            Issue.record("unexpected error \(error)")
+        }
     }
 }
 

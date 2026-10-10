@@ -44,7 +44,10 @@ public struct ResearchArguments: Equatable, Sendable {
                                refused). A llama.cpp server must be named
                                with llamacpp. Its connector comes in
                                Abschnitt 2b; for now it gets the plain
-                               non-streaming request.
+                               non-streaming request. With tuff the status
+                               route is asked too: a server that does not
+                               answer at all ends the run (exit code 1), one
+                               that answers something else gives a warning.
       --stream on|off          Read each model reply as a stream (default on
                                for TUFF). Streaming lets Stop and the time
                                limits make TUFF stop generating; with off,

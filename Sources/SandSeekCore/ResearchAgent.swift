@@ -672,7 +672,9 @@ public struct ResearchAgent: Sendable {
             // Any error after the run began keeps what was read, unless
             // nothing was: then it is thrown as it is.
             guard !state.queries.isEmpty || !state.sources.isEmpty else { throw error }
-            // The transport reports a cancelled request as an unavailable model.
+            // A streamed request throws `CancellationError`; a plain one
+            // reports a cancelled request as an unavailable model, so the
+            // task's own flag counts too.
             let stopped = Task.isCancelled || error is CancellationError
             let reason = ResearchText.oneLine(
                 stopped ? "it was stopped" : String(describing: error), limit: 300)

@@ -195,7 +195,8 @@ public struct ResearchChatClient: Sendable {
     /// threw: `modelTimedOut` for a time limit, `modelUnavailable` for a
     /// connection that failed, `modelRequestFailed` for a refusal, which
     /// TUFF answers with a status before the stream or inside it; the agent
-    /// cannot tell which. A cancelled task throws `CancellationError`.
+    /// cannot tell which. A cancelled task throws `CancellationError`, also when
+    /// the Stop came before the headers.
     private func completeStreaming(body: Data,
                                    timeout: TimeInterval?) async throws -> ResearchAssistantTurn {
         let response: ResearchHTTPLineResponse
@@ -205,6 +206,9 @@ public struct ResearchChatClient: Sendable {
         } catch let error as URLError where error.code == .timedOut {
             throw ResearchError.modelTimedOut
         } catch {
+            // A Stop before the headers arrive ends `bytes(for:)` with
+            // `URLError(.cancelled)`; it is a stop all the same.
+            if Task.isCancelled || error is CancellationError { throw CancellationError() }
             throw ResearchError.modelUnavailable(error.localizedDescription)
         }
         guard (200..<300).contains(response.status) else {
@@ -216,8 +220,12 @@ public struct ResearchChatClient: Sendable {
             } catch let error as URLError where error.code == .timedOut {
                 throw ResearchError.modelTimedOut
             } catch {
+                if Task.isCancelled || error is CancellationError { throw CancellationError() }
                 throw ResearchError.modelUnavailable(error.localizedDescription)
             }
+            // The lines were cut at CR and LF only (`SSELineBuffer`), so a
+            // JSON string with U+2028 in it is intact; they are joined with
+            // LF, which is white space between JSON tokens.
             let text = lines.joined(separator: "\n")
             let data = Data(text.utf8)
             throw Self.requestFailure(
@@ -232,6 +240,7 @@ public struct ResearchChatClient: Sendable {
         } catch let error as URLError where error.code == .timedOut {
             throw ResearchError.modelTimedOut
         } catch {
+            if Task.isCancelled { throw CancellationError() }
             throw ResearchError.modelUnavailable(error.localizedDescription)
         }
     }

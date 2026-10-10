@@ -14,8 +14,9 @@ public struct ResearchHTTPResponse: Equatable, Sendable {
 }
 
 /// The start of a streamed reply: the HTTP status, known as soon as the
-/// headers arrive, and the body as it comes, one text line at a time. A line
-/// holds no line terminator, and an empty line may or may not appear.
+/// headers arrive, and the body as it comes, one text line at a time. Lines
+/// end at LF, CR or CRLF only (see `SSELineBuffer`); a line holds no line
+/// terminator, and an empty line may or may not appear.
 ///
 /// The stream ends when the server has sent everything. If the request fails
 /// on the way (the time limit, a lost connection) the stream throws that
@@ -32,42 +33,113 @@ public struct ResearchHTTPLineResponse: Sendable {
     }
 
     /// A reply that is already complete, such as a test fixture or the body
-    /// of a transport that cannot stream: its text split into lines.
+    /// of a transport that cannot stream: its bytes split into lines by the
+    /// same splitter the streaming transport uses (`SSELineBuffer`).
     public init(status: Int, body: Data) {
-        let lines = Self.splitLines(String(decoding: body, as: UTF8.self))
+        self.init(status: status, chunks: [body])
+    }
+
+    /// A complete reply that arrived in pieces, cut anywhere, even inside a
+    /// multi-byte character or between a CR and its LF.
+    init(status: Int, chunks: [Data]) {
         self.init(status: status, lines: AsyncThrowingStream<String, any Error> { continuation in
-            for line in lines { continuation.yield(line) }
+            var buffer = SSELineBuffer()
+            for chunk in chunks {
+                for line in buffer.read(contentsOf: chunk) { continuation.yield(line) }
+            }
+            if let rest = buffer.finish() { continuation.yield(rest) }
             continuation.finish()
         })
     }
+}
 
-    /// Splits at "\n", "\r\n" and "\r", the line ends of server-sent events,
-    /// and nowhere else: JSON text may hold U+2028 or U+0085, which other
-    /// splitters treat as a line end. A final line needs no terminator.
-    static func splitLines(_ text: String) -> [String] {
-        var lines: [String] = []
-        var current = String.UnicodeScalarView()
-        var skipLineFeed = false
-        for scalar in text.unicodeScalars {
-            switch scalar {
-            case "\n":
-                if skipLineFeed {
-                    skipLineFeed = false
-                } else {
-                    lines.append(String(current))
-                    current = String.UnicodeScalarView()
-                }
-            case "\r":
-                lines.append(String(current))
-                current = String.UnicodeScalarView()
-                skipLineFeed = true
-            default:
+/// Splits bytes into the lines of a server-sent events stream: at LF (0x0A),
+/// CR (0x0D) and CRLF, which counts as one line end, and nowhere else.
+/// Foundation's `AsyncLineSequence` (`bytes.lines`) also breaks at U+0085,
+/// U+2028 and U+2029, which JSON text may hold unescaped (TUFF's
+/// `JSONSerialization` writes them as they are), so it must not be used.
+///
+/// 0x0A and 0x0D never occur inside a multi-byte UTF-8 sequence, so cutting
+/// the bytes there is safe; each line is decoded as UTF-8 after it is cut.
+/// Empty lines are lines. A CR ends its line at once, without waiting for
+/// the byte after it. The buffer holds only the current, unfinished line, so
+/// the input may arrive in pieces of any size.
+struct SSELineBuffer: Sendable {
+    private var line: [UInt8] = []
+    private var skipLineFeed = false
+
+    /// Reads one byte; returns the line it completes, if it does.
+    mutating func read(_ byte: UInt8) -> String? {
+        switch byte {
+        case 0x0A:
+            if skipLineFeed {
                 skipLineFeed = false
-                current.append(scalar)
+                return nil
             }
+            return takeLine()
+        case 0x0D:
+            skipLineFeed = true
+            return takeLine()
+        default:
+            skipLineFeed = false
+            line.append(byte)
+            return nil
         }
-        if !current.isEmpty { lines.append(String(current)) }
+    }
+
+    /// Reads a piece of the input; returns the lines it completes.
+    mutating func read<Bytes: Sequence>(contentsOf bytes: Bytes) -> [String]
+    where Bytes.Element == UInt8 {
+        var lines: [String] = []
+        for byte in bytes {
+            if let completed = read(byte) { lines.append(completed) }
+        }
         return lines
+    }
+
+    /// The input is over: the last line, which needs no terminator, unless
+    /// it is empty.
+    mutating func finish() -> String? {
+        line.isEmpty ? nil : takeLine()
+    }
+
+    private mutating func takeLine() -> String {
+        let text = String(decoding: line, as: UTF8.self)
+        line.removeAll(keepingCapacity: true)
+        return text
+    }
+}
+
+/// The lines of a byte sequence, cut by `SSELineBuffer`. Generic so that the
+/// URLSession transport and the tests run the same code.
+struct SSELines<Base: AsyncSequence>: AsyncSequence where Base.Element == UInt8 {
+    typealias Element = String
+
+    let base: Base
+
+    init(_ base: Base) {
+        self.base = base
+    }
+
+    struct AsyncIterator: AsyncIteratorProtocol {
+        var bytes: Base.AsyncIterator
+        var buffer = SSELineBuffer()
+        var ended = false
+
+        mutating func next() async throws -> String? {
+            while !ended {
+                guard let byte = try await bytes.next() else {
+                    ended = true
+                    break
+                }
+                if let line = buffer.read(byte) { return line }
+            }
+            return buffer.finish()
+        }
+    }
+
+    func makeAsyncIterator() -> AsyncIterator {
+        AsyncIterator(bytes: base.makeAsyncIterator())
     }
 }
 
@@ -188,7 +260,8 @@ public struct URLSessionResearchTransport: ResearchHTTPTransport {
         // the group's task cancels `bytes(for:)`.
         let opened = try await Self.withinTimeLimit(timeout) {
             let (bytes, response) = try await session.bytes(for: request)
-            return OpenedLines(lines: bytes.lines,
+            // Not `bytes.lines`: see `SSELineBuffer`.
+            return OpenedLines(lines: SSELines(bytes),
                                status: (response as? HTTPURLResponse)?.statusCode ?? 0)
         }
         var remaining: TimeInterval?
@@ -233,11 +306,11 @@ public struct URLSessionResearchTransport: ResearchHTTPTransport {
         return ResearchHTTPLineResponse(status: opened.status, lines: lines)
     }
 
-    /// The lines of an open reply. `AsyncLineSequence` is not known to be
+    /// The lines of an open reply. The byte sequence is not known to be
     /// `Sendable`; this value is made once, then handed to the single task
     /// that reads it, and never used anywhere else.
     private struct OpenedLines: @unchecked Sendable {
-        let lines: AsyncLineSequence<URLSession.AsyncBytes>
+        let lines: SSELines<URLSession.AsyncBytes>
         let status: Int
     }
 
