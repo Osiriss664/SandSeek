@@ -2,8 +2,11 @@
 """Tests for the web research sandbox. No network: resolver and transport are
 replaced with fakes. Run with `python3 -m unittest Sandbox/test_server.py`."""
 
+import contextlib
 import gzip
 import http.client
+import importlib.util
+import io
 import json
 import os
 import socket
@@ -824,6 +827,155 @@ class HTTPAPITests(unittest.TestCase):
 
     def test_unknown_path(self):
         self.assertEqual(self.call("POST", "/v1/shell", {})[0], 404)
+
+
+def _load_address_check():
+    """Scripts/research_address_check.py, which is not in a package."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "Scripts",
+                        "research_address_check.py")
+    spec = importlib.util.spec_from_file_location("research_address_check", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["research_address_check"] = module  # dataclasses look the module up
+    spec.loader.exec_module(module)
+    return module
+
+
+def _numeric_only_resolver(host, port):
+    """libc's own reading of numeric addresses, without any DNS."""
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM,
+                                   flags=socket.AI_NUMERICHOST)
+    except socket.gaierror:
+        raise ToolError(f"could not resolve {host}", "dns_error", 502)
+    except UnicodeError:
+        raise ToolError("URL has an invalid host name", "invalid_url")
+    return [info[4][0] for info in infos]
+
+
+class AddressCheckScriptTests(unittest.TestCase):
+    """Scripts/research_address_check.py: its list, its verdicts and a run
+    against a sandbox handler with fakes in place of DNS and the web."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.check = _load_address_check()
+
+    def test_the_list_covers_the_cases_the_plan_names(self):
+        urls = {case.url for case in self.check.CASES}
+        for wanted in ["http://127.0.0.1/", "http://10.0.0.1/", "http://169.254.169.254/latest/meta-data/",
+                       "http://0x7f000001/", "http://2130706433/", "http://127.1/", "http://[::1]/",
+                       "http://[::ffff:127.0.0.1]/", "http://[64:ff9b::a00:1]/",
+                       "http://localtest.me/", "http://localhost/", "file:///etc/passwd"]:
+            self.assertIn(wanted, urls)
+        self.assertEqual({case.group for case in self.check.CASES}, set(self.check.GROUPS))
+        self.assertEqual(len(urls), len(self.check.CASES), "a URL is listed twice")
+
+    def test_every_listed_address_is_refused_by_the_real_policy(self):
+        # Names that need DNS ("resolves") are left out; everything else must
+        # be refused before any connection, with numeric parsing only.
+        checked = 0
+        for case in self.check.CASES:
+            if case.kind == "resolves":
+                continue
+            if case.url in self.check.LINUX_OCTAL_FORMS and not sys.platform.startswith("linux"):
+                continue
+            with self.assertRaises(ToolError, msg=case.url) as caught:
+                server.check_url(case.url, _numeric_only_resolver)
+            self.assertIn(caught.exception.code,
+                          {"blocked_address", "blocked_port", "invalid_url", "dns_error"}, case.url)
+            checked += 1
+        self.assertGreater(checked, 80)
+
+    def test_verdicts(self):
+        classify, Case = self.check.classify, self.check.Case
+        address = Case("private", "http://127.0.0.1/", "address")
+        resolves = Case("dns", "http://localtest.me/", "resolves")
+        refused = {"error": {"code": "blocked_address", "message": "x"}}
+        self.assertEqual(classify(address, 403, refused)[0], "refused")
+        self.assertEqual(classify(address, 422, {"error": {"code": "invalid_url"}})[0], "refused")
+        self.assertEqual(classify(address, 502, {"error": {"code": "dns_error"}})[0], "refused")
+        self.assertEqual(classify(address, 200, {"text": "page"})[0], "FAIL")
+        self.assertEqual(classify(address, 502, {"error": {"code": "fetch_failed"}})[0], "FAIL")
+        self.assertEqual(classify(address, 500, {"error": {"code": "internal_error"}})[0], "FAIL")
+        self.assertEqual(classify(address, 404, "not json")[0], "FAIL")
+        self.assertEqual(classify(resolves, 403, refused)[0], "refused")
+        self.assertEqual(classify(resolves, 502, {"error": {"code": "dns_error"}})[0], "inconclusive")
+        self.assertEqual(classify(resolves, 422, {"error": {"code": "invalid_url"}})[0], "FAIL")
+
+    def run_script(self, resolver, transport, *extra):
+        class Handler(server.Handler):
+            tools = WebTools(resolver=resolver, transport=transport, searxng_url="")
+
+            def log_message(self, *args):
+                pass
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        output = io.StringIO()
+        try:
+            argv = ["research_address_check.py", "--sandbox",
+                    f"http://127.0.0.1:{httpd.server_address[1]}", "--timeout", "10", *extra]
+            with mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(output):
+                code = self.check.main()
+        finally:
+            httpd.shutdown()
+            httpd.server_close()
+        return code, output.getvalue()
+
+    def test_a_sandbox_that_refuses_everything_passes(self):
+        def resolver(host, port):
+            if host == "example.com":
+                return ["93.184.216.34"]
+            if host == "localtest.me" or host.endswith((".nip.io", ".sslip.io")):
+                return ["127.0.0.1"]  # what their DNS answers
+            return _numeric_only_resolver(host, port)
+
+        transport = FakeTransport({"https://example.com/": page(ARTICLE)})
+        code, text = self.run_script(resolver, transport)
+        self.assertEqual(code, 0, text)
+        self.assertIn("RESULT: pass", text)
+        self.assertIn("0 NOT refused", text)
+        self.assertIn("control", text)
+        self.assertEqual(transport.calls[0][1].host, "example.com")
+        self.assertEqual(len(transport.calls), 1, "only the control page may be fetched")
+
+    def test_names_that_do_not_resolve_are_inconclusive_not_a_pass(self):
+        def resolver(host, port):
+            if host == "example.com":
+                return ["93.184.216.34"]
+            return _numeric_only_resolver(host, port)
+
+        code, text = self.run_script(
+            resolver, FakeTransport({"https://example.com/": page(ARTICLE)}))
+        self.assertEqual(code, 3, text)
+        self.assertIn("inconclusive", text)
+
+    def test_a_sandbox_that_fetches_a_private_address_fails(self):
+        # A broken sandbox: it believes every name is public and fetches it.
+        def resolver(host, port):
+            return ["93.184.216.34"]
+
+        class Everything:
+            def __call__(self, method, target, headers, body):
+                return page(ARTICLE)
+
+        code, text = self.run_script(resolver, Everything(), "--only", "names")
+        self.assertEqual(code, 1, text)
+        self.assertIn("FAIL", text)
+        self.assertIn("HTTP 200: the sandbox fetched it", text)
+
+    def test_a_missing_sandbox_is_reported_and_other_hosts_are_refused(self):
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            free = probe.getsockname()[1]
+        argv = ["research_address_check.py", "--sandbox", f"http://127.0.0.1:{free}"]
+        with mock.patch.object(sys, "argv", argv), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.check.main(), 2)
+        argv = ["research_address_check.py", "--sandbox", "http://192.168.1.5:9100"]
+        with mock.patch.object(sys, "argv", argv), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as caught:
+                self.check.main()
+        self.assertEqual(caught.exception.code, 2)
 
 
 class SigtermTests(unittest.TestCase):
