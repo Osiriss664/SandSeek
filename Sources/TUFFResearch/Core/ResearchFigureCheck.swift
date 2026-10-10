@@ -1945,30 +1945,65 @@ enum ResearchFigureCheck {
     static func removingCitations(_ numbers: Set<Int>, from raw: String) -> String {
         let drop = numbers.filter { $0 < 1_000 }
         guard !drop.isEmpty else { return raw }
-        let text = normalizedCitations(raw)
-        let edited = NSMutableString(string: text)
+        let edited = NSMutableString(string: raw)
         let closers = Set(".,;:!?)".utf16)
         let space = Set(" \t".utf16)
+        let separators = Set(",;".utf16)
+        let open: unichar = 91   // [
+        let close: unichar = 93  // ]
         // From the end, so the ranges still to come stay valid.
-        for match in citation.matches(in: text, range: NSRange(text.startIndex..., in: text))
+        for match in escapedCitation.matches(in: raw, range: NSRange(raw.startIndex..., in: raw))
             .reversed() {
-            let numbersHere = (text as NSString).substring(with: match.range(at: 1))
+            let numbersHere = (raw as NSString).substring(with: match.range(at: 1))
                 .split(whereSeparator: { !$0.isNumber }).compactMap { Int($0) }
             let kept = numbersHere.filter { !drop.contains($0) }
             guard kept.count < numbersHere.count else { continue }
             var range = match.range
             let after = range.location + range.length
-            let startsLine = range.location == 0
-                || edited.character(at: range.location - 1) == 10
-            if startsLine, after < edited.length,
-               let next = Unicode.Scalar(edited.character(at: after)),
-               next.properties.isWhitespace {
-                continue
+            // An entry of the answer's own source list is no citation.
+            var lineStart = range.location
+            while lineStart > 0, edited.character(at: lineStart - 1) != 10 { lineStart -= 1 }
+            let before = edited.substring(with: NSRange(location: lineStart,
+                                                        length: range.location - lineStart))
+            if before.range(of: #"^\s*(?:[-*+•]\s+|\d{1,2}[.)]\s+)?$"#,
+                            options: .regularExpression) != nil,
+               after < edited.length {
+                let next = edited.character(at: after)
+                if next == 58 || Unicode.Scalar(next)?.properties.isWhitespace == true { continue }
             }
             if !kept.isEmpty {
                 edited.replaceCharacters(
                     in: range, with: "[" + kept.map(String.init).joined(separator: ", ") + "]")
                 continue
+            }
+            // Joined to a citation in front (`[1], [3]`): its separator goes.
+            var back = range.location
+            while back > 0, space.contains(edited.character(at: back - 1)) { back -= 1 }
+            if back > 0, separators.contains(edited.character(at: back - 1)) {
+                var j = back - 1
+                while j > 0, space.contains(edited.character(at: j - 1)) { j -= 1 }
+                if j > 0, edited.character(at: j - 1) == close {
+                    edited.replaceCharacters(
+                        in: NSRange(location: j, length: after - j), with: "")
+                    continue
+                }
+            }
+            // Joined to a citation after it (`[3], [1]`): the separator after goes.
+            var forward = after
+            while forward < edited.length, space.contains(edited.character(at: forward)) {
+                forward += 1
+            }
+            if forward < edited.length, separators.contains(edited.character(at: forward)) {
+                forward += 1
+                while forward < edited.length, space.contains(edited.character(at: forward)) {
+                    forward += 1
+                }
+                if forward < edited.length, edited.character(at: forward) == open {
+                    edited.replaceCharacters(
+                        in: NSRange(location: range.location, length: forward - range.location),
+                        with: "")
+                    continue
+                }
             }
             // The space in front goes when the citation ends the sentence,
             // the line or the text, or another space follows.

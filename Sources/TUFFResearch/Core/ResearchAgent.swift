@@ -727,8 +727,9 @@ public struct ResearchAgent: Sendable {
                     continue
                 }
                 if let earlier = answerBeforeSearchingMore, Self.isIncomplete(turn) {
+                    let cleaned = droppingUnreadCitations((earlier, .finished), state: &state).0
                     return checkingFigures(
-                        state.report(answer: earlier, turns: step, exhausted: false), state: state)
+                        state.report(answer: cleaned, turns: step, exhausted: false), state: state)
                 }
                 let (text, end) = try await finalAnswer(from: turn, state: &state)
                 return checkingFigures(
@@ -899,8 +900,9 @@ public struct ResearchAgent: Sendable {
         let exhausted = stoppedAtStep == nil
         var report: ResearchReport
         if let earlier = answerBeforeSearchingMore, Self.isIncomplete(final) {
+            let cleaned = droppingUnreadCitations((earlier, .finished), state: &state).0
             report = checkingFigures(
-                state.report(answer: earlier, turns: turns, exhausted: exhausted), state: state)
+                state.report(answer: cleaned, turns: turns, exhausted: exhausted), state: state)
         } else {
             let (text, end) = try await finalAnswer(from: final, state: &state)
             report = checkingFigures(
@@ -991,8 +993,11 @@ public struct ResearchAgent: Sendable {
             .unknownCitations
         guard !unknown.isEmpty else { return answer }
         let stripped = ResearchFigureCheck.removingCitations(Set(unknown), from: answer.0)
-        guard stripped != answer.0 else { return answer }
-        state.droppedUnreadCitations = unknown
+        // Only what really left the text is reported (a source-list entry stays).
+        let left = state.report(answer: stripped, turns: 0, exhausted: false).unknownCitations
+        let dropped = unknown.filter { !left.contains($0) }
+        guard !dropped.isEmpty else { return answer }
+        state.droppedUnreadCitations = dropped
         return (stripped, answer.1)
     }
 
@@ -1743,7 +1748,9 @@ public struct ResearchAgent: Sendable {
         let reply = (thinking ?? chat.enableThinking) == true
             ? chat.maxTokens : max(chat.maxTokens / 2, 2_048)
         return max(contextCharacters(window: window, state, reply: reply,
-                                     ratio: state.measuredCharactersPerToken),
+                                     ratio: state.measuredCharactersPerToken.map {
+                                         min($0, State.charactersPerTokenRange.upperBound)
+                                     }),
                    promptBudget(state))
     }
 
@@ -1920,8 +1927,11 @@ public struct ResearchAgent: Sendable {
         // the refusals below shorten it further.
         let budget = state.answering
             ? answerLimit(state, thinking: thinking) : promptBudget(state)
+        // The last shortening, right before the answer, goes only as far as the
+        // limit needs: nothing is shortened after it, so deeper cuts only lose text.
         if state.sealedFrom == nil,
-           state.compact(toFit: budget, overhead: toolCharacters) {
+           state.compact(toFit: budget, overhead: toolCharacters,
+                         targetShare: state.answering ? 0.75 : State.compactionTargetShare) {
             onEvent(.shortenedOlderResults)
         }
         var sent = state.size(overhead: toolCharacters)
@@ -1942,8 +1952,7 @@ public struct ResearchAgent: Sendable {
             // results before `sealedFrom` allow, to the limit with the corrected
             // estimate, once; never the emergency step, which would cut the
             // answer itself (see `continuingCutOff`, which keeps it).
-            state.charactersPerToken = max(
-                State.charactersPerTokenRange.lowerBound, state.charactersPerToken * 0.75)
+            state.tightenEstimate()
             guard state.compact(toFit: answerLimit(state, thinking: thinking),
                                 overhead: toolCharacters) else {
                 throw ResearchError.modelRequestFailed(
@@ -1957,8 +1966,7 @@ public struct ResearchAgent: Sendable {
                 preserveThinking: state.preserveThinking, timeout: limit)
         } catch ResearchError.modelRequestFailed(_, _, "context_length_exceeded"?) {
             // The server's tokens hold fewer characters than estimated.
-            state.charactersPerToken = max(
-                State.charactersPerTokenRange.lowerBound, state.charactersPerToken * 0.75)
+            state.tightenEstimate()
             // A request for the answer is first shortened to the limit with the
             // corrected estimate, and only then to half the budget.
             let shortened = state.answering
@@ -3150,6 +3158,14 @@ public struct ResearchAgent: Sendable {
         /// read for them.
         var droppedUnreadCitations: [Int] = []
 
+        /// The server's tokens held fewer characters than estimated: the
+        /// estimate and the measured ratio both shrink a quarter.
+        mutating func tightenEstimate() {
+            charactersPerToken = max(Self.charactersPerTokenRange.lowerBound,
+                                     charactersPerToken * 0.75)
+            measuredCharactersPerToken = measuredCharactersPerToken.map { $0 * 0.75 }
+        }
+
         /// Learns how many characters a token holds from a prompt the server
         /// counted, keeping a tenth in hand.
         mutating func calibrate(sentCharacters: Int, promptTokens: Int?) {
@@ -3218,7 +3234,8 @@ public struct ResearchAgent: Sendable {
         /// Returns whether anything changed.
         @discardableResult
         mutating func compact(toFit budget: Int, overhead: Int = 0,
-                              emergency: Bool = false) -> Bool {
+                              emergency: Bool = false,
+                              targetShare: Double = State.compactionTargetShare) -> Bool {
             guard size(overhead: overhead) > budget else { return false }
             let droppedReasoning = dropOlderReasoning()
             guard size(overhead: overhead) > budget else { return droppedReasoning }
@@ -3236,7 +3253,7 @@ public struct ResearchAgent: Sendable {
             fixed.messages = messages.indices.filter { !candidates.contains($0) }
                 .map { messages[$0] }
             let protected = fixed.size(overhead: overhead)
-            let target = min(budget, max(Int(Double(budget) * Self.compactionTargetShare),
+            let target = min(budget, max(Int(Double(budget) * targetShare),
                                          protected + (budget - protected) / 2))
             // Results of the current turn the model has not acted on yet are
             // only cut to one line as a last resort.

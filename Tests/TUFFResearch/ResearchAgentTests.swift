@@ -619,6 +619,13 @@ struct ResearchAgentTests {
         #expect(removing([3], "Linux 6 \\[3\\].") == "Linux 6.")
         #expect(removing([3], "[3](https://e.example) is a link.") == "[3](https://e.example) is a link.")
         #expect(removing([3], "Sources:\n[3] Some page\n") == "Sources:\n[3] Some page\n")
+        // A separator between citations goes with the one removed.
+        #expect(removing([3], "VMs [1], [3].") == "VMs [1].")
+        #expect(removing([3], "Linux 6 [3], [1].") == "Linux 6 [1].")
+        // Other source-list forms stay, and escapes of kept citations are not rewritten.
+        #expect(removing([3], "- [3] Title\n1. [3] Title\n[3]: https://e.example") ==
+            "- [3] Title\n1. [3] Title\n[3]: https://e.example")
+        #expect(removing([3], "Keeps \\[1\\] and drops [3].") == "Keeps \\[1\\] and drops.")
         // Not source numbers; and nothing to remove.
         #expect(removing([2023], "In [2023] it was 4.") == "In [2023] it was 4.")
         #expect(removing([], "A [3].") == "A [3].")
