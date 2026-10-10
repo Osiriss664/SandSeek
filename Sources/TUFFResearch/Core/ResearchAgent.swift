@@ -150,6 +150,9 @@ public struct ResearchReport: Equatable, Sendable {
     /// Whether pages were read as passages (`--passages on`), so a run can be
     /// told apart from one read front to back.
     public var passagesOn = false
+    /// Source numbers the answer cited without a page read for them, taken
+    /// out of the answer afterwards.
+    public var droppedUnreadCitations: [Int] = []
 
     /// The report as Markdown that is safe to print and to open in a viewer:
     /// no control or invisible characters, no images, no loading HTML tags.
@@ -188,6 +191,14 @@ public struct ResearchReport: Equatable, Sendable {
             text += unknown.count == 1
                 ? "\n_The answer cites \(listed), which is not a page the research read._\n"
                 : "\n_The answer cites \(listed), which are not pages the research read._\n"
+        }
+        if !droppedUnreadCitations.isEmpty {
+            let listed = droppedUnreadCitations.map { "[\($0)]" }.joined(separator: ", ")
+            text += droppedUnreadCitations.count == 1
+                ? "\n_The answer cited \(listed), which is not a page the research read; "
+                    + "the citation was removed._\n"
+                : "\n_The answer cited \(listed), which are not pages the research read; "
+                    + "the citations were removed._\n"
         }
         if budgetExhausted {
             text += "\n_The research step budget ran out; this answer may be incomplete._\n"
@@ -964,8 +975,25 @@ public struct ResearchAgent: Sendable {
         let first = try await answer(from: turn, state: &state)
         let whole = try await continuingCutOff(first, from: turn, state: &state)
         // A rewrite of a continued answer would be cut off again and dropped.
-        if first.1 == .tokenLimit { return whole }
-        return try await revise(whole, state: &state)
+        if first.1 == .tokenLimit { return droppingUnreadCitations(whole, state: &state) }
+        return droppingUnreadCitations(try await revise(whole, state: &state), state: &state)
+    }
+
+    /// Takes the numbers of pages that were never read out of the answer's
+    /// citations, whether or not the rewrite was kept (a rewrite may cite
+    /// fewer of them and still cite some). The report says which were
+    /// removed. Without the rewrite option, and when no page was read, the
+    /// answer stays as it is and the report flags what it cites.
+    private func droppingUnreadCitations(_ answer: (String, AnswerEnd),
+                                         state: inout State) -> (String, AnswerEnd) {
+        guard options.reviseUnreadCitations, !state.sources.isEmpty else { return answer }
+        let unknown = state.report(answer: answer.0, turns: 0, exhausted: false)
+            .unknownCitations
+        guard !unknown.isEmpty else { return answer }
+        let stripped = ResearchFigureCheck.removingCitations(Set(unknown), from: answer.0)
+        guard stripped != answer.0 else { return answer }
+        state.droppedUnreadCitations = unknown
+        return (stripped, answer.1)
     }
 
     /// An answer that stopped at the token limit (Qwen did at 2048 tokens on
@@ -1702,15 +1730,21 @@ public struct ResearchAgent: Sendable {
     /// full `maxTokens` with reasoning on, else half of it but at least 2,048
     /// tokens, as the answer itself is short. Above this the request is
     /// shortened first; below it the request is sent as it is, so it extends
-    /// what the server cached. A fixed budget, or a window the server did not
-    /// say, gives `promptBudget`.
+    /// what the server cached. It is sized with the ratio the server measured,
+    /// without the calibration margin (about a tenth more room, as every
+    /// shortening makes the next request cold, about a minute), which leaves
+    /// less room for a continuation of a cut-off answer. Before the first
+    /// measurement it uses the estimate. A fixed budget, or a window the
+    /// server did not say, gives `promptBudget`.
     func answerLimit(_ state: State, thinking: Bool? = nil) -> Int {
         guard options.contextBudgetCharacters == nil, let window = state.contextTokens else {
             return promptBudget(state)
         }
         let reply = (thinking ?? chat.enableThinking) == true
             ? chat.maxTokens : max(chat.maxTokens / 2, 2_048)
-        return max(contextCharacters(window: window, state, reply: reply), promptBudget(state))
+        return max(contextCharacters(window: window, state, reply: reply,
+                                     ratio: state.measuredCharactersPerToken),
+                   promptBudget(state))
     }
 
     private func contextCharacters(window: Int, _ state: State, reply: Int? = nil,
@@ -3037,6 +3071,7 @@ public struct ResearchAgent: Sendable {
             report.answerEndsMidSentence = end == .midSentence
             report.requestedSources = requested?.minimum
             report.passagesOn = passagesOn
+            report.droppedUnreadCitations = droppedUnreadCitations
             return report
         }
 
@@ -3105,8 +3140,15 @@ public struct ResearchAgent: Sendable {
         /// The share of the measured characters per token that is kept, so the
         /// estimate holds a tenth in hand.
         static let calibrationMargin = 0.9
+        /// Shortening goes down to this share of the budget, so that the next
+        /// turns fit without shortening again: each shortening makes the
+        /// server read the prompt again, about a minute on a local model.
+        static let compactionTargetShare = 0.6
         /// The last ratio the server measured, before the margin and the range.
         var measuredCharactersPerToken: Double?
+        /// Source numbers taken out of the final answer because no page was
+        /// read for them.
+        var droppedUnreadCitations: [Int] = []
 
         /// Learns how many characters a token holds from a prompt the server
         /// counted, keeping a tenth in hand.
@@ -3194,7 +3236,8 @@ public struct ResearchAgent: Sendable {
             fixed.messages = messages.indices.filter { !candidates.contains($0) }
                 .map { messages[$0] }
             let protected = fixed.size(overhead: overhead)
-            let target = min(budget, max(budget * 3 / 4, protected + (budget - protected) / 2))
+            let target = min(budget, max(Int(Double(budget) * Self.compactionTargetShare),
+                                         protected + (budget - protected) / 2))
             // Results of the current turn the model has not acted on yet are
             // only cut to one line as a last resort.
             let currentTurn = emergency ? messages.count

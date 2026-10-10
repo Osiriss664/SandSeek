@@ -1937,6 +1937,52 @@ enum ResearchFigureCheck {
         return numbers
     }
 
+    /// The text without the given source numbers in its citations: `[3]`
+    /// goes (with the space in front of it, if the sentence closes after it),
+    /// `[1, 3]` becomes `[1]`. A number at the start of a line followed by
+    /// white space is an entry of the answer's own source list, not a
+    /// citation, and stays. Numbers over 999 are no source numbers and stay.
+    static func removingCitations(_ numbers: Set<Int>, from raw: String) -> String {
+        let drop = numbers.filter { $0 < 1_000 }
+        guard !drop.isEmpty else { return raw }
+        let text = normalizedCitations(raw)
+        let edited = NSMutableString(string: text)
+        let closers = Set(".,;:!?)".utf16)
+        let space = Set(" \t".utf16)
+        // From the end, so the ranges still to come stay valid.
+        for match in citation.matches(in: text, range: NSRange(text.startIndex..., in: text))
+            .reversed() {
+            let numbersHere = (text as NSString).substring(with: match.range(at: 1))
+                .split(whereSeparator: { !$0.isNumber }).compactMap { Int($0) }
+            let kept = numbersHere.filter { !drop.contains($0) }
+            guard kept.count < numbersHere.count else { continue }
+            var range = match.range
+            let after = range.location + range.length
+            let startsLine = range.location == 0
+                || edited.character(at: range.location - 1) == 10
+            if startsLine, after < edited.length,
+               let next = Unicode.Scalar(edited.character(at: after)),
+               next.properties.isWhitespace {
+                continue
+            }
+            if !kept.isEmpty {
+                edited.replaceCharacters(
+                    in: range, with: "[" + kept.map(String.init).joined(separator: ", ") + "]")
+                continue
+            }
+            // The space in front goes when the citation ends the sentence,
+            // the line or the text, or another space follows.
+            if range.location > 0, space.contains(edited.character(at: range.location - 1)) {
+                let end = after >= edited.length ? 10 : edited.character(at: after)
+                if end == 10 || closers.contains(end) || space.contains(end) {
+                    range = NSRange(location: range.location - 1, length: range.length + 1)
+                }
+            }
+            edited.replaceCharacters(in: range, with: "")
+        }
+        return edited as String
+    }
+
     private static let citation = try! NSRegularExpression(
         pattern: #"\[(\d+(?:\s*[,;]\s*\d+)*)\](?!\()"#)
     private static let escapedCitation = try! NSRegularExpression(

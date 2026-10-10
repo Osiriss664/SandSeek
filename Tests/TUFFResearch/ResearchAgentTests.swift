@@ -597,8 +597,32 @@ struct ResearchAgentTests {
         #expect(report.sources.count == 1)
         let reread = messages(services.modelRequests[2]).last?["content"]?.stringValue ?? ""
         #expect(reread.contains("same page as source [1]; cite it only as [1]"))
-        #expect(report.unknownCitations == [2])
-        #expect(report.markdown.contains("The answer cites [2], which is not a page the research read."))
+        // The rewrite is not kept (it cites [2] too), but the unread citation
+        // leaves the answer and the report says so.
+        #expect(report.answer == "It needs macOS 26 [1].")
+        #expect(report.unknownCitations.isEmpty)
+        #expect(report.droppedUnreadCitations == [2])
+        #expect(report.markdown.contains(
+            "The answer cited [2], which is not a page the research read; the citation was removed."))
+    }
+
+    @Test func unreadCitationsAreRemovedFromTheText() {
+        func removing(_ numbers: Set<Int>, _ text: String) -> String {
+            ResearchFigureCheck.removingCitations(numbers, from: text)
+        }
+        #expect(removing([3], "VMs [1], and Linux 6 [3].") == "VMs [1], and Linux 6.")
+        #expect(removing([3, 4], "Linux 6 [3][4] runs [1][4].") == "Linux 6 runs [1].")
+        #expect(removing([3], "A [1, 3] and [3, 1, 2].") == "A [1] and [1, 2].")
+        #expect(removing([3], "Linux [3] runs.") == "Linux runs.")
+        #expect(removing([3], "Linux [3]\nNext line.") == "Linux\nNext line.")
+        // Escaped brackets are read; a link and a source-list entry stay.
+        #expect(removing([3], "Linux 6 \\[3\\].") == "Linux 6.")
+        #expect(removing([3], "[3](https://e.example) is a link.") == "[3](https://e.example) is a link.")
+        #expect(removing([3], "Sources:\n[3] Some page\n") == "Sources:\n[3] Some page\n")
+        // Not source numbers; and nothing to remove.
+        #expect(removing([2023], "In [2023] it was 4.") == "In [2023] it was 4.")
+        #expect(removing([], "A [3].") == "A [3].")
+        #expect(removing([5], "A [3].") == "A [3].")
     }
 
     @Test func citationsAreReadFromTheAnswer() {
@@ -902,8 +926,10 @@ struct ResearchAgentTests {
             FakeServices.answer("Linux 6 [4]."),
         ])
         let kept = try await agent(stubborn).run(question: "q")
-        #expect(kept.answer == "VMs [1], and Linux 6 [3].")
-        #expect(kept.unknownCitations == [3])
+        // The first answer stays, without the number of the unread page.
+        #expect(kept.answer == "VMs [1], and Linux 6.")
+        #expect(kept.unknownCitations.isEmpty)
+        #expect(kept.droppedUnreadCitations == [3])
 
         // Nor one that swaps an unread number for another, or is a stub.
         for reply in ["VMs and Linux 6 [1][5].", "Unverified."] {
@@ -915,7 +941,7 @@ struct ResearchAgentTests {
                 FakeServices.answer(reply),
             ])
             #expect(try await agent(swapped).run(question: "q").answer
-                == "Each container runs in its own VM [1], on Linux 6 [3][4].")
+                == "Each container runs in its own VM [1], on Linux 6.")
         }
 
         // Nor is a rewrite cut off at the token limit.
@@ -926,7 +952,7 @@ struct ResearchAgentTests {
             FakeServices.answer("VMs [1], and Linux 6 [3]."),
             FakeServices.answer("VMs [1], and", finishReason: "length"),
         ])
-        #expect(try await agent(cut).run(question: "q").answer == "VMs [1], and Linux 6 [3].")
+        #expect(try await agent(cut).run(question: "q").answer == "VMs [1], and Linux 6.")
 
         // With no page read there is nothing to rewrite from.
         let unread = FakeServices(modelReplies: [
@@ -3264,6 +3290,16 @@ struct ResearchAgentTests {
         #expect(agent.promptBudget(state) == 8_190)
         state.calibrate(sentCharacters: 30_000, promptTokens: 9_000)
         #expect(abs(state.charactersPerToken - 3.0) < 0.001)
+        // The request for an answer is sized with the measured ratio, without
+        // the margin: 3.33 characters per token, not 3.0.
+        state.contextTokens = 16_384
+        #expect(state.measuredCharactersPerToken.map { abs($0 - 3.3333) < 0.001 } == true)
+        var unmeasured = state
+        unmeasured.measuredCharactersPerToken = nil
+        let gain = Double(agent.answerLimit(state, thinking: false))
+            / Double(agent.answerLimit(unmeasured, thinking: false))
+        #expect(abs(gain - 1.1111) < 0.001)
+        state.contextTokens = 8_192
         state.calibrate(sentCharacters: 100, promptTokens: 1_000)
         #expect(state.charactersPerToken == 1.5)
         state.contextTokens = 1_000_000
@@ -5472,7 +5508,7 @@ struct ResearchRoundDLoopTests {
         #expect(report.unknownCitations.isEmpty)
     }
 
-    @Test func aCitationOfAnEmptyPageThatSurvivesIsReportedWithItsFigures() async throws {
+    @Test func aCitationOfAnEmptyPageThatSurvivesIsRemovedAndItsFigureChecked() async throws {
         var options = ResearchOptions()
         options.nudges = false
         let stubborn = "Container sind VMs [1]. Das Wachstum lag bei 4,68 Prozent [2]."
@@ -5481,15 +5517,16 @@ struct ResearchRoundDLoopTests {
         let report = try await agent(services, options: options, events: log).run(question: "q")
         // The rewrite still cites [2], so the first answer stays, and the
         // event says why.
-        #expect(report.answer == stubborn)
+        #expect(report.answer == "Container sind VMs [1]. Das Wachstum lag bei 4,68 Prozent.")
         #expect(log.events.contains(.rewriteNotKept("still cites unread pages [2]")))
-        #expect(report.unknownCitations == [2])
-        #expect(report.unverifiedFigures.filter { $0.kind == .sourceNotRead } == [
-            ResearchUnverifiedFigure(figure: "4,68", sources: [2], kind: .sourceNotRead),
-        ])
+        #expect(report.unknownCitations.isEmpty)
+        #expect(report.droppedUnreadCitations == [2])
+        // Without its citation the figure is checked against every page read.
+        #expect(report.unverifiedFigures.contains { $0.figure == "4,68" })
+        #expect(!report.unverifiedFigures.contains { $0.kind == .sourceNotRead })
         let text = report.markdown
-        #expect(text.contains("The answer cites [2], which is not a page the research read."))
-        #expect(text.contains("- 4,68 — [2] never read"))
+        #expect(text.contains("The answer cited [2], which is not a page the research read; "
+            + "the citation was removed."))
     }
 
     @Test func theRepeatedSearchStopRemindsOnceWhenFewerSourcesWereReadThanAsked() async throws {
