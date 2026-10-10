@@ -1147,7 +1147,10 @@ public struct ResearchAgent: Sendable {
         }
         // A web address or an abbreviation at the end is on purpose.
         let lastWord = text.split(whereSeparator: \.isWhitespace).last.map(String.init) ?? ""
-        let lowered = lastWord.lowercased()
+        // Opening emphasis, quotes and brackets in front of it do not count.
+        let lowered = String(lastWord.lowercased().drop {
+            "*_`~\"'(\u{201E}\u{201C}\u{2018}\u{00AB}\u{00BB}\u{2039}\u{203A}".contains($0)
+        })
         if lowered.contains("://") || lowered.hasPrefix("www.") { return false }
         if abbreviations.contains(lowered.filter { $0.isLetter }),
            lowered.allSatisfy({ $0.isLetter || $0 == "." || $0 == "," }) {
