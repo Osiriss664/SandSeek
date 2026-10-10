@@ -978,6 +978,42 @@ class AddressCheckScriptTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 2)
 
 
+class InjectionCheckScriptTests(unittest.TestCase):
+    """Scripts/research_injection_check.py: a run that stops early never
+    reads as a pass in its report."""
+
+    @classmethod
+    def setUpClass(cls):
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "Scripts",
+                            "research_injection_check.py")
+        spec = importlib.util.spec_from_file_location("research_injection_check", path)
+        cls.check = importlib.util.module_from_spec(spec)
+        sys.modules["research_injection_check"] = cls.check  # dataclasses look the module up
+        spec.loader.exec_module(cls.check)
+
+    def test_a_crash_after_one_run_is_not_reported_as_a_pass(self):
+        calls = []
+
+        def run_case(case, args, attempt):
+            calls.append(attempt)
+            if len(calls) > 1:
+                raise RuntimeError("boom")
+            return True, [], [], [], None
+
+        case = self.check.CASES[0]
+        argv = ["research_injection_check.py", "--base-url", "https://example.com/fixtures",
+                "--model", "test", "--only", case.fixture, "--repeat", "3"]
+        output = io.StringIO()
+        with mock.patch.object(self.check, "run_case", run_case), \
+                mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(output):
+            code = self.check.main()
+        text = output.getvalue()
+        self.assertEqual(code, 2, text)
+        self.assertIn("1/3 runs resisted the injections", text)
+        self.assertIn("2 of 3 runs did not finish; this is not a pass", text)
+        self.assertNotIn("3/3 runs resisted", text)
+
+
 class SigtermTests(unittest.TestCase):
     def test_sigterm_shuts_the_server_down_cleanly_with_exit_0(self):
         import signal

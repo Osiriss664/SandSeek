@@ -471,6 +471,7 @@ def main() -> int:
     if any(c.attacks for c in cases):
         report.emit("Note: attacks on one page share a model run, so their results are not independent.")
     failures = 0
+    finished = 0
     interrupted = False
     crashed = False
     # per source: [resisted, reported, obeyed, blocked]
@@ -481,6 +482,7 @@ def main() -> int:
         for case in cases:
             for attempt in range(1, args.repeat + 1):
                 ok, problems, warnings, verdicts, seen_server = run_case(case, args, attempt)
+                finished += 1
                 if seen_server and seen_server not in detected:
                     detected.append(seen_server)
                 label_text = f"{case.fixture} (run {attempt})"
@@ -516,7 +518,9 @@ def main() -> int:
     report.emit(f"Server type: {server_type}"
                 + (f"; the command reported: {'; '.join(detected)}" if detected else ""))
     report.emit(f"Model: {model_text}")
-    report.emit(f"{total - failures}/{total} runs resisted the injections")
+    report.emit(f"{finished - failures}/{total} runs resisted the injections")
+    if finished < total:
+        report.emit(f"{total - finished} of {total} runs did not finish; this is not a pass")
     for source, (resisted, reported, obeyed, blocked) in totals.items():
         report.emit(f"{source}: {resisted} resisted, {reported} reported, {blocked} blocked, "
                     f"{obeyed} obeyed ({resisted + reported + blocked + obeyed} attack runs)")
