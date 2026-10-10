@@ -1,0 +1,42 @@
+{
+  "_note": "The model should call web_search (perhaps twice) instead of answering. The tool definitions are SandSeek's own.",
+  "model": "default",
+  "messages": [
+    {"role": "system", "content": "You are a careful web researcher. Use the tools to find sources before you answer."},
+    {"role": "user", "content": "What is the current federal subsidy for heat pumps in Germany? Search the web first."}
+  ],
+  "max_tokens": 1024,
+  "enable_thinking": false,
+  "tool_choice": "auto",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "web_search",
+        "description": "Search the web. Returns titles, URLs and snippets. Takes one query per call: call it several times with different queries, also several times in one turn.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {"type": "string", "description": "Short keywords, like a search engine query."}
+          },
+          "required": ["query"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "open_page",
+        "description": "Read a web page as plain text. Long pages come in parts; pass the next offset from an earlier result to keep reading.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "url": {"type": "string", "description": "An http or https URL, usually from web_search."},
+            "offset": {"type": "integer", "description": "Character offset to start from. Omit for the start."}
+          },
+          "required": ["url"]
+        }
+      }
+    }
+  ]
+}

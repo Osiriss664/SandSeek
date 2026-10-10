@@ -1,0 +1,11 @@
+{
+  "_note": "A prompt longer than any context window, to record the context error. The script pads the last user message to about 600,000 characters (far over a 16k-token window, under TUFF's 5 MiB request limit) and removes both underscore keys. TUFF starts the stream first and sends the error inside it; record it once with the model loaded and once with the server idle.",
+  "_pad_last_user_message_chars": 600000,
+  "model": "default",
+  "messages": [
+    {"role": "system", "content": "You are a careful assistant."},
+    {"role": "user", "content": "Summarise the text below in one sentence."}
+  ],
+  "max_tokens": 256,
+  "enable_thinking": false
+}

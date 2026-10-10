@@ -16,9 +16,10 @@ show some old TUFF names while they are rewritten.
 
 - Apple silicon, macOS 26 (needed by Apple `container`)
 - [Apple `container`](https://github.com/apple/container)
-- A local model server on 127.0.0.1: TUFF 8.3.1 or newer. llama.cpp
-  (`llama-server`) support is planned, not tested yet. Streaming is not
-  implemented yet.
+- A local model server on 127.0.0.1: TUFF 8.3.1 or newer. Streaming is on by
+  default for TUFF, so that Stop and the time limits make it stop generating.
+  llama.cpp (`llama-server`) support is planned (`--server-type llamacpp`,
+  plain requests, not tested yet).
 - A Swift 6.2 toolchain to build
 
 ## Build
@@ -37,6 +38,10 @@ show some old TUFF names while they are rewritten.
 
 `sandseek --help` lists all options. Tests: `swift test`, and for the sandbox
 server `python3 -m unittest Sandbox/test_server.py`.
+
+To record real streams from a running server for test fixtures, use
+`Scripts/record_stream.py` with the example requests in
+`Tests/Fixtures/requests/` (loopback only).
 
 ## Security in short
 
