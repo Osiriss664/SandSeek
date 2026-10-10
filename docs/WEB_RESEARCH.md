@@ -566,6 +566,10 @@ run can be compared with and without it.
   characters the step added to the conversation (tool results and assistant
   text) and the conversation's size against the prompt budget. It measures why
   older results get shortened so often and changes nothing.
+  A shortening on the last research step (it uses the routine prompt budget)
+  can make the final request start with a cold cache, since that request
+  extends the shortened prompt. Requests for an answer shorten older results
+  only above the context limit, so none happens below it.
   A model that spends two steps in a row doing nothing but
   repeating searches it already ran (Qwen did from step 25
   of a 40-step run, wasting the rest) is stopped there and asked for its final
@@ -662,7 +666,10 @@ run can be compared with and without it.
   and a single request lists all that apply (`--rewrite off` or the app's
   setting turns the whole step off). The model rewrites with reasoning off:
   - It cites source numbers no page was read for (Qwen cited pages it had
-    only seen in search previews). This needs at least one page read. The
+    only seen in search previews). A page that was opened but returned no
+    text at all gets no source number (the result reads "no readable text on
+    this page", asking for it again is refused as a repeat), so a citation of it
+    is an unknown number like any other. This needs at least one page read. The
     request names the pages that were read; claims that rest only on unread
     sources are left out or listed as not verified.
   - Pages were read, but at least two sentences have a figure (a number, a
@@ -704,13 +711,20 @@ run can be compared with and without it.
   address that redirected elsewhere does not count). If the model answers
   with fewer pages read, it is asked once to keep reading (`--nudges off`
   turns this off), and the report notes when the number was not reached.
+  The same reminder also comes instead of the stop for repeated searches (see
+  above) when that stop would end the run with fewer pages read than asked
+  for and steps are left (Berlin: 18 of 30 read, the stop came before the
+  reminder). It tells the model not to search again but to open pages it has
+  not read from the search results it already has. It is the same one
+  reminder, never given twice. The run stops only if the next step is again
+  nothing but refused repeats; a run without a requested number stops as before.
   A number with a cap only (`maximal 5 Quellen`) or one that counts something
   else (`die letzten 30 Jahre`) is no request, and neither is a number below
   2 or above 100.
 - The report flags figures, dates and names in the answer that the pages the
   same sentence cites do not back up. The run keeps the full text of each
   page it read (up to 200,000 characters per page and a million in all, so
-  compaction does not affect it). The "Figure check" section has three short
+  compaction does not affect it). The "Figure check" section has short
   lists, each with a one-line intro, and shares one limit of 20 points:
   - Figures or dates not on the cited pages. Numbers are compared by their
     digits, so `5,82` and `5.82` match. Single digits, times and ordinal days
@@ -728,6 +742,17 @@ run can be compared with and without it.
     sentence under a "not verified" line (`nicht verifiziert`, `could not be
     verified`, `unclear` and similar, up to the next heading) is the answer's
     own caveat and is skipped.
+  - Figures or dates in a sentence whose citations are all numbers that are no
+    source at all (made up, or the number of a page that had no text; round D).
+    Such a sentence used to be skipped, since there was no page to check it
+    against. Its dates, months with a year and numbers (not a year alone) are
+    now listed as "never read" with the cited numbers, so they are not taken
+    for checked; today's date and numbers of the question are left out, as for
+    a sentence without citation. This needs at least one page read. A source
+    that was read but whose text was dropped by the 1,000,000-character limit
+    is still skipped silently. Source lists and the "not verified" part are
+    skipped as before. This list comes last, so it cannot push the other
+    points out of the limit of 20.
   - Figures or dates that are on a cited page, but not next to what the
     sentence names. The sentence's name words are its capitalized words other
     than the first, acronyms and words such as `macOS` (without function
@@ -778,6 +803,10 @@ run can be compared with and without it.
     title or `HeizCenter` in a host are found. A three-digit number from 100
     to 599 directly next to `HTTP`, `Fehler`, `error` or `Status` (any case)
     is an error code and is skipped; `Fehlerquote 500` is still checked.
+    Round D: a well-known error code (400, 401, 403, 404, 405, 408, 410, 418,
+    429, 451, 500 to 504) joined by a hyphen (or a dash, `‐ ‑ –`) to one of those words is skipped
+    too (`403-Fehler`, `404-Error`); `35-Stunden`, `2026-Wahl` and
+    `500-Euro-Schein` are still checked.
   - Month names of German, English and Indonesian (`Januari`, `Maret`, `Mei`,
     `Agustus`, `Desember`, ...) are the same month, so `Februar 2026`
     matches `Februari 2026`.

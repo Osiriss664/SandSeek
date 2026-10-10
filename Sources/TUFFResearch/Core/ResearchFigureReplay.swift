@@ -72,12 +72,14 @@ public enum ResearchFigureReplay {
         var texts: [Int: String] = [:]
         var headers: [Int: String] = [:]
         for page in saved.pages {
-            texts[page.number] = page.text
+            // A page saved without its text was skipped in the live run too.
+            if !page.text.isEmpty { texts[page.number] = page.text }
             headers[page.number] = ResearchFigureCheck.header(title: page.title, url: page.url)
         }
         return ResearchFigureCheck.unverified(
             answer: saved.answer, sourceTexts: texts, question: saved.question,
-            today: saved.date, queries: saved.queries ?? [], pageHeaders: headers)
+            today: saved.date, queries: saved.queries ?? [], pageHeaders: headers,
+            knownSources: Set(saved.pages.map(\.number)))
     }
 
     /// The figure-check section for the saved answer.

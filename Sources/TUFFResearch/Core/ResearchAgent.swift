@@ -209,7 +209,7 @@ public struct ResearchReport: Equatable, Sendable {
     var figureCheckSection: String {
         guard !unverifiedFigures.isEmpty else { return "" }
         var text = "\n## Figure check\n"
-        // The limit counts the points over all three lists.
+        // The limit counts the points over all lists.
         var shown = 0
         for (kind, intro) in Self.figureCheckLists {
             let items = unverifiedFigures.filter { $0.kind == kind }
@@ -239,6 +239,9 @@ public struct ResearchReport: Equatable, Sendable {
             + "what the sentence names; check that they belong to it:"),
         (.name, "These names were not found on the pages they cite, or for a sentence "
             + "without citation, on any page read; check them before relying on them:"),
+        // Last, so that it cannot crowd the other points out of the shared limit.
+        (.sourceNotRead, "These figures or dates are in sentences that cite only sources "
+            + "that were never read, so they could not be checked at all:"),
     ]
 
     /// One point of the "Figure check" section as a line of text.
@@ -257,6 +260,8 @@ public struct ResearchReport: Equatable, Sendable {
         case .name:
             return cited.isEmpty
                 ? "\(figure) — not on any page read" : "\(figure) — not on \(cited)"
+        case .sourceNotRead:
+            return "\(figure) — \(cited) never read"
         case .nameOnlyInQuery:
             return cited.isEmpty
                 ? "\(figure) — only in a search query, not on any page read"
@@ -780,6 +785,26 @@ public struct ResearchAgent: Sendable {
                 refusedOnlySteps = 0
             }
             if refusedOnlySteps >= Self.refusedStepsBeforeAnswering, step < options.maxSteps {
+                // The question asked for more sources than were read (Berlin
+                // ran into this stop at 18 of 30 before the reminder above
+                // could fire): remind once to open pages from the results in
+                // hand. The stop comes only if the next step is again nothing
+                // but refused repeats.
+                if options.nudges, !askedForSources, options.maxSteps - step >= 2,
+                   let wanted = state.requested, state.sources.count < wanted.minimum,
+                   state.topResults().contains(where: { url in
+                       !state.sources.contains { $0.url == url }
+                           && state.pageRead(url: url, offset: 0) == nil }) {
+                    askedForSources = true
+                    refusedOnlySteps = Self.refusedStepsBeforeAnswering - 1
+                    onEvent(.askingToReadMoreSources)
+                    state.messages.append(.object([
+                        "role": .string("user"),
+                        "content": .string(Self.openUnreadPagesRequest(
+                            read: state.sources.count, wanted: wanted)),
+                    ]))
+                    continue
+                }
                 onEvent(.stoppingRepeatedSearches)
                 stoppedAtStep = step
                 break
@@ -869,7 +894,7 @@ public struct ResearchAgent: Sendable {
         checked.unverifiedFigures = ResearchFigureCheck.unverified(
             answer: report.answer, sourceTexts: state.pageTexts, question: state.question,
             today: options.currentDate, queries: state.queries,
-            pageHeaders: state.pageHeaders())
+            pageHeaders: state.pageHeaders(), knownSources: Set(state.sources.map(\.number)))
         if !checked.unverifiedFigures.isEmpty {
             onEvent(.unverifiedFigures(checked.unverifiedFigures.count))
         }
@@ -1215,7 +1240,7 @@ public struct ResearchAgent: Sendable {
             max(Self.minimumTopUpCharacters, promptBudget(state) / 2 / max(1, wanted)))
         var pages: [String] = []
         let unread = state.topResults().filter { url in
-            !state.sources.contains { $0.url == url }
+            !state.sources.contains { $0.url == url } && state.pageRead(url: url, offset: 0) == nil
         }
         for url in unread.prefix(Self.autoOpenAttempts) where pages.count < wanted {
             let read = state.sources.count
@@ -1259,6 +1284,16 @@ public struct ResearchAgent: Sendable {
             + "read \(read). Keep searching and open more independent pages with open_page "
             + "until you have read that many, then answer, citing the source numbers "
             + "open_page gives."
+    }
+
+    /// The reminder when the loop would stop for repeated searches while
+    /// fewer pages were read than the question asks for.
+    static func openUnreadPagesRequest(read: Int, wanted: ResearchSourceRequest) -> String {
+        let cap = wanted.maximum.map { " (at most \($0))" } ?? ""
+        return "The question asks for at least \(wanted.minimum) sources\(cap), and you have "
+            + "read \(read). Your last searches only repeated earlier ones. Do not search again: "
+            + "open pages you have not read yet from the search results you already have with "
+            + "open_page, then answer, citing the source numbers open_page gives."
     }
 
     static let searchMoreRequest = "Before you answer, look wider if you can: one search or one "
@@ -1725,6 +1760,15 @@ public struct ResearchAgent: Sendable {
                 return Self.formatPage(page, source: nil)
             }
             let alreadyNumbered = state.sources.contains { $0.url == page.url }
+            // A page with no text at all is no source: nothing can be cited
+            // from it, so it gets no number a citation could hide behind (a
+            // citation of one is then an unknown number). The read is still
+            // recorded, so asking for it again is refused.
+            if !alreadyNumbered, page.text.isEmpty,
+               page.passages?.allSatisfy({ $0.text.isEmpty }) ?? true {
+                state.recordRead(requested: url, page: page, offset: offset)
+                return Self.formatPage(page, source: nil)
+            }
             let source = state.source(for: page)
             if let passages = page.passages {
                 state.recordPassages(passages, for: source)

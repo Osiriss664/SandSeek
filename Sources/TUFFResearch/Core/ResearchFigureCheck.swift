@@ -17,13 +17,18 @@ public struct ResearchUnverifiedFigure: Equatable, Sendable {
         /// page read: the model may have taken it from its query, not from a
         /// page. Also reported in a sentence without citation.
         case nameOnlyInQuery
+        /// A figure or date in a sentence whose citations are all to numbers
+        /// that are no source (made up, or a page with no text), so there was
+        /// nothing to check it against.
+        case sourceNotRead
     }
 
     /// The figure, date or name as the answer wrote it, such as `4,74`,
     /// `29. November 2024` or `Bibliotheca Albertina`.
     public let figure: String
     /// The source numbers whose pages were checked: the cited ones, or for
-    /// `elsewhereOnPage` those that have the figure. Empty for a name or a
+    /// `elsewhereOnPage` those that have the figure; for `sourceNotRead` the
+    /// cited numbers that are no source. Empty for a name or a
     /// figure in a sentence without citations, which was checked against all
     /// pages read.
     public let sources: [Int]
@@ -79,8 +84,10 @@ enum ResearchFigureCheck {
     /// date where the answer says `Albertina`), is `elsewhereOnPage`. Only
     /// names that are on that page count; a name that is nowhere on it says
     /// nothing about where the figure stands. It is flagged only if every
-    /// cited page that has the figure fails that test. Figures are only
-    /// checked in sentences with a citation whose page was read.
+    /// cited page that has the figure fails that test. Figures in a sentence
+    /// whose citations are all to numbers that are not in `knownSources` (no
+    /// source at all) are `sourceNotRead`, once any page was read; without
+    /// `knownSources` they are skipped.
     ///
     /// Names (see `phrases`) are checked in every sentence, against the
     /// cited pages, or against all pages read when the sentence cites none.
@@ -101,7 +108,8 @@ enum ResearchFigureCheck {
                            question: String = "",
                            today: String = "",
                            queries: [String] = [],
-                           pageHeaders: [Int: String] = [:]) -> [ResearchUnverifiedFigure] {
+                           pageHeaders: [Int: String] = [:],
+                           knownSources: Set<Int>? = nil) -> [ResearchUnverifiedFigure] {
         var pages: [Int: PageFacts] = [:]
         func facts(_ number: Int) -> PageFacts? {
             if let known = pages[number] { return known }
@@ -142,8 +150,23 @@ enum ResearchFigureCheck {
             let cited = citations(in: piece)
             let usable = cited.filter { sourceTexts[$0] != nil }
             // A sentence that cites only pages that were not read has nothing
-            // to be checked against.
-            if !cited.isEmpty, usable.isEmpty { continue }
+            // to be checked against. If every number it cites is no source at
+            // all (made up, or a page with no text), its figures are reported
+            // as such, once any page was read. A source whose text was merely
+            // not kept (see `ResearchAgent.State.pageTextTotalLimit`) is
+            // skipped silently.
+            if !cited.isEmpty, usable.isEmpty {
+                if let known = knownSources, !sourceTexts.isEmpty,
+                   cited.allSatisfy({ !known.contains($0) }),
+                   !skipsNameCheck(piece), !notices[pieceIndex] {
+                    for item in unreadFindings(scanned: scan(withoutCitationsAndLinks(piece)),
+                                               sources: cited, question: questionNumbers,
+                                               today: todayParts) {
+                        add(item)
+                    }
+                }
+                continue
+            }
             // The dates are taken out first, so their parts are not checked
             // again as separate numbers, nor read as names.
             let scanned = scan(withoutCitationsAndLinks(piece))
@@ -222,6 +245,27 @@ enum ResearchFigureCheck {
             }
         }
         return found
+    }
+
+    /// The dates, months and numbers (not a year alone) of a sentence whose
+    /// citations are all to numbers that are no source. Like `uncitedFindings`,
+    /// it leaves out today's date and the numbers the question has.
+    private static func unreadFindings(scanned: Scan, sources: [Int], question: Set<String>,
+                                       today: [Int]) -> [ResearchUnverifiedFigure] {
+        var candidates: [Candidate] = []
+        for mention in scanned.dates
+        where [mention.year, mention.month, mention.day ?? 0] != today {
+            candidates.append(.date(mention))
+        }
+        for mention in scanned.monthYears { candidates.append(.monthYear(mention)) }
+        for token in tokens(in: withoutNoise(scanned.remainder))
+        where !token.ignored && !question.contains(significant(token.digits)) {
+            candidates.append(.number(token))
+        }
+        return candidates.map {
+            ResearchUnverifiedFigure(figure: $0.check(in: []).0, sources: sources,
+                                     kind: .sourceNotRead)
+        }
     }
 
     /// The figures and dates of one sentence that are not on the pages it
@@ -1585,9 +1629,18 @@ enum ResearchFigureCheck {
         "http", "fehler", "error", "status", "statuscode", "fehlercode", "errorcode",
     ]
 
+    /// The 4xx and 5xx codes people name in running text; only these are
+    /// codes when joined to a word by a hyphen.
+    private static let errorCodes: Set<Int> = [
+        400, 401, 403, 404, 405, 408, 410, 418, 429, 451, 500, 501, 502, 503, 504,
+    ]
+
     /// A three-digit code from 100 to 599 directly next to `HTTP`, `Fehler`,
     /// `error` or `Status` (`HTTP 403`, `Fehler 404`, `403 error`), in any
     /// case. `Fehlerquote 5 %` is no code, and a longer word is another word.
+    /// A well-known error code (see `errorCodes`) is also one when a hyphen
+    /// joins it to such a word (`403-Fehler`, `404-Error`); `500-Euro-Schein`
+    /// and `2026-Wahl` are figures.
     private static func isStatusCode(_ characters: [Character], written: String,
                                      start: Int, end: Int) -> Bool {
         guard written.count == 3, let value = Int(written), (100...599).contains(value) else {
@@ -1617,7 +1670,16 @@ enum ResearchFigureCheck {
             while high < characters.count, characters[high].isLetter { high += 1 }
             return String(characters[index..<high]).lowercased()
         }
-        return statusWords.contains(word(before: start)) || statusWords.contains(word(after: end))
+        if statusWords.contains(word(before: start)) || statusWords.contains(word(after: end)) {
+            return true
+        }
+        // `403-Fehler`, `404-Error`: a hyphen and then the word.
+        guard errorCodes.contains(value), end + 1 < characters.count,
+              "-\u{2010}\u{2011}\u{2013}".contains(characters[end])
+        else { return false }
+        var high = end + 1
+        while high < characters.count, characters[high].isLetter { high += 1 }
+        return statusWords.contains(String(characters[(end + 1)..<high]).lowercased())
     }
 
     private static func isDigit(_ character: Character) -> Bool {

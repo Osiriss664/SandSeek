@@ -3604,6 +3604,7 @@ struct ResearchFigureCheckTests {
         #expect(check("Es sind 4,74 % gewesen.", [1: "nothing"])
             == [ResearchUnverifiedFigure(figure: "4,74", sources: [])])
         #expect(check("Es sind 4,74 % gewesen.", [1: "4.74"]).isEmpty)
+        // Without the set of known sources, nothing is said about [2].
         #expect(check("Es sind 4,74 % gewesen [2].", [1: "nothing"]).isEmpty)
         // The citation after the full stop belongs to the sentence before it.
         #expect(check("Es sind 4,74 % gewesen. [1]", [1: "nothing"])
@@ -4884,5 +4885,239 @@ struct ResearchPassagesTests {
             .first { $0["name"] == .string("open_page") }?["description"]?.stringValue ?? ""
         #expect(!description.contains("passages"))
         #expect(tools == ResearchAgent.tools)
+    }
+}
+
+@Suite("Web research figure check, round D")
+struct ResearchFigureCheckRoundDTests {
+    /// `known` is the set of source numbers; by default those with text.
+    private func check(_ answer: String, _ texts: [Int: String], known: Set<Int>? = nil,
+                       question: String = "", today: String = "")
+        -> [ResearchUnverifiedFigure] {
+        ResearchFigureCheck.unverified(
+            answer: answer, sourceTexts: texts, question: question, today: today,
+            knownSources: known ?? Set(texts.keys))
+    }
+
+    @Test func figuresCitingOnlyNumbersThatAreNoSourceAreReported() {
+        let pages = [1: "Die Zahl lag bei 2,1 Prozent."]
+        let found = check("Das Wachstum lag bei 4,68 und 3,79 Prozent [3][4].", pages)
+        #expect(found.map(\.figure) == ["4,68", "3,79"])
+        #expect(found.allSatisfy { $0.kind == .sourceNotRead && $0.sources == [3, 4] })
+        #expect(ResearchReport.figureCheckLine(found[0]) == "4,68 — [3], [4] never read")
+        // A date is reported as well, a year alone is not.
+        #expect(check("Am 29. November 2024 wurde es 2026 geändert [3].", pages).map(\.figure)
+            == ["29. November 2024"])
+        // A citation of a page that was read is checked as before.
+        #expect(check("Das Wachstum lag bei 2,1 Prozent [1].", pages).isEmpty)
+        #expect(check("Das Wachstum lag bei 9,9 Prozent [1][3].", pages)
+            == [ResearchUnverifiedFigure(figure: "9,9", sources: [1])])
+        // Without any page read there is nothing to compare, as before.
+        #expect(check("Das Wachstum lag bei 4,68 Prozent [3].", [:]).isEmpty)
+        // Source lists and the part that lists what is unverified are no claims.
+        #expect(check("Nicht verifiziert: 4,68 Prozent [3].", pages).isEmpty)
+        #expect(check("- [3] BPS, 4,68 Prozent", pages).isEmpty)
+        // A source whose text was not kept is skipped silently, as is a check
+        // without the set of known sources.
+        #expect(check("Das Wachstum lag bei 4,68 Prozent [3].", pages, known: [1, 3]).isEmpty)
+        #expect(ResearchFigureCheck.unverified(
+            answer: "Das Wachstum lag bei 4,68 Prozent [3].", sourceTexts: pages).isEmpty)
+        // Numbers of the question and today's date are not reported.
+        #expect(check("Das Wachstum lag bei 4,68 Prozent [3].", pages,
+                      question: "Ist es 4,68 Prozent?").isEmpty)
+        #expect(check("Heute ist der 10. Oktober 2026 [3].", pages, today: "2026-10-10").isEmpty)
+    }
+
+    @Test func theReportListsFiguresOfUnreadSourcesLast() {
+        var report = ResearchReport(question: "q", answer: "A 4,68 [3].", sources: [],
+                                    modelTurns: 1, budgetExhausted: false)
+        let others = (1...ResearchReport.figureCheckLimit).map {
+            ResearchUnverifiedFigure(figure: "\($0)0\($0)", sources: [1])
+        }
+        report.unverifiedFigures = [
+            ResearchUnverifiedFigure(figure: "4,68", sources: [3], kind: .sourceNotRead),
+        ] + others
+        let text = report.markdown
+        // The other points fill the limit; the unread ones come after them.
+        #expect(text.contains("- 101 "))
+        #expect(!text.contains("never read"))
+        #expect(text.contains("- and 1 more"))
+        report.unverifiedFigures = [
+            ResearchUnverifiedFigure(figure: "4,68", sources: [3], kind: .sourceNotRead),
+        ]
+        #expect(report.markdown.contains("so they could not be checked at all:"))
+        #expect(report.markdown.contains("- 4,68 — [3] never read"))
+    }
+
+    @Test func aStatusCodeJoinedToItsWordByAHyphenIsNoFigure() {
+        let page = [1: "nichts"]
+        func figures(_ text: String) -> [String] {
+            check(text, page).filter { $0.kind == .notOnPage }.map(\.figure)
+        }
+        for text in ["Der Server liefert (403-Fehler) [1].", "Der Server liefert einen 404-Error [1].",
+                     "Der Server liefert 500-fehler [1].", "Der Server liefert 429-Error [1]."] {
+            #expect(figures(text).isEmpty, "\(text)")
+        }
+        // An en dash or a non-breaking hyphen joins just as well.
+        #expect(figures("Der Server liefert 403\u{2013}Fehler [1].").isEmpty)
+        #expect(figures("Der Server liefert 404\u{2011}Error [1].").isEmpty)
+        // Real figures with a hyphen and a word stay figures.
+        #expect(figures("Der Plan gilt für 35-Stunden-Verträge [1].") == ["35"])
+        #expect(figures("Der Plan gilt für die 2026-Wahl [1].") == ["2026"])
+        #expect(figures("Der Plan gilt für 500-Euro-Scheine [1].") == ["500"])
+        #expect(figures("Der Plan gilt für 403-Seiten-Bücher [1].") == ["403"])
+        // Only the well-known codes: 599 is not one.
+        #expect(figures("Der Server liefert 599-Fehler [1].") == ["599"])
+    }
+}
+
+@Suite("Web research unread sources and repeated searches, round D")
+struct ResearchRoundDLoopTests {
+    /// Each search finds two pages of its own; a page whose address has
+    /// `empty` comes back without any text.
+    @Sendable private static func sandbox(_ path: String, _ body: ResearchJSON?)
+        -> ResearchHTTPResponse {
+        switch path {
+        case "/v1/search":
+            let query = body?["query"]?.stringValue ?? ""
+            return FakeServices.json(200, .object(["query": .string(query), "results": .array(
+                (1...2).map { rank in
+                    .object([
+                        "title": .string("\(query) \(rank)"),
+                        "url": .string("https://\(query.lowercased()).example/\(rank)"),
+                        "snippet": .string("A snippet."),
+                    ])
+                })]))
+        case "/v1/fetch" where body?["url"]?.stringValue?.contains("empty") == true:
+            return FakeServices.json(200, .object([
+                "url": body?["url"] ?? .string(""), "title": .string("Empty"),
+                "text": .string(""), "offset": .integer(0), "total_chars": .integer(0),
+            ]))
+        default:
+            return FakeServices.webPages(path, body)
+        }
+    }
+
+    private func unreadScenario(rewrite: String) -> FakeServices {
+        FakeServices(modelReplies: [
+            FakeServices.calls([("a", "open_page", #"{"url":"https://a.example/"}"#)]),
+            FakeServices.calls([("b", "open_page", #"{"url":"https://empty.example/"}"#)]),
+            FakeServices.answer("Container sind VMs [1]. Das Wachstum lag bei 4,68 Prozent [2]."),
+            FakeServices.answer(rewrite),
+        ], sandbox: Self.sandbox)
+    }
+
+    @Test func aPageWithoutTextGetsNoSourceNumberAndIsRefusedAgain() async throws {
+        var options = ResearchOptions()
+        options.nudges = false
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "open_page", #"{"url":"https://empty.example/"}"#)]),
+            FakeServices.calls([("b", "open_page", #"{"url":"https://empty.example/"}"#)]),
+            FakeServices.answer("Nichts gelesen."),
+        ], sandbox: Self.sandbox)
+        let report = try await agent(services, options: options).run(question: "q")
+        #expect(report.sources.isEmpty)
+        let first = messages(services.modelRequests[1]).last?["content"]?.stringValue ?? ""
+        #expect(first.contains("(no readable text on this page)"))
+        #expect(!first.contains("Source ["))
+        // The second read is refused as a repeat; only one fetch happened.
+        let second = messages(services.modelRequests[2]).last?["content"]?.stringValue ?? ""
+        #expect(second.contains("You already read this part of"))
+        #expect(services.requests.filter { $0.url.path == "/v1/fetch" }.count == 1)
+    }
+
+    @Test func aCitationOfAnEmptyPageIsRewrittenLikeAnUnknownNumber() async throws {
+        var options = ResearchOptions()
+        options.nudges = false
+        let services = unreadScenario(
+            rewrite: "Container sind VMs [1]. Nicht verifiziert: das Wachstum.")
+        let log = EventLog()
+        let report = try await agent(services, options: options, events: log)
+            .run(question: "q")
+        // Only [1] is a source; the empty page has no number.
+        #expect(report.sources.count == 1)
+        #expect(log.events.filter { $0 == .revisingUnreadCitations }.count == 1)
+        let asked = messages(try #require(services.modelRequests.last)).last
+        #expect(asked?["content"] == .string(
+            ResearchAgent.unreadCitationsRequest(unknown: [2], read: [1])))
+        #expect(report.answer == "Container sind VMs [1]. Nicht verifiziert: das Wachstum.")
+        #expect(report.unknownCitations.isEmpty)
+    }
+
+    @Test func aCitationOfAnEmptyPageThatSurvivesIsReportedWithItsFigures() async throws {
+        var options = ResearchOptions()
+        options.nudges = false
+        let stubborn = "Container sind VMs [1]. Das Wachstum lag bei 4,68 Prozent [2]."
+        let services = unreadScenario(rewrite: stubborn)
+        let report = try await agent(services, options: options).run(question: "q")
+        // The rewrite still cites [2], so the first answer stays.
+        #expect(report.answer == stubborn)
+        #expect(report.unknownCitations == [2])
+        #expect(report.unverifiedFigures.filter { $0.kind == .sourceNotRead } == [
+            ResearchUnverifiedFigure(figure: "4,68", sources: [2], kind: .sourceNotRead),
+        ])
+        let text = report.markdown
+        #expect(text.contains("The answer cites [2], which is not a page the research read."))
+        #expect(text.contains("- 4,68 — [2] never read"))
+    }
+
+    @Test func theRepeatedSearchStopRemindsOnceWhenFewerSourcesWereReadThanAsked() async throws {
+        let question = "Nenne mindestens 3 Quellen zu Containern"
+        let wanted = ResearchSourceRequest(minimum: 3, maximum: nil)
+        // Step 5 is the second step of only refused repeats: the reminder
+        // comes instead of the stop, and a page opened after it ends the count.
+        let continued = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"one"}"#)]),
+            FakeServices.calls([("b", "web_search", #"{"query":"two"}"#)]),
+            FakeServices.calls([("c", "open_page", #"{"url":"https://one.example/1"}"#)]),
+            FakeServices.calls([("d", "web_search", #"{"query":"one"}"#)]),
+            FakeServices.calls([("e", "web_search", #"{"query":"two"}"#)]),
+            FakeServices.calls([("f", "open_page", #"{"url":"https://one.example/2"}"#)]),
+            FakeServices.answer("Beide [1][2]."),
+        ], sandbox: Self.sandbox)
+        let log = EventLog()
+        let report = try await agent(continued, events: log).run(question: question)
+        #expect(!report.stoppedRepeatedSearches)
+        #expect(!log.events.contains(.stoppingRepeatedSearches))
+        #expect(log.events.filter { $0 == .askingToReadMoreSources }.count == 1)
+        #expect(report.sources.count == 2)
+        let reminder = messages(continued.modelRequests[5]).suffix(2)
+        #expect(reminder.first?["role"] == .string("tool"))
+        #expect(reminder.last?["content"] == .string(
+            ResearchAgent.openUnreadPagesRequest(read: 1, wanted: wanted)))
+        #expect(ResearchAgent.openUnreadPagesRequest(read: 1, wanted: wanted)
+            .contains("Do not search again"))
+
+        // Repeating again right after the reminder stops the run as before,
+        // without a second reminder.
+        let stopped = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"one"}"#)]),
+            FakeServices.calls([("b", "web_search", #"{"query":"two"}"#)]),
+            FakeServices.calls([("c", "open_page", #"{"url":"https://one.example/1"}"#)]),
+            FakeServices.calls([("d", "web_search", #"{"query":"one"}"#)]),
+            FakeServices.calls([("e", "web_search", #"{"query":"two"}"#)]),
+            FakeServices.calls([("f", "web_search", #"{"query":"one"}"#)]),
+            FakeServices.answer("Fertig [1]."),
+        ], sandbox: Self.sandbox)
+        let stoppedLog = EventLog()
+        let end = try await agent(stopped, events: stoppedLog).run(question: question)
+        #expect(end.stoppedRepeatedSearches)
+        #expect(stoppedLog.events.filter { $0 == .askingToReadMoreSources }.count == 1)
+        #expect(stoppedLog.events.filter { $0 == .stoppingRepeatedSearches }.count == 1)
+        #expect(end.modelTurns == 7)
+
+        // Without a requested count the stop is unchanged: no reminder.
+        let plain = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"one"}"#)]),
+            FakeServices.calls([("b", "web_search", #"{"query":"two"}"#)]),
+            FakeServices.calls([("c", "open_page", #"{"url":"https://one.example/1"}"#)]),
+            FakeServices.calls([("d", "web_search", #"{"query":"one"}"#)]),
+            FakeServices.calls([("e", "web_search", #"{"query":"two"}"#)]),
+            FakeServices.answer("Fertig [1]."),
+        ], sandbox: Self.sandbox)
+        let plainLog = EventLog()
+        let direct = try await agent(plain, events: plainLog).run(question: "q")
+        #expect(direct.stoppedRepeatedSearches)
+        #expect(!plainLog.events.contains(.askingToReadMoreSources))
     }
 }
