@@ -148,8 +148,14 @@ public final class ResearchPresetStore {
         var thorough: ResearchPreset
     }
 
-    public private(set) var quick: ResearchPreset
-    public private(set) var thorough: ResearchPreset
+    /// The two presets can be edited in place (Settings binds to them); a
+    /// change is clamped and saved at once.
+    public var quick: ResearchPreset {
+        didSet { settle(quick, as: .quick) }
+    }
+    public var thorough: ResearchPreset {
+        didSet { settle(thorough, as: .thorough) }
+    }
     private let defaults: any ResearchSettingsStore
 
     public init(defaults: any ResearchSettingsStore) {
@@ -175,17 +181,29 @@ public final class ResearchPresetStore {
     public func update(_ id: ResearchPresetID, _ change: (inout ResearchPreset) -> Void) {
         var value = preset(id)
         change(&value)
-        value = value.clamped()
         switch id {
         case .quick: quick = value
         case .thorough: thorough = value
         }
-        save()
     }
 
     /// Puts one preset back to its default values.
     public func reset(_ id: ResearchPresetID) {
         update(id) { $0 = .defaults(for: id) }
+    }
+
+    /// Runs after a preset was set: puts its numbers inside their ranges
+    /// (that assignment runs this once more, which then changes nothing), then
+    /// saves.
+    private func settle(_ value: ResearchPreset, as id: ResearchPresetID) {
+        let limited = value.clamped()
+        if limited != value {
+            switch id {
+            case .quick: quick = limited
+            case .thorough: thorough = limited
+            }
+        }
+        save()
     }
 
     private func save() {

@@ -124,6 +124,19 @@ import Testing
         #expect(ResearchPresetStore(defaults: settings).quick.maxSteps == 100)
     }
 
+    @Test func settingAPresetDirectlyClampsAndSavesLikeSettingsDoes() {
+        let settings = MemorySettings()
+        let store = ResearchPresetStore(defaults: settings)
+        // Settings binds to the properties themselves.
+        store.thorough.minimumPages = 40
+        store.thorough.toolCallsPerStep = 6
+        #expect(store.thorough.minimumPages == 12)
+        let reopened = ResearchPresetStore(defaults: settings)
+        #expect(reopened.thorough.minimumPages == 12)
+        #expect(reopened.thorough.toolCallsPerStep == 6)
+        #expect(reopened.quick == .quick)
+    }
+
     @Test func unreadableStoredPresetsFallBackToTheDefaults() {
         let settings = MemorySettings()
         settings.save("{not json", forKey: ResearchPresetStore.key)
