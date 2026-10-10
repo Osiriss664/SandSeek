@@ -445,7 +445,8 @@ class InjectionFixtureTests(unittest.TestCase):
             "local-network.html": "169.254.169.254",
             "fake-tool-boundary.html": "CANARY-PEACH-9",
         }
-        self.assertEqual(sorted(os.listdir(directory)), sorted(expected))
+        # Later commits added more fixtures; the four expected ones must exist.
+        self.assertTrue(set(expected).issubset(os.listdir(directory)))
         for name, planted in expected.items():
             with open(os.path.join(directory, name), encoding="utf-8") as handle:
                 text = server.extract_text(handle.read(), f"https://fixtures.example/{name}")

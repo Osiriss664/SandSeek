@@ -320,6 +320,19 @@ public enum ResearchEvent: Equatable, Sendable {
     /// The final answer stopped at the token limit, and the model is asked
     /// to continue it.
     case continuingCutOffAnswer
+    /// The final answer stopped at the token limit, but the request to
+    /// continue it would not fit the context budget. It is not sent, and the
+    /// cut-off answer stays, marked as cut off.
+    case keepingCutOffAnswerNoRoom
+    /// The continuation began with the answer's own first line, so the model
+    /// started over instead of going on. It is dropped, and the cut-off
+    /// answer stays, marked as cut off.
+    case droppingRestartedContinuation
+    /// What a step with tool calls added to the conversation, in characters,
+    /// and the conversation's size against the prompt budget. A measurement
+    /// only, for finding out why older results are shortened so often.
+    case stepSize(step: Int, toolCharacters: Int, assistantCharacters: Int,
+                  conversationCharacters: Int, budgetCharacters: Int)
     /// The server failed a step with reasoning on (Gemma 4 wrote a broken
     /// tool call), and the step is asked again with reasoning off.
     case retryingAfterModelError
@@ -516,6 +529,7 @@ public struct ResearchAgent: Sendable {
         for step in 1...max(1, options.maxSteps) {
             onEvent(.modelTurn(step))
             state.modelTurns = step
+            let messagesBefore = state.messages.count
             let turn = try await complete(&state, toolUse: .allowed)
             // A turn cut off while thinking has not chosen to answer; with
             // steps left, the research goes on rather than ending here, with
@@ -608,6 +622,11 @@ public struct ResearchAgent: Sendable {
                     "content": .string(result),
                 ]))
             }
+            let added = state.addedCharacters(since: messagesBefore)
+            onEvent(.stepSize(step: step, toolCharacters: added.tool,
+                              assistantCharacters: added.assistant,
+                              conversationCharacters: state.size(overhead: Self.toolCharacters),
+                              budgetCharacters: promptBudget(state)))
             // A model that only repeats searches it already ran (Qwen did in
             // long runs) never answers without tools, so the check above
             // never opens pages for it. After a few refused repeats with
@@ -804,7 +823,6 @@ public struct ResearchAgent: Sendable {
                                   state: inout State) async throws -> (String, Bool) {
         try Task.checkCancellation()
         guard answer.1 else { return answer }
-        onEvent(.continuingCutOffAnswer)
         // The reasoning goes back with the answer, like `textMessage`, for the
         // prompt cache; it is the turn's own only if the answer came from it.
         var cutOff: [String: ResearchJSON] = [
@@ -820,6 +838,19 @@ public struct ResearchAgent: Sendable {
             "role": .string("user"),
             "content": .string(Self.continueCutOffRequest),
         ]))
+        // A request that does not fit the context window is not sent: the server
+        // would refuse it, and shortening to make it fit cut the half answer to a few lines
+        // (the model then started over from the top, in the Berlin run).
+        guard state.size(overhead: Self.toolCharacters) <= contextLimit(state) else {
+            state.messages.removeLast(2)
+            onEvent(.keepingCutOffAnswerNoRoom)
+            return answer
+        }
+        onEvent(.continuingCutOffAnswer)
+        // Not even an overflow the estimate missed may shorten the cut-off
+        // answer (see `send`).
+        state.keepsHistoryWhole = true
+        defer { state.keepsHistoryWhole = false }
         // Nothing is removed afterwards: a cut-off answer is not revised, so
         // no request follows, and completeAnswer may have added messages.
         // Continuing needs no reasoning, which would only make the turn slow.
@@ -836,7 +867,31 @@ public struct ResearchAgent: Sendable {
             return answer
         }
         guard let content = continuation.content, !Self.isBlank(content) else { return answer }
+        // A model that starts over (it saw only a shortened start of its
+        // answer) would give the answer twice.
+        if Self.startsOver(answer.0, with: content) {
+            onEvent(.droppingRestartedContinuation)
+            return answer
+        }
         return (Self.joined(answer.0, content), continuation.finishReason == "length")
+    }
+
+    /// Whether a continuation begins with the answer's own first line, ignoring
+    /// case and the spacing within the line: the model wrote the answer again
+    /// instead of going on where it stopped.
+    static func startsOver(_ answer: String, with continuation: String) -> Bool {
+        guard let first = firstLine(of: answer),
+              let again = firstLine(of: continuation) else { return false }
+        return first == again
+    }
+
+    /// The first line with text, its words separated by single spaces, in lower case.
+    private static func firstLine(of text: String) -> String? {
+        for line in text.split(whereSeparator: \.isNewline) {
+            let words = line.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+            if !words.isEmpty { return words.lowercased() }
+        }
+        return nil
     }
 
     /// The cut-off answer and its continuation as one text. The model goes on
@@ -1169,13 +1224,26 @@ public struct ResearchAgent: Sendable {
     /// and answer) needs up to `maxTokens` of the same context window, but
     /// at least two fifths of the window stay for the prompt.
     func promptBudget(_ state: State) -> Int {
-        if let fixed = options.contextBudgetCharacters { return fixed }
-        guard let window = state.contextTokens else {
-            return ResearchOptions.fallbackBudgetCharacters
+        guard options.contextBudgetCharacters == nil, let window = state.contextTokens else {
+            return options.contextBudgetCharacters ?? ResearchOptions.fallbackBudgetCharacters
         }
+        return min(contextCharacters(window: window, state), Self.largestBudgetCharacters)
+    }
+
+    /// The prompt the context window really holds, in characters, without the
+    /// speed cap of `promptBudget`. Only a request that cannot be shortened
+    /// (the continuation of a cut-off answer) is held to this. A fixed budget,
+    /// or a window the server did not say, gives `promptBudget`.
+    func contextLimit(_ state: State) -> Int {
+        guard options.contextBudgetCharacters == nil, let window = state.contextTokens else {
+            return promptBudget(state)
+        }
+        return contextCharacters(window: window, state)
+    }
+
+    private func contextCharacters(window: Int, _ state: State) -> Int {
         let tokens = max(window - chat.maxTokens - Self.templateReserveTokens, window * 2 / 5)
-        let characters = Double(tokens) * state.charactersPerToken
-        return Int(min(characters, Double(Self.largestBudgetCharacters)))
+        return Int(Double(tokens) * state.charactersPerToken)
     }
 
     /// The request for an answer now (the final answer, the empty-answer
@@ -1362,7 +1430,10 @@ public struct ResearchAgent: Sendable {
                     preserveThinking: state.preserveThinking, timeout: limit)
             } catch ResearchError.modelRequestFailed(let status, let message,
                                                      "context_length_exceeded"?) {
-                guard state.compact(toFit: promptBudget(state) / 2,
+                // The continuation of a cut-off answer is never shortened this
+                // way: it would cut that answer itself (see `continuingCutOff`).
+                guard !state.keepsHistoryWhole,
+                      state.compact(toFit: promptBudget(state) / 2,
                                     overhead: Self.toolCharacters, emergency: true) else {
                     throw ResearchError.modelRequestFailed(
                         status: status, message: message, code: "context_length_exceeded")
@@ -1451,9 +1522,12 @@ public struct ResearchAgent: Sendable {
                 let offset = max(0, arguments["offset"]?.intValue ?? 0)
                 // The same part of a page would only fill the context again.
                 // After older results were shortened, one more read is fair.
-                if let read = state.pageRead(url: url, offset: offset), !read.mayReadAgain {
+                if let read = state.pageRead(url: url, offset: offset),
+                   read.redirectedElsewhere != nil || !read.mayReadAgain {
                     state.refusedRepeats += 1
                     onEvent(.repeatedPageRefused(ResearchText.oneLine(url, limit: 200)))
+                    // An address that led elsewhere gets the same answer again.
+                    if let rejection = read.redirectedElsewhere { return rejection }
                     let shown = Self.sanitized(ResearchText.url(url))
                     let number = state.sources.first { $0.url == read.sourceURL }
                         .map { " as source [\($0.number)]" } ?? ""
@@ -1481,6 +1555,19 @@ public struct ResearchAgent: Sendable {
             let page = try await sandbox.fetch(
                 url: url, offset: offset,
                 maxCharacters: maxCharacters ?? options.pageSliceCharacters)
+            // An address the model made up can lead somewhere else, such as an
+            // unrelated article or the home page; that page is no source.
+            let redirect = Self.redirect(from: url, to: page.url)
+            if redirect != .same, !state.hasSeen(url: url) {
+                let rejection = Self.redirectedElsewhere(
+                    requested: url, page: page, redirect: redirect)
+                state.recordRead(requested: url, page: page, offset: offset,
+                                 redirectedElsewhere: rejection)
+                onEvent(.toolFailed("open_page: \(ResearchText.oneLine(url, limit: 200)) "
+                    + "redirected to \(ResearchText.oneLine(page.url, limit: 200)); "
+                    + "not counted as a source"))
+                return rejection
+            }
             let alreadyNumbered = state.sources.contains { $0.url == page.url }
             let source = state.source(for: page)
             state.recordText(page.text, for: source)
@@ -1493,6 +1580,75 @@ public struct ResearchAgent: Sendable {
             onEvent(.toolFailed(String(describing: error)))
             return "Tool error: \(Self.sanitized(String(describing: error)))"
         }
+    }
+
+    /// Where a request ended up compared with the address asked for.
+    enum Redirect: Equatable {
+        /// The same page, or a normal redirect: http to https, with or without
+        /// `www.`, a trailing slash, the case of the host or path, a query.
+        case same
+        /// Another site, or another path on the same site.
+        case elsewhere
+        /// The home page of a site, when the page asked for was not.
+        case homePage
+    }
+
+    /// Compares the address asked for with the one the sandbox returned after
+    /// its redirects. An address that cannot be read is taken as unchanged.
+    static func redirect(from requested: String, to final: String) -> Redirect {
+        // Internationalized hosts are not compared: their forms differ too much.
+        guard let asked = addressParts(requested), let got = addressParts(final),
+              asked.host.allSatisfy(\.isASCII), got.host.allSatisfy(\.isASCII) else {
+            return .same
+        }
+        if got.path.isEmpty, !asked.path.isEmpty { return .homePage }
+        // Same site: the same path, a longer one under it (a canonical slug),
+        // or a bare domain that leads to its landing page.
+        if asked.host == got.host,
+           asked.path.isEmpty || asked.path == got.path || got.path.hasPrefix(asked.path + "/") {
+            return .same
+        }
+        return .elsewhere
+    }
+
+    /// The host (lower case, without `www.`, port, user or trailing dot) and path (lower
+    /// case, without a trailing slash) of an http or https address; no query
+    /// or fragment.
+    private static func addressParts(_ url: String) -> (host: String, path: String)? {
+        var text = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let hash = text.firstIndex(of: "#") { text = String(text[..<hash]) }
+        guard let separator = text.range(of: "://"),
+              ["http", "https"].contains(text[..<separator.lowerBound].lowercased()) else {
+            return nil
+        }
+        let rest = text[separator.upperBound...]
+        let hostEnd = rest.firstIndex { "/?".contains($0) } ?? rest.endIndex
+        var host = rest[..<hostEnd].lowercased()
+        if let at = host.lastIndex(of: "@") { host = String(host[host.index(after: at)...]) }
+        if let colon = host.lastIndex(of: ":"), !host.hasSuffix("]") {
+            host = String(host[..<colon])
+        }
+        while host.hasSuffix(".") { host.removeLast() }
+        if host.hasPrefix("www.") { host.removeFirst(4) }
+        guard !host.isEmpty else { return nil }
+        let tail = rest[hostEnd...]
+        var path = String(tail[..<(tail.firstIndex(of: "?") ?? tail.endIndex)]).lowercased()
+        while path.hasSuffix("/") { path.removeLast() }
+        return (host, path)
+    }
+
+    /// The tool result for a page that is not the one asked for. Its text is
+    /// left out: it is about something else, and it would only fill the context.
+    static func redirectedElsewhere(requested: String, page: ResearchPageSlice,
+                                    redirect: Redirect) -> String {
+        let asked = sanitized(ResearchText.url(requested))
+        let got = sanitized(ResearchText.url(page.url))
+        let what = redirect == .homePage
+            ? "redirected to the home page \(got), so the page was not found at that address"
+            : "redirected to \(got), which is a different page and does not match"
+        return "The address \(asked) \(what). It is not the page you asked for, so it was not "
+            + "counted as a source and cannot be cited. Open addresses from the search results "
+            + "or from pages you read; do not guess addresses."
     }
 
     /// Removes the untrusted-content markers until none is left, so a page
@@ -1587,6 +1743,9 @@ public struct ResearchAgent: Sendable {
         /// That message and all after it are never shortened and keep their
         /// reasoning, so every later request extends what the server cached.
         var sealedFrom: Int?
+        /// Set while the continuation of a cut-off answer is asked: no
+        /// emergency shortening, which would cut the answer itself.
+        var keepsHistoryWhole = false
         private var pageTextTotal = 0
         static let pageTextPerSource = 200_000
         static let pageTextTotalLimit = 1_000_000
@@ -1613,6 +1772,9 @@ public struct ResearchAgent: Sendable {
             /// A second read is allowed once, and only after older results
             /// were shortened since this one.
             var mayReadAgain = false
+            /// The tool result given when the address led to another page
+            /// (see `redirect`); the same is answered if it is asked again.
+            var redirectedElsewhere: String?
         }
 
         /// A URL and offset as one key: scheme and host in lower case, no
@@ -1643,17 +1805,84 @@ public struct ResearchAgent: Sendable {
 
         /// Counts a read under the URL asked for and the one the sandbox
         /// returned, which differ after a redirect.
-        mutating func recordRead(requested: String, page: ResearchPageSlice, offset: Int) {
-            let keys = Set([Self.pageKey(requested, offset: offset),
-                            Self.pageKey(page.url, offset: offset)])
+        /// A page that was not the one asked for (`redirectedElsewhere` is the
+        /// tool result given for it) counts under the asked address only, so
+        /// the real page can still be opened later.
+        mutating func recordRead(requested: String, page: ResearchPageSlice, offset: Int,
+                                 redirectedElsewhere: String? = nil) {
+            let keys = Set([Self.pageKey(requested, offset: offset)]
+                + (redirectedElsewhere == nil ? [Self.pageKey(page.url, offset: offset)] : []))
             for key in keys {
                 pageReads[key] = PageRead(count: (pageReads[key]?.count ?? 0) + 1,
-                                          compactions: compactions, sourceURL: page.url)
+                                          compactions: compactions, sourceURL: page.url,
+                                          redirectedElsewhere: redirectedElsewhere)
             }
         }
 
         init(question: String) {
             self.question = question
+        }
+
+        /// Whether `text` holds `address` as a whole link: with or without
+        /// the scheme and `www.`, not inside a longer host (`notexample.org`)
+        /// and not as the start of a longer path (`/page` in `/page/one`). A
+        /// trailing slash may follow.
+        static func mentions(_ text: String, address: String) -> Bool {
+            var bare = address
+            for prefix in ["https://", "http://"] where bare.lowercased().hasPrefix(prefix) {
+                bare.removeFirst(prefix.count)
+            }
+            if bare.lowercased().hasPrefix("www.") { bare.removeFirst(4) }
+            while bare.hasSuffix("/") { bare.removeLast() }
+            guard !bare.isEmpty else { return false }
+            let linkCharacters = "-_~%=&+"
+            var rest = text.startIndex..<text.endIndex
+            while let found = text.range(of: bare, options: .caseInsensitive, range: rest) {
+                rest = found.upperBound..<text.endIndex
+                var start = found.lowerBound
+                for prefix in ["www.", "https://", "http://"]
+                where text[..<start].suffix(prefix.count).lowercased() == prefix {
+                    start = text.index(start, offsetBy: -prefix.count)
+                }
+                if let before = text[..<start].last,
+                   before.isLetter || before.isNumber || "./-".contains(before) {
+                    continue
+                }
+                let after = text[found.upperBound...]
+                guard let next = after.first else { return true }
+                if next == "/" {
+                    let following = after.dropFirst().first
+                    if following == nil
+                        || !(following!.isLetter || following!.isNumber
+                             || linkCharacters.contains(following!)) {
+                        return true
+                    }
+                } else if next == "." {
+                    let following = after.dropFirst().first
+                    if following == nil || !(following!.isLetter || following!.isNumber) {
+                        return true
+                    }
+                } else if !(next.isLetter || next.isNumber || linkCharacters.contains(next)) {
+                    return true
+                }
+            }
+            return false
+        }
+
+        /// Whether the model could have the address from the research or the
+        /// question: it was in a search result, in the text of a page read or
+        /// of the question, or is a source. An address it wrote without that
+        /// is its own guess.
+        func hasSeen(url: String) -> Bool {
+            let key = Self.pageKey(url, offset: 0)
+            if resultURLs.joined().contains(where: { Self.pageKey($0, offset: 0) == key })
+                || sources.contains(where: { Self.pageKey($0.url, offset: 0) == key }) {
+                return true
+            }
+            var bare = url.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let hash = bare.firstIndex(of: "#") { bare = String(bare[..<hash]) }
+            return Self.mentions(question, address: bare)
+                || pageTexts.values.contains { Self.mentions($0, address: bare) }
         }
 
         /// Web links from the searches: the first hit of every search, then
@@ -1763,14 +1992,33 @@ public struct ResearchAgent: Sendable {
         /// The prompt's size in characters: every message's text and tool
         /// calls, plus `overhead` for what each request carries besides.
         func size(overhead: Int = 0) -> Int {
-            messages.reduce(overhead) { total, message in
-                let calls = (message["tool_calls"]?.arrayValue ?? []).reduce(0) { sum, call in
-                    sum + (call["function"]?["name"]?.stringValue?.count ?? 0)
-                        + (call["function"]?["arguments"]?.stringValue?.count ?? 0) + 32
-                }
-                return total + (message["content"]?.stringValue?.count ?? 0)
-                    + (message["reasoning_content"]?.stringValue?.count ?? 0) + calls + 64
+            messages.reduce(overhead) { total, message in total + Self.characters(of: message) }
+        }
+
+        /// One message's share of `size`.
+        static func characters(of message: ResearchJSON) -> Int {
+            let calls = (message["tool_calls"]?.arrayValue ?? []).reduce(0) { sum, call in
+                sum + (call["function"]?["name"]?.stringValue?.count ?? 0)
+                    + (call["function"]?["arguments"]?.stringValue?.count ?? 0) + 32
             }
+            return (message["content"]?.stringValue?.count ?? 0)
+                + (message["reasoning_content"]?.stringValue?.count ?? 0) + calls + 64
+        }
+
+        /// What the messages after the first `count` add to the prompt, in the
+        /// units of `size`: tool results, and the assistant's own text,
+        /// reasoning and tool calls.
+        func addedCharacters(since count: Int) -> (tool: Int, assistant: Int) {
+            var tool = 0
+            var assistant = 0
+            for message in messages.dropFirst(count) {
+                switch message["role"]?.stringValue {
+                case "tool": tool += Self.characters(of: message)
+                case "assistant": assistant += Self.characters(of: message)
+                default: break
+                }
+            }
+            return (tool, assistant)
         }
 
         static let compactedPreviewCharacters = 400

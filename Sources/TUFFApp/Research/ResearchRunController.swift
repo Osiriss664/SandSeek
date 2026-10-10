@@ -310,6 +310,15 @@ public final class ResearchRunController {
                    started: started)
         case .continuingCutOffAnswer:
             append(.turn, "Answer hit the token limit; asking it to continue", started: started)
+        case .keepingCutOffAnswerNoRoom:
+            append(.turn, "Answer hit the token limit; the request to continue would not fit, keeping the cut-off answer",
+                   started: started)
+        case .droppingRestartedContinuation:
+            append(.turn, "The continuation started the answer over; dropping it and keeping the cut-off answer",
+                   started: started)
+        case .stepSize:
+            // A measurement for the command line's progress; not worth a line per step here.
+            break
         case .retryingAfterModelError:
             append(.turn, "Model error while thinking; asking again without thinking",
                    started: started)

@@ -418,7 +418,23 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
   page address is compared without its `#fragment`, a trailing `/` and the
   case of the host, and a redirect counts under both addresses. A different
   offset is a new read. That model is then not asked to
-  look wider (below). A model that spends two steps in a row doing nothing but
+  look wider (below).
+  An address the model made up (it was in no search
+  result, no page read and not in the question) that the sandbox redirects to another site, to
+  another path or to the home page is not the page asked for: it is not a
+  source, its text is not shown, and the model is told the address redirected
+  elsewhere. Redirects from http to https, with or without `www.`, with a
+  trailing slash, a query, another case, or to a longer path under the same
+  path on the same site (a canonical slug) are normal and change nothing; an
+  address from a search result, a page text or the question (also written
+  without scheme or `www.`) keeps its redirect. Such a page
+  counts only under the address asked for, so the real page can still be opened; asking for the same address again
+  gets the same answer.
+  The command-line progress also shows, per step with tool calls, how many
+  characters the step added to the conversation (tool results and assistant
+  text) and the conversation's size against the prompt budget. It measures why
+  older results get shortened so often and changes nothing.
+  A model that spends two steps in a row doing nothing but
   repeating searches it already ran (Qwen did from step 25
   of a 40-step run, wasting the rest) is stopped there and asked for its final
   answer, as if the step budget had run out. Refused page opens count as
@@ -497,6 +513,16 @@ Scripts/test.sh --filter TUFFResearch                     # loop, with fake serv
   the continuation starts with a list or heading marker. The answer counts as
   cut off only if the continuation stopped at the limit as well. If the
   continuation is empty or fails, the cut-off text is kept, marked as cut off.
+  The request is only sent if the conversation with it fits the model's
+  context window (the prompt budget without its speed cap; a fixed `--context-chars`
+  budget or an unknown window uses the prompt budget);
+  if not, the cut-off answer is kept as it is ("the request to continue would
+  not fit the context" in the progress). A context overflow during the
+  continuation never shortens the cut-off answer itself (in the Berlin run
+  that cut it to 600 characters and the model started over). If the
+  continuation begins with the answer's own first line (ignoring case and
+  spacing), the model started over: the continuation is dropped and the answer
+  stays marked as cut off.
   A stopped run is not asked. A continuation runs once, and an answer that was
   cut off is not revised afterwards, since a longer rewrite would be cut off
   again.

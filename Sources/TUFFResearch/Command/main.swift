@@ -91,6 +91,11 @@ let agent = ResearchAgent(
         case .askingForCitations: writeProgress("    answer lacks source numbers; asking for citations")
         case .askingForAnswerLanguage: writeProgress("    answer is not in the language asked for; asking for a rewrite")
         case .continuingCutOffAnswer: writeProgress("    answer hit the token limit; asking it to continue")
+        case .keepingCutOffAnswerNoRoom: writeProgress("    answer hit the token limit; the request to continue would not fit the context, keeping the cut-off answer")
+        case .droppingRestartedContinuation: writeProgress("    the continuation started the answer over; dropping it and keeping the cut-off answer")
+        case .stepSize(let step, let tool, let assistant, let conversation, let budget):
+            writeProgress("    step \(step) added \(tool + assistant) characters "
+                + "(tool results \(tool), assistant \(assistant)); conversation \(conversation) of \(budget)")
         case .retryingAfterModelError: writeProgress("    model error while thinking; asking again without thinking")
         case .retryingAfterModelErrorAgain: writeProgress("    model error; asking once more")
         case .stoppingRepeatedSearches: writeProgress("    only repeated searches or pages; stopping and asking for the answer")

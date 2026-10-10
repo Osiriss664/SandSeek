@@ -224,7 +224,11 @@ private final class EventLog: @unchecked Sendable {
     private let lock = NSLock()
     private var stored: [ResearchEvent] = []
     func append(_ event: ResearchEvent) { lock.withLock { stored.append(event) } }
-    var events: [ResearchEvent] { lock.withLock { stored } }
+    /// The events without the per-step size measurements, which carry numbers.
+    var events: [ResearchEvent] {
+        lock.withLock { stored }.filter { if case .stepSize = $0 { false } else { true } }
+    }
+    var allEvents: [ResearchEvent] { lock.withLock { stored } }
 }
 
 private final class SearchAttempts: @unchecked Sendable {
@@ -1014,7 +1018,7 @@ struct ResearchAgentTests {
         #expect(continued.last?["content"]?.stringValue == ResearchAgent.continueCutOffRequest)
     }
 
-    @Test func aCutOffAnswerOverBudgetIsContinuedWithoutShorteningTheHistory() async throws {
+    @Test func aCutOffAnswerThatDoesNotFitIsNotContinued() async throws {
         var options = ResearchOptions()
         options.nudges = false
         // Far below the size of the tool definitions: every request is over budget.
@@ -1025,14 +1029,123 @@ struct ResearchAgentTests {
             FakeServices.answer("Es gab 350 Sitze [1] und", finishReason: "length"),
             FakeServices.answer(" mehr [1]."),
         ])
-        let report = try await agent(services, options: options).run(question: "q")
+        let log = EventLog()
+        let report = try await agent(services, options: options, events: log)
+            .run(question: "q")
+        // The request to continue is not sent; the cut-off answer stays as it is.
+        #expect(report.answer == "Es gab 350 Sitze [1] und")
+        #expect(report.answerCutOff)
+        #expect(services.modelRequests.count == 2)
+        #expect(log.events.contains(.keepingCutOffAnswerNoRoom))
+        #expect(!log.events.contains(.continuingCutOffAnswer))
+    }
+
+    @Test func aCutOffAnswerThatFitsIsContinuedWithoutShorteningTheHistory() async throws {
+        var options = ResearchOptions()
+        options.nudges = false
+        options.contextBudgetCharacters = 20_000
+        let services = pageServices(Self.spainPage, replies: [
+            callsWithReasoning("a", "first reasoning", name: "open_page",
+                               arguments: #"{"url":"https://github.com/apple/container"}"#),
+            FakeServices.answer("Es gab 350 Sitze [1] und", finishReason: "length"),
+            FakeServices.answer(" mehr [1]."),
+        ])
+        let log = EventLog()
+        let report = try await agent(services, options: options, events: log)
+            .run(question: "q")
         #expect(report.answer == "Es gab 350 Sitze [1] und mehr [1].")
         let requests = services.modelRequests
         #expect(requests.count == 3)
         expectHistoryGrows(requests, from: 1)
+        #expect(log.events.contains(.continuingCutOffAnswer))
+        #expect(!log.events.contains(.keepingCutOffAnswerNoRoom))
         // The earlier turn keeps its reasoning in the continuation request.
         let reasoning = messages(requests[2]).compactMap { $0["reasoning_content"]?.stringValue }
         #expect(reasoning == ["first reasoning"])
+    }
+
+    @Test func aContextOverflowDuringTheContinuationNeverShortensTheCutOffAnswer() async throws {
+        var options = ResearchOptions()
+        options.nudges = false
+        let longAnswer = String(repeating: "Es gab 350 Sitze im Parlament [1]. ", count: 30)
+        let overflow = FakeServices.json(400, .object(["error": .object([
+            "message": .string("too long"), "code": .string("context_length_exceeded"),
+        ])]))
+        let services = pageServices(Self.spainPage, replies: [
+            openContainerPage,
+            FakeServices.answer(longAnswer, finishReason: "length"),
+            overflow, overflow, overflow,
+        ])
+        let report = try await agent(services, options: options).run(question: "q")
+        // The request failed twice; the third try, which would shorten the
+        // cut-off answer to a few hundred characters, is never sent.
+        #expect(services.modelRequests.count == 4)
+        #expect(report.answer == longAnswer)
+        #expect(report.answerCutOff)
+        let cutOff = messages(try #require(services.modelRequests.last))
+            .filter { $0["role"] == .string("assistant") }.last
+        #expect(cutOff?["content"]?.stringValue == longAnswer)
+    }
+
+    @Test func aContinuationThatStartsOverIsDropped() async throws {
+        var options = ResearchOptions()
+        options.nudges = false
+        let services = pageServices(Self.spainPage, replies: [
+            openContainerPage,
+            FakeServices.answer("Die Antwort lautet:\n\nEs gab 350 Sitze [1] und",
+                                finishReason: "length"),
+            FakeServices.answer("  die   ANTWORT lautet:\n\nEs gab 350 Sitze [1] und mehr [1]."),
+        ])
+        let log = EventLog()
+        let report = try await agent(services, options: options, events: log)
+            .run(question: "q")
+        #expect(report.answer == "Die Antwort lautet:\n\nEs gab 350 Sitze [1] und")
+        #expect(report.answerCutOff)
+        #expect(log.events.contains(.droppingRestartedContinuation))
+    }
+
+    @Test func aContinuationIsTakenAsARestartOnlyWhenItsFirstLineRepeatsTheAnswers() {
+        #expect(ResearchAgent.startsOver("# Titel\nText", with: "\n\n#  titel\nText"))
+        #expect(ResearchAgent.startsOver("Berlin ist groß", with: "berlin IST groß\nmehr"))
+        #expect(!ResearchAgent.startsOver("Berlin ist gr", with: "oß und hat 3,7 Mio. Menschen."))
+        #expect(!ResearchAgent.startsOver("Titel\nText", with: "Text\nweiter"))
+        #expect(!ResearchAgent.startsOver("", with: ""))
+        #expect(!ResearchAgent.startsOver("Titel", with: " \n "))
+    }
+
+    @Test func eachStepReportsWhatItAddedToTheConversation() async throws {
+        var options = ResearchOptions()
+        options.nudges = false
+        let services = pageServices(Self.spainPage, replies: [
+            openContainerPage,
+            FakeServices.answer("Es gab 350 Sitze [1]."),
+        ])
+        let log = EventLog()
+        _ = try await agent(services, options: options, events: log).run(question: "q")
+        let sizes = log.allEvents.compactMap { event -> (Int, Int, Int, Int, Int)? in
+            if case .stepSize(let step, let tool, let assistant, let conversation, let budget) = event {
+                return (step, tool, assistant, conversation, budget)
+            }
+            return nil
+        }
+        #expect(sizes.count == 1)
+        let size = try #require(sizes.first)
+        #expect(size.0 == 1)
+        // The page and the progress line, and the tool call.
+        #expect(size.1 > Self.spainPage.count)
+        #expect(size.2 > 0)
+        #expect(size.3 > size.1 + size.2)
+        #expect(size.4 == ResearchOptions.fallbackBudgetCharacters)
+
+        var state = ResearchAgent.State(question: "q")
+        state.messages = [
+            .object(["role": .string("user"), "content": .string("q")]),
+            .object(["role": .string("assistant"), "content": .string("abc")]),
+            .object(["role": .string("tool"), "content": .string("12345")]),
+        ]
+        let added = state.addedCharacters(since: 1)
+        #expect(added.assistant == 3 + 64)
+        #expect(added.tool == 5 + 64)
     }
 
     private static let uncitedAnswer = "Sumar kommt auf 12 Prozent der Stimmen. "
@@ -2077,18 +2190,194 @@ struct ResearchAgentTests {
 
         // A redirect is remembered under both addresses.
         let redirected = FakeServices(modelReplies: [
-            FakeServices.calls([("a", "open_page", #"{"url":"https://short.example/x"}"#)]),
-            FakeServices.calls([("b", "open_page", #"{"url":"https://long.example/article"}"#)]),
+            FakeServices.calls([("a", "open_page", #"{"url":"http://short.example/x"}"#)]),
+            FakeServices.calls([("b", "open_page", #"{"url":"https://short.example/x"}"#)]),
             FakeServices.answer("Done [1]."), FakeServices.answer("Done [1]."),
         ]) { path, body in
             guard path == "/v1/fetch" else { return FakeServices.webPages(path, body) }
             return FakeServices.json(200, .object([
-                "url": .string("https://long.example/article"), "title": .string("Article"),
+                "url": .string("https://short.example/x"), "title": .string("Article"),
                 "text": .string("Text."), "offset": .integer(0), "total_chars": .integer(5),
             ]))
         }
         _ = try await agent(redirected).run(question: "q")
         #expect(Self.fetches(redirected) == 1)
+    }
+
+    @Test func redirectsOfAddressesTheModelMadeUp() {
+        let same = ResearchAgent.Redirect.same
+        let page = "https://example.org/news/berlin"
+        // Normal redirects: scheme, www., trailing slash, case of the host, query, fragment.
+        #expect(ResearchAgent.redirect(from: "http://example.org/news/berlin", to: page) == same)
+        #expect(ResearchAgent.redirect(from: "https://www.example.org/news/berlin", to: page) == same)
+        #expect(ResearchAgent.redirect(from: page, to: "https://www.example.org/news/berlin") == same)
+        #expect(ResearchAgent.redirect(from: page, to: "https://example.org/news/berlin/") == same)
+        #expect(ResearchAgent.redirect(from: "https://Example.ORG/news/berlin", to: page) == same)
+        #expect(ResearchAgent.redirect(from: page, to: page + "?utm_source=x#top") == same)
+        #expect(ResearchAgent.redirect(from: "http://example.org:80/news/berlin", to: page) == same)
+        #expect(ResearchAgent.redirect(from: "https://example.org", to: "https://www.example.org/") == same)
+        // Another site, or another path on the same site.
+        #expect(ResearchAgent.redirect(from: page, to: "https://news.example.com/news/berlin") == .elsewhere)
+        #expect(ResearchAgent.redirect(from: page, to: "https://en.example.org/news/berlin") == .elsewhere)
+        #expect(ResearchAgent.redirect(from: page, to: "https://example.org/news/king-charles") == .elsewhere)
+        #expect(ResearchAgent.redirect(from: page, to: "https://example.org/news") == .elsewhere)
+        #expect(ResearchAgent.redirect(from: page, to: "https://example.org/other/path") == .elsewhere)
+        #expect(ResearchAgent.redirect(from: page, to: "https://example.org/news/berlin2") == .elsewhere)
+        // A canonical slug under the path, or a bare domain's landing page, is normal.
+        #expect(ResearchAgent.redirect(from: page, to: "https://example.org/news/berlin/2026-slug") == same)
+        #expect(ResearchAgent.redirect(from: "https://example.org", to: "https://example.org/about") == same)
+        #expect(ResearchAgent.redirect(from: "https://example.org.", to: "https://example.org/") == same)
+        #expect(ResearchAgent.redirect(from: "https://bücher.example/a", to: "https://xn--bcher-kva.example/b") == same)
+        // The home page, when the page asked for was not.
+        #expect(ResearchAgent.redirect(from: page, to: "https://example.org/") == .homePage)
+        #expect(ResearchAgent.redirect(from: page, to: "https://example.org") == .homePage)
+        #expect(ResearchAgent.redirect(from: page, to: "https://other.example/") == .homePage)
+        // An address that cannot be read is taken as unchanged.
+        #expect(ResearchAgent.redirect(from: "not a url", to: page) == same)
+        #expect(ResearchAgent.redirect(from: page, to: "") == same)
+    }
+
+    @Test func aMadeUpAddressThatRedirectsElsewhereIsNoSource() async throws {
+        var options = ResearchOptions()
+        options.nudges = false
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "open_page", #"{"url":"https://made-up.example/berlin-2026"}"#)]),
+            FakeServices.answer("Ohne Quelle."),
+        ]) { path, body in
+            guard path == "/v1/fetch" else { return FakeServices.webPages(path, body) }
+            return FakeServices.json(200, .object([
+                "url": .string("https://news.example/king-charles"), "title": .string("King Charles"),
+                "text": .string("King Charles visited."), "offset": .integer(0),
+                "total_chars": .integer(21),
+            ]))
+        }
+        let log = EventLog()
+        let report = try await agent(services, options: options, events: log).run(question: "q")
+        #expect(report.sources.isEmpty)
+        #expect(report.noPagesRead)
+        let lastRequest = try #require(services.modelRequests.last)
+        let result = try #require(messages(lastRequest)
+            .last { $0["role"] == .string("tool") }?["content"]?.stringValue)
+        #expect(result.contains("https://made-up.example/berlin-2026"))
+        #expect(result.contains("https://news.example/king-charles"))
+        #expect(result.contains("does not match"))
+        #expect(result.contains("not counted as a source"))
+        #expect(!result.contains("Source [1]"))
+        #expect(!result.contains("King Charles visited."))
+        #expect(log.events.contains { if case .toolFailed = $0 { true } else { false } })
+
+        // A redirect to the home page is the same as not found.
+        let home = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "open_page", #"{"url":"https://made-up.example/berlin-2026"}"#)]),
+            FakeServices.answer("Ohne Quelle."),
+        ]) { path, body in
+            guard path == "/v1/fetch" else { return FakeServices.webPages(path, body) }
+            return FakeServices.json(200, .object([
+                "url": .string("https://made-up.example/"), "title": .string("Home"),
+                "text": .string("Welcome."), "offset": .integer(0), "total_chars": .integer(8),
+            ]))
+        }
+        let homeReport = try await agent(home, options: options).run(question: "q")
+        #expect(homeReport.sources.isEmpty)
+        let homeRequest = try #require(home.modelRequests.last)
+        let homeResult = try #require(messages(homeRequest)
+            .last { $0["role"] == .string("tool") }?["content"]?.stringValue)
+        #expect(homeResult.contains("home page"))
+        #expect(homeResult.contains("not found"))
+    }
+
+    @Test func aRejectedAddressAskedAgainGetsTheSameAnswer() async throws {
+        var options = ResearchOptions()
+        options.nudges = false
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "open_page", #"{"url":"https://made-up.example/x"}"#)]),
+            FakeServices.calls([("b", "open_page", #"{"url":"https://made-up.example/x"}"#)]),
+            FakeServices.answer("Ohne Quelle."),
+        ]) { path, body in
+            guard path == "/v1/fetch" else { return FakeServices.webPages(path, body) }
+            return FakeServices.json(200, .object([
+                "url": .string("https://news.example/other"), "title": .string("Other"),
+                "text": .string("Other."), "offset": .integer(0), "total_chars": .integer(6),
+            ]))
+        }
+        let report = try await agent(services, options: options).run(question: "q")
+        #expect(report.sources.isEmpty)
+        #expect(Self.fetches(services) == 1)
+        let lastRequest = try #require(services.modelRequests.last)
+        let results = messages(lastRequest).filter { $0["role"] == .string("tool") }
+            .compactMap { $0["content"]?.stringValue }
+        #expect(results.count == 2)
+        #expect(results[1].contains("does not match"))
+        #expect(!results[1].contains("already read"))
+    }
+
+    @Test func aRejectedPageDoesNotBlockTheRealPageLater() async throws {
+        var options = ResearchOptions()
+        options.nudges = false
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "open_page", #"{"url":"https://made-up.example/x"}"#)]),
+            FakeServices.calls([("b", "open_page", #"{"url":"https://real.example/y"}"#)]),
+            FakeServices.answer("Done [1]."), FakeServices.answer("Done [1]."),
+        ]) { path, body in
+            guard path == "/v1/fetch" else { return FakeServices.webPages(path, body) }
+            let asked = body?["url"]?.stringValue ?? ""
+            return FakeServices.json(200, .object([
+                "url": .string(asked.contains("made-up") ? "https://real.example/y" : asked),
+                "title": .string("Real"), "text": .string("Real text."),
+                "offset": .integer(0), "total_chars": .integer(10),
+            ]))
+        }
+        let report = try await agent(services, options: options).run(question: "q")
+        // The first address led to a page nobody had seen listed; it is no source,
+        // and the same page asked for by its own address is read and counted.
+        #expect(report.sources.map(\.url) == ["https://real.example/y"])
+        #expect(report.sources.map(\.number) == [1])
+    }
+
+    @Test func addressesFromSearchResultsOrPageTextKeepTheirRedirects() async throws {
+        var options = ResearchOptions()
+        options.nudges = false
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"apple container"}"#)]),
+            FakeServices.calls([("b", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
+            FakeServices.calls([("c", "open_page", #"{"url":"https://deep.example/a/b"}"#)]),
+            FakeServices.answer("Done [1][2]."), FakeServices.answer("Done [1][2]."),
+        ]) { path, body in
+            guard path == "/v1/fetch" else { return FakeServices.webPages(path, body) }
+            let asked = body?["url"]?.stringValue ?? ""
+            let text = asked.contains("github")
+                ? "More at https://deep.example/a/b today." : "Deep text."
+            return FakeServices.json(200, .object([
+                "url": .string(asked.contains("github")
+                    ? "https://github.com/apple/container" : "https://moved.example/elsewhere"),
+                "title": .string("Page"), "text": .string(text),
+                "offset": .integer(0), "total_chars": .integer(text.count),
+            ]))
+        }
+        let report = try await agent(services, options: options).run(question: "q")
+        // The second address was in the first page's text, so its redirect counts as before.
+        #expect(report.sources.map(\.url) == [
+            "https://github.com/apple/container", "https://moved.example/elsewhere",
+        ])
+
+        var state = ResearchAgent.State(question: "q")
+        state.resultURLs = [["https://a.example/Result/"]]
+        #expect(state.hasSeen(url: "https://A.example/Result"))
+        #expect(state.hasSeen(url: "https://a.example/Result#part"))
+        #expect(!state.hasSeen(url: "https://a.example/other"))
+        state.pageTexts = [1: "see https://b.example/Page/One for more"]
+        #expect(state.hasSeen(url: "https://b.example/page/one/"))
+        #expect(!state.hasSeen(url: "https://b.example/page"))
+        // Links written without scheme or www., or in the question.
+        state.pageTexts = [1: "DOI doi.org/10.1000/xyz. Report: www.example.org/report/ and notexample.org/a"]
+        #expect(state.hasSeen(url: "https://doi.org/10.1000/xyz"))
+        #expect(state.hasSeen(url: "http://example.org/report"))
+        #expect(!state.hasSeen(url: "https://example.org/a"))
+        #expect(!state.hasSeen(url: "https://sub.doi.org/10.1000/xyz"))
+        var asked = ResearchAgent.State(question: "Lies https://fromquestion.example/doc bitte")
+        #expect(asked.hasSeen(url: "https://fromquestion.example/doc"))
+        asked.pageTexts = [:]
+        #expect(!asked.hasSeen(url: "https://fromquestion.example/doc2"))
     }
 
     @Test func aPageMayBeReadOnceMoreAfterOlderResultsWereShortened() async {
@@ -2408,10 +2697,13 @@ struct ResearchAgentTests {
         state.contextTokens = 1_000_000
         state.charactersPerToken = 4
         #expect(agent.promptBudget(state) == ResearchAgent.largestBudgetCharacters)
+        // Continuing a cut-off answer checks the whole window, without the speed cap.
+        #expect(agent.contextLimit(state) > agent.promptBudget(state))
         var fixed = ResearchOptions()
         fixed.contextBudgetCharacters = 5_000
-        #expect(ResearchAgent(chat: chat, sandbox: agent.sandbox, options: fixed)
-            .promptBudget(state) == 5_000)
+        let fixedAgent = ResearchAgent(chat: chat, sandbox: agent.sandbox, options: fixed)
+        #expect(fixedAgent.promptBudget(state) == 5_000)
+        #expect(fixedAgent.contextLimit(state) == 5_000)
     }
 
     @Test func aLongRunShortensOldPagesToFitTheListedContext() async throws {
