@@ -1,5 +1,5 @@
 {
-  "_note": "A prompt longer than any context window, to record the context error. The script pads the last user message to about 600,000 characters (far over a 16k-token window, under TUFF's 5 MiB request limit) and removes both underscore keys. TUFF starts the stream first and sends the error inside it; record it once with the model loaded and once with the server idle.",
+  "_note": "A prompt longer than any context window, to record the context error. The script pads the last user message to about 600,000 characters (far over a 16k-token window, under TUFF's 5 MiB request limit) and removes both underscore keys. TUFF 8.3.1 sends this error inside the stream only while the request is queued behind another running request (the stream starts at once, with `: ping` heartbeats). On an idle server, and on one that has the model loaded but is not busy, the over-long prompt is refused before the stream with a plain HTTP 400 JSON body. So record the in-stream error with: Scripts/record_stream.py --while-busy Tests/Fixtures/requests/long_generation.json Tests/Fixtures/requests/context_error.json context_error.sse -- and record the idle case separately, named as the refusal before the stream.",
   "_pad_last_user_message_chars": 600000,
   "model": "default",
   "messages": [

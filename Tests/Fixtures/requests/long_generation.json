@@ -1,0 +1,10 @@
+{
+  "_note": "A request that generates for a long time, for Scripts/record_stream.py --while-busy: it keeps the server busy so that the recorded request is queued. Its reply is thrown away and its connection is cut when the recording is done.",
+  "model": "default",
+  "messages": [
+    {"role": "system", "content": "You are a careful assistant."},
+    {"role": "user", "content": "Write a very long, detailed essay of at least 3000 words about the history of heat pumps, with a numbered section for every decade."}
+  ],
+  "max_tokens": 8192,
+  "enable_thinking": false
+}

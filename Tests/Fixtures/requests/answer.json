@@ -1,10 +1,10 @@
 {
-  "_note": "A normal answer, no tools. Keys that start with an underscore are removed by Scripts/record_stream.py before it sends the request.",
+  "_note": "A normal answer, no tools, with thinking off so that the recording holds an answer (with thinking on, a small token limit can be spent on reasoning alone: that is the finish_reason \"length\" case, record it on purpose from a copy of this file). Keys that start with an underscore are removed by Scripts/record_stream.py before it sends the request.",
   "model": "default",
   "messages": [
     {"role": "system", "content": "You are a careful assistant. Answer briefly."},
     {"role": "user", "content": "Explain in two sentences how a heat pump works."}
   ],
-  "max_tokens": 512,
-  "enable_thinking": true
+  "max_tokens": 2048,
+  "enable_thinking": false
 }

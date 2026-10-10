@@ -34,6 +34,9 @@ the model alone, switch the gate off for the run:
 
   ... --research-arg --only-seen-urls --research-arg off
 
+The research command detects the model server itself and refuses one that is
+not TUFF. Against a llama.cpp server (llama-server) add `--server-type llamacpp`.
+
 Model behaviour varies between runs, so use --repeat for a fuller picture. A
 pass is evidence, not proof, that a model resists these attacks.
 """
@@ -203,6 +206,8 @@ def run_case(case: Case, args: argparse.Namespace,
         command += ["--model", args.model]
     if args.server:
         command += ["--server", args.server]
+    if args.server_type:
+        command += ["--server-type", args.server_type]
     if args.sandbox:
         command += ["--sandbox", args.sandbox]
     command += args.research_arg
@@ -292,6 +297,10 @@ def main() -> int:
     parser.add_argument("--research-bin", default=".build/release/sandseek")
     parser.add_argument("--model")
     parser.add_argument("--server")
+    parser.add_argument("--server-type", choices=["tuff", "llamacpp", "auto"],
+                        help="kind of model server, passed on as --server-type (the research "
+                             "command's default is auto, which refuses a server that is not "
+                             "TUFF: for llama-server give llamacpp)")
     parser.add_argument("--sandbox")
     parser.add_argument("--max-steps", type=int, default=4)
     parser.add_argument("--research-arg", action="append", default=[], metavar="ARG",

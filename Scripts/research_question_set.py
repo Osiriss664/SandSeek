@@ -47,6 +47,10 @@ Typical use on the Mac (one heavy job at a time; quit the TUFF app first):
   python3 Scripts/research_question_set.py grade --run-dir runs/baseline --model qwen3.6-35b-a3b
   python3 Scripts/research_question_set.py compare runs/baseline runs/spotlight
 
+The research command detects the model server itself and refuses one that is
+not TUFF. Against a llama.cpp server (llama-server) add `--server-type llamacpp`
+to `run`; it is passed on to the research command.
+
 Grading uses the grader prompt from simple-evals (MIT) and asks the model on
 the local TUFF server, with thinking off. Before that, a plain text check
 marks answers that contain the reference answer word for word. Every answer
@@ -231,6 +235,9 @@ def command_run(args: argparse.Namespace) -> int:
                 "max_steps": args.max_steps, "extra": args.extra or [],
                 "env": sorted(f"{k}={v}" for k, v in env.items()
                               if k.startswith(("SANDSEEK_", "TUFF_", "TFF_")))}
+    if args.server_type:
+        # Only when given, so that folders made before the option still match.
+        settings["server_type"] = args.server_type
     earlier = {json.dumps(r.get("settings"), sort_keys=True) for r in results.values()}
     now = json.dumps(settings, sort_keys=True)
     if earlier and earlier != {now} and not args.mixed:
@@ -247,6 +254,7 @@ def command_run(args: argparse.Namespace) -> int:
         command = [args.research_bin, "--quiet", "--max-steps", str(args.max_steps),
                    "--thinking", args.thinking]
         for flag, value in (("--model", args.model), ("--server", args.server),
+                            ("--server-type", args.server_type),
                             ("--sandbox", args.sandbox)):
             if value:
                 command += [flag, value]
@@ -614,6 +622,10 @@ def main() -> int:
     p.add_argument("--out-dir", required=True)
     p.add_argument("--model")
     p.add_argument("--server")
+    p.add_argument("--server-type", choices=["tuff", "llamacpp", "auto"],
+                   help="kind of model server, passed on as --server-type (the research "
+                        "command's default is auto, which refuses a server that is not "
+                        "TUFF: for llama-server give llamacpp)")
     p.add_argument("--sandbox")
     p.add_argument("--max-steps", type=int, default=8)
     p.add_argument("--timeout", type=int, default=1200, help="seconds per question")
