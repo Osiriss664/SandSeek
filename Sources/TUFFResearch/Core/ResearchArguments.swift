@@ -98,6 +98,11 @@ public struct ResearchArguments: Equatable, Sendable {
     /// Not an option and not shown in the app.
     public static let preserveThinkingVariable = "TUFF_RESEARCH_PRESERVE_THINKING"
 
+    /// The environment variable that chooses the markers around web text, for
+    /// comparing them on a Mac: `fixed` (the default, the same in every run)
+    /// or `nonce` (a random code per run). Not an option and not shown in the app.
+    public static let markersVariable = "TUFF_RESEARCH_MARKERS"
+
     public static func parse(_ arguments: [String],
                              environment: [String: String] = ProcessInfo.processInfo.environment
     ) throws -> ResearchArguments {
@@ -109,6 +114,12 @@ public struct ResearchArguments: Equatable, Sendable {
                     "\(preserveThinkingVariable) must be on, off or auto")
             }
             parsed.options.preserveThinking = mode
+        }
+        if let text = environment[markersVariable], !text.isEmpty {
+            guard let mode = ResearchMarkerMode(rawValue: text.lowercased()) else {
+                throw ResearchArgumentError("\(markersVariable) must be fixed or nonce")
+            }
+            parsed.options.markers = mode
         }
         var words: [String] = []
         var index = 0
