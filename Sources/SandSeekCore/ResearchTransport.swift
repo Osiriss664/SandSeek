@@ -13,6 +13,64 @@ public struct ResearchHTTPResponse: Equatable, Sendable {
     }
 }
 
+/// The start of a streamed reply: the HTTP status, known as soon as the
+/// headers arrive, and the body as it comes, one text line at a time. A line
+/// holds no line terminator, and an empty line may or may not appear.
+///
+/// The stream ends when the server has sent everything. If the request fails
+/// on the way (the time limit, a lost connection) the stream throws that
+/// error. When the consuming task is cancelled, or the consumer stops reading
+/// and drops the stream, the transport cancels the request and closes the
+/// connection.
+public struct ResearchHTTPLineResponse: Sendable {
+    public let status: Int
+    public let lines: AsyncThrowingStream<String, any Error>
+
+    public init(status: Int, lines: AsyncThrowingStream<String, any Error>) {
+        self.status = status
+        self.lines = lines
+    }
+
+    /// A reply that is already complete, such as a test fixture or the body
+    /// of a transport that cannot stream: its text split into lines.
+    public init(status: Int, body: Data) {
+        let lines = Self.splitLines(String(decoding: body, as: UTF8.self))
+        self.init(status: status, lines: AsyncThrowingStream<String, any Error> { continuation in
+            for line in lines { continuation.yield(line) }
+            continuation.finish()
+        })
+    }
+
+    /// Splits at "\n", "\r\n" and "\r", the line ends of server-sent events,
+    /// and nowhere else: JSON text may hold U+2028 or U+0085, which other
+    /// splitters treat as a line end. A final line needs no terminator.
+    static func splitLines(_ text: String) -> [String] {
+        var lines: [String] = []
+        var current = String.UnicodeScalarView()
+        var skipLineFeed = false
+        for scalar in text.unicodeScalars {
+            switch scalar {
+            case "\n":
+                if skipLineFeed {
+                    skipLineFeed = false
+                } else {
+                    lines.append(String(current))
+                    current = String.UnicodeScalarView()
+                }
+            case "\r":
+                lines.append(String(current))
+                current = String.UnicodeScalarView()
+                skipLineFeed = true
+            default:
+                skipLineFeed = false
+                current.append(scalar)
+            }
+        }
+        if !current.isEmpty { lines.append(String(current)) }
+        return lines
+    }
+}
+
 /// One JSON POST or GET to a loopback service. Tests replace it with a fake;
 /// the command uses `URLSessionResearchTransport`.
 public protocol ResearchHTTPTransport: Sendable {
@@ -21,12 +79,27 @@ public protocol ResearchHTTPTransport: Sendable {
     /// when that is sooner than the transport's own timeout.
     func send(method: String, url: URL, body: Data?,
               timeout: TimeInterval?) async throws -> ResearchHTTPResponse
+    /// The same request, answered as a stream of lines (server-sent events).
+    /// It returns as soon as the status is known. `timeout` counts from the
+    /// call and covers the whole reply, as it does for `send`: the stream
+    /// throws `URLError(.timedOut)` when it runs out.
+    func sendStreaming(method: String, url: URL, body: Data?,
+                       timeout: TimeInterval?) async throws -> ResearchHTTPLineResponse
 }
 
 public extension ResearchHTTPTransport {
     func send(method: String, url: URL, body: Data?,
               timeout: TimeInterval?) async throws -> ResearchHTTPResponse {
         try await send(method: method, url: url, body: body)
+    }
+
+    /// For a transport that cannot stream (every test fake): the whole reply
+    /// from `send`, split into lines. Nothing arrives before the reply is
+    /// complete, but the lines are the same ones a streaming transport gives.
+    func sendStreaming(method: String, url: URL, body: Data?,
+                       timeout: TimeInterval?) async throws -> ResearchHTTPLineResponse {
+        let response = try await send(method: method, url: url, body: body, timeout: timeout)
+        return ResearchHTTPLineResponse(status: response.status, body: response.body)
     }
 }
 
@@ -69,17 +142,122 @@ public struct URLSessionResearchTransport: ResearchHTTPTransport {
     }
 
     private func fetch(method: String, url: URL, body: Data?) async throws -> ResearchHTTPResponse {
+        let request = Self.makeRequest(method: method, url: url, body: body,
+                                       accept: "application/json")
+        let (data, response) = try await session.data(for: request)
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        return ResearchHTTPResponse(status: status, body: data)
+    }
+
+    private static func makeRequest(method: String, url: URL, body: Data?,
+                                    accept: String) -> URLRequest {
         var request = URLRequest(url: url)
         request.httpMethod = method
         if let body {
             request.httpBody = body
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        let (data, response) = try await session.data(for: request)
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        return ResearchHTTPResponse(status: status, body: data)
+        request.setValue(accept, forHTTPHeaderField: "Accept")
+        return request
     }
+
+    #if !canImport(FoundationNetworking)
+    /// Sends the request and gives the reply as lines while it arrives.
+    ///
+    /// Why this exists: TUFF notices that a client has hung up only when it
+    /// next writes to the connection. A request that waits for the whole
+    /// reply never gives it that chance, and TUFF goes on generating a reply
+    /// nobody reads. A streamed reply gives it one write per token and a
+    /// heartbeat every few seconds, so cancelling this call (the task is
+    /// cancelled, the consumer stops reading, the time limit runs out) closes
+    /// the connection and TUFF stops at its next write.
+    ///
+    /// Time limits. `timeout` is the thinking limit and runs from this call
+    /// to the last line, as in `send`. The session's request timeout stays
+    /// the step limit and is not changed for streaming: a reply may be silent
+    /// for minutes while the server reads in a long prompt (llama.cpp sends
+    /// nothing at all then), and that must never be cut off early. There is
+    /// no idle timer of our own.
+    public func sendStreaming(method: String, url: URL, body: Data?,
+                              timeout: TimeInterval?) async throws -> ResearchHTTPLineResponse {
+        let started = ContinuousClock.now
+        let request = Self.makeRequest(method: method, url: url, body: body,
+                                       accept: "text/event-stream")
+        let session = self.session
+        // Up to the headers, with the same task group as `send`. Cancelling
+        // the group's task cancels `bytes(for:)`.
+        let opened = try await Self.withinTimeLimit(timeout) {
+            let (bytes, response) = try await session.bytes(for: request)
+            return OpenedLines(lines: bytes.lines,
+                               status: (response as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        var remaining: TimeInterval?
+        if let timeout {
+            let elapsed = started.duration(to: .now)
+            let seconds = Double(elapsed.components.seconds)
+                + Double(elapsed.components.attoseconds) / 1e18
+            remaining = max(0, timeout - seconds)
+        }
+        let limit = remaining
+        let lines = AsyncThrowingStream<String, any Error> { continuation in
+            let reader = Task {
+                do {
+                    for try await line in opened.lines { continuation.yield(line) }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            // The time limit is a watchdog task and not a task group around
+            // the reader: it ends the stream at once even if the byte
+            // iterator is slow to react to cancellation.
+            let watchdog: Task<Void, Never>? = limit.map { limit in
+                Task {
+                    do {
+                        try await Task.sleep(nanoseconds: UInt64(limit * 1_000_000_000))
+                    } catch {
+                        return
+                    }
+                    continuation.finish(throwing: URLError(.timedOut))
+                    reader.cancel()
+                }
+            }
+            // The consumer stopped reading, was cancelled or saw the end:
+            // cancelling the reader cancels the request and closes the
+            // connection.
+            continuation.onTermination = { _ in
+                reader.cancel()
+                watchdog?.cancel()
+            }
+        }
+        return ResearchHTTPLineResponse(status: opened.status, lines: lines)
+    }
+
+    /// The lines of an open reply. `AsyncLineSequence` is not known to be
+    /// `Sendable`; this value is made once, then handed to the single task
+    /// that reads it, and never used anywhere else.
+    private struct OpenedLines: @unchecked Sendable {
+        let lines: AsyncLineSequence<URLSession.AsyncBytes>
+        let status: Int
+    }
+
+    private static func withinTimeLimit<T: Sendable>(
+        _ timeout: TimeInterval?,
+        _ operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        guard let timeout else { return try await operation() }
+        return try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask { try await operation() }
+            group.addTask {
+                try await Task.sleep(nanoseconds: UInt64(max(0, timeout) * 1_000_000_000))
+                throw URLError(.timedOut)
+            }
+            defer { group.cancelAll() }
+            guard let first = try await group.next() else { throw URLError(.timedOut) }
+            return first
+        }
+    }
+    #endif
 }
 
 public enum ResearchError: Error, Equatable, CustomStringConvertible {

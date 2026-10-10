@@ -44,17 +44,24 @@ public enum ResearchToolUse: Sendable {
 /// Talks to TUFF's OpenAI-compatible Chat Completions endpoint. It sends only
 /// fields TUFF accepts: the server refuses unknown keys, and it refuses
 /// `tool_choice=required` and `parallel_tool_calls=false`, so neither is used.
+///
+/// With `streaming` the reply is read as a stream (server-sent events) and
+/// put together by `ResearchStreamAssembler`; without it the request is the
+/// plain one-reply request the client has always sent. Streaming is what lets
+/// TUFF notice that the client hung up (see `URLSessionResearchTransport`).
 public struct ResearchChatClient: Sendable {
     public let endpoint: URL
     public let model: String
     public let maxTokens: Int
     public let enableThinking: Bool?
+    public let streaming: Bool
     private let transport: any ResearchHTTPTransport
 
     public init(serverURL: URL,
                 model: String,
                 maxTokens: Int,
                 enableThinking: Bool?,
+                streaming: Bool = false,
                 transport: any ResearchHTTPTransport) {
         var base = serverURL.absoluteString
         if base.hasSuffix("/v1") { base.removeLast(3) }
@@ -62,6 +69,7 @@ public struct ResearchChatClient: Sendable {
         self.model = model
         self.maxTokens = maxTokens
         self.enableThinking = enableThinking
+        self.streaming = streaming
         self.transport = transport
     }
 
@@ -74,8 +82,13 @@ public struct ResearchChatClient: Sendable {
             "model": .string(model),
             "messages": .array(messages),
             "max_tokens": .integer(maxTokens),
-            "stream": .bool(false),
+            "stream": .bool(streaming),
         ]
+        if streaming {
+            // TUFF 8.3.1 accepts `stream_options`; with `include_usage` it
+            // ends the stream with a chunk that counts the prompt's tokens.
+            body["stream_options"] = .object(["include_usage": .bool(true)])
+        }
         if !tools.isEmpty {
             body["tools"] = .array(tools)
             body["tool_choice"] = .string(toolUse == .off ? "none" : "auto")
@@ -134,6 +147,7 @@ public struct ResearchChatClient: Sendable {
         let body = try requestBody(messages: messages, tools: tools, toolUse: toolUse,
                                    thinking: thinking,
                                    preserveThinking: preserveThinking).encoded()
+        if streaming { return try await completeStreaming(body: body, timeout: timeout) }
         let response: ResearchHTTPResponse
         do {
             response = try await transport.send(
@@ -145,12 +159,7 @@ public struct ResearchChatClient: Sendable {
         }
         let reply = try? ResearchJSON.decode(response.body)
         guard (200..<300).contains(response.status) else {
-            let detail = reply?["error"]
-            throw ResearchError.modelRequestFailed(
-                status: response.status,
-                message: detail?["message"]?.stringValue
-                    ?? String(decoding: response.body.prefix(500), as: UTF8.self),
-                code: detail?["code"]?.stringValue)
+            throw Self.requestFailure(status: response.status, body: response.body, reply: reply)
         }
         let choice = reply?["choices"]?.arrayValue?.first
         guard let message = choice?["message"] else {
@@ -169,6 +178,62 @@ public struct ResearchChatClient: Sendable {
                                      finishReason: choice?["finish_reason"]?.stringValue,
                                      promptTokens: reply?["usage"]?["prompt_tokens"]?.intValue,
                                      model: reply?["model"]?.stringValue)
+    }
+
+    /// The error for a reply with a status other than 2xx, from its body.
+    private static func requestFailure(status: Int, body: Data,
+                                       reply: ResearchJSON?) -> ResearchError {
+        let detail = reply?["error"]
+        return .modelRequestFailed(
+            status: status,
+            message: detail?["message"]?.stringValue
+                ?? String(decoding: body.prefix(500), as: UTF8.self),
+            code: detail?["code"]?.stringValue)
+    }
+
+    /// The same turn through a stream. Errors are the ones `complete` always
+    /// threw: `modelTimedOut` for a time limit, `modelUnavailable` for a
+    /// connection that failed, `modelRequestFailed` for a refusal, which
+    /// TUFF answers with a status before the stream or inside it; the agent
+    /// cannot tell which. A cancelled task throws `CancellationError`.
+    private func completeStreaming(body: Data,
+                                   timeout: TimeInterval?) async throws -> ResearchAssistantTurn {
+        let response: ResearchHTTPLineResponse
+        do {
+            response = try await transport.sendStreaming(
+                method: "POST", url: endpoint, body: body, timeout: timeout)
+        } catch let error as URLError where error.code == .timedOut {
+            throw ResearchError.modelTimedOut
+        } catch {
+            throw ResearchError.modelUnavailable(error.localizedDescription)
+        }
+        guard (200..<300).contains(response.status) else {
+            // Refused before the stream began: the rest is an ordinary error
+            // body, handled as it is without streaming.
+            var lines: [String] = []
+            do {
+                for try await line in response.lines { lines.append(line) }
+            } catch let error as URLError where error.code == .timedOut {
+                throw ResearchError.modelTimedOut
+            } catch {
+                throw ResearchError.modelUnavailable(error.localizedDescription)
+            }
+            let text = lines.joined(separator: "\n")
+            let data = Data(text.utf8)
+            throw Self.requestFailure(
+                status: response.status, body: data, reply: try? ResearchJSON.decode(data))
+        }
+        do {
+            return try await ResearchStreamAssembler.assemble(response.lines)
+        } catch let error as ResearchError {
+            throw error
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as URLError where error.code == .timedOut {
+            throw ResearchError.modelTimedOut
+        } catch {
+            throw ResearchError.modelUnavailable(error.localizedDescription)
+        }
     }
 
     /// The models TUFF lists in `/v1/models`, with each one's context window
