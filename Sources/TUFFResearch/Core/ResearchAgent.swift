@@ -837,10 +837,11 @@ public struct ResearchAgent: Sendable {
             ? Self.budgetUsedUpRequest : Self.repeatedSearchesStopRequest
         let missing = options.minimumPagesRead - state.sources.count
         // Sized against the limit of the request for the answer, which
-        // sends them whole.
-        let perPage = min(options.readCharacters,
-                          max(0, answerLimit(state) - state.size(overhead: toolCharacters))
-                              / max(1, missing))
+        // sends them whole; at least half the budget of the steps, as before,
+        // since shortening before the send can make room for them.
+        let room = max(answerLimit(state) - state.size(overhead: toolCharacters),
+                       promptBudget(state) / 2)
+        let perPage = min(options.readCharacters, room / max(1, missing))
         if options.autoOpenPages, state.searched, missing > 0, answerBeforeSearchingMore == nil,
            perPage >= Self.minimumTopUpCharacters,
            state.topResults().contains(where: { url in

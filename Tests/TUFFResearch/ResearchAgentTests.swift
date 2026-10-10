@@ -4547,9 +4547,10 @@ struct ResearchRequestedSourcesLoopTests {
     }
 
     @Test func anAnswerRequestBetweenTheBudgetAndTheAnswerLimitIsSentWhole() async throws {
-        // About 20,000 characters of pages: over the budget of the steps, under
-        // the limit of the answer.
-        let page = String(repeating: "Wasser fließt bergab und trägt Sand. ", count: 270)
+        // 2 pages x 240 x 37 = 17,760 characters; with the system prompt, tools and
+        // requests (several thousand) the request is over the step budget of 19,840
+        // and well under the answer limit of 30,080.
+        let page = String(repeating: "Wasser fließt bergab und trägt Sand. ", count: 240)
         let log = EventLog()
         let (runner, services) = answerWindow(
             page: page, lastReplies: [FakeServices.answer("Wasser fließt [1][2].")], events: log)
@@ -5336,6 +5337,12 @@ struct ResearchRoundETests {
         #expect(notOnPage(
             "Die Partei erhielt 31, 17 und 64 Sitze.\n\n## Quellen\n"
                 + "[8] Wahlergebnis, https://a.example/\n\n## Fazit\nEnde.", pages)
+            == ["31", "17", "64"])
+        // An entry that splits into two pieces ("Senat." ends a sentence) does
+        // not end the trailing list.
+        let split = "\n\nQuellen:\n[8] Senat. Wahlergebnisse 2023, https://a.example/\n"
+            + "[9] Bezirk, https://b.example/"
+        #expect(notOnPage("Die Partei erhielt 31, 17 und 64 Sitze." + split, pages)
             == ["31", "17", "64"])
         // An answer that cites in its body keeps the stricter rule.
         #expect(notOnPage(

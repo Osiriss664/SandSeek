@@ -156,7 +156,7 @@ enum ResearchFigureCheck {
         // looser test of `uncitedFindings`. Source-list lines do not count: a
         // body that cites nothing is uncited although its list names `[8]`
         // to `[36]` (the Berlin answer with invented seat counts).
-        let sourceLists = sourceListFlags(for: allPieces)
+        let sourceLists = sourceListFlags(for: text)
         let nothingCited = allPieces.indices.allSatisfy {
             sourceLists[$0] || citations(in: allPieces[$0]).isEmpty
         }
@@ -435,29 +435,35 @@ enum ResearchFigureCheck {
     /// answer, or after a heading that names the sources (`## Quellen`,
     /// `## Sources`) up to the next heading. A source-looking line among the
     /// body's own text is a citation of the body.
-    private static func sourceListFlags(for pieces: [String]) -> [Bool] {
-        var flags = Array(repeating: false, count: pieces.count)
+    ///
+    /// Decided per line, and every piece of a line gets the line's flag: an
+    /// entry such as `[8] Senat. Wahlergebnisse 2023, https://…` splits into
+    /// two pieces, and the second must not end the trailing list.
+    private static func sourceListFlags(for answer: String) -> [Bool] {
+        let lines = answer.split(whereSeparator: \.isNewline).map { String($0) }
+        let counts = lines.map { pieces(of: $0).count }
+        var lineFlags = Array(repeating: false, count: lines.count)
         var trailing = true
-        for index in pieces.indices.reversed() {
-            let line = pieces[index].trimmingCharacters(in: .whitespacesAndNewlines)
+        for index in lines.indices.reversed() {
+            let line = lines[index].trimmingCharacters(in: .whitespacesAndNewlines)
             if line.isEmpty { continue }
             if isSourceLine(line) {
-                flags[index] = trailing
+                lineFlags[index] = trailing
             } else {
                 trailing = false
             }
         }
         var under = false
-        for (index, piece) in pieces.enumerated() {
-            let line = piece.trimmingCharacters(in: .whitespacesAndNewlines)
+        for (index, text) in lines.enumerated() {
+            let line = text.trimmingCharacters(in: .whitespacesAndNewlines)
             if line.hasPrefix("#") {
                 let heading = line.lowercased()
                 under = heading.contains("quelle") || heading.contains("source")
             } else if under, isSourceLine(line) {
-                flags[index] = true
+                lineFlags[index] = true
             }
         }
-        return flags
+        return zip(lineFlags, counts).flatMap { Array(repeating: $0, count: $1) }
     }
 
     /// Whether each piece lies in a part of the answer that lists what could
