@@ -143,6 +143,9 @@ def system_resolver(host: str, port: int) -> list[str]:
         infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except socket.gaierror as error:
         raise ToolError(f"could not resolve {host}: {error.strerror}", "dns_error", 502)
+    except UnicodeError:
+        # Empty or over-long labels make the idna codec fail inside getaddrinfo.
+        raise ToolError("URL has an invalid host name", "invalid_url")
     return [info[4][0] for info in infos]
 
 
@@ -165,7 +168,11 @@ def check_url(url: str, resolver: Callable[[str, int], list[str]]) -> Target:
     """Parses `url` and pins it to one public address, or refuses it."""
     if not isinstance(url, str) or len(url) > 4096:
         raise ToolError("url must be a string of at most 4096 characters", "invalid_url")
-    parts = urllib.parse.urlsplit(url.strip())
+    try:
+        parts = urllib.parse.urlsplit(url.strip())
+    except ValueError:
+        # Malformed addresses such as "http://[::1/" or a fullwidth "@".
+        raise ToolError("URL is not a valid address", "invalid_url")
     scheme = parts.scheme.lower()
     if scheme not in ALLOWED_PORTS:
         raise ToolError("only http and https URLs can be fetched", "invalid_url")
