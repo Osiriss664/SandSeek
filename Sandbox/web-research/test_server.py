@@ -174,6 +174,11 @@ class AddressPolicyTests(unittest.TestCase):
                     self.assertIn(error.code, {"invalid_url", "blocked_address", "dns_error"}, url)
                 parsed += error.code == "blocked_address"
             else:
+                # The sandbox runs on glibc, which reads a leading 0 as octal.
+                # macOS libc reads 0177 as decimal 177, a public address.
+                if url == "http://0177.0.0.1/" and not sys.platform.startswith("linux"):
+                    self.assertEqual(target.address, "177.0.0.1")
+                    continue
                 self.fail(f"{url} was allowed: {target}")
         self.assertGreaterEqual(parsed, 2)
 
