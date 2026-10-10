@@ -197,8 +197,14 @@ class Target:
     @property
     def url(self) -> str:
         default = ALLOWED_PORTS[self.scheme]
-        netloc = self.host if self.port == default else f"{self.host}:{self.port}"
+        netloc = self.host_header if self.port == default else f"{self.host_header}:{self.port}"
         return f"{self.scheme}://{netloc}{self.path}"
+
+    @property
+    def host_header(self) -> str:
+        """The host as it is written in a URL or Host header; an IPv6 literal
+        needs its brackets."""
+        return f"[{self.host}]" if ":" in self.host else self.host
 
 
 # Every ASCII character `quote` must leave alone, so that only non-ASCII
@@ -297,8 +303,8 @@ class _PinnedHTTPSConnection(_SendOnlyGivenHeaders, http.client.HTTPSConnection)
 
     def connect(self):
         sock = socket.create_connection((self._address, self.port), self.timeout)
-        # Kept while the handshake runs, so the deadline can cut it short.
-        self.sock = sock
+        # The handshake is bounded by the socket timeout (the deadline plus one
+        # second), not by the timer: wrap_socket detaches `sock` first.
         self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
 
 
@@ -337,21 +343,37 @@ def pinned_transport(method: str, target: Target, headers: dict[str, str],
     timer.start()
     too_slow = ToolError(f"{target.host} took longer than {limit:g} s", "fetch_timeout", 504)
     try:
+        # Connect first, so that a connection or handshake that ends after the
+        # timer fired is noticed. The timer can only shut down a socket that
+        # exists; once it does, it wakes any later wait.
+        connection.connect()
+        if expired.is_set():
+            raise too_slow
         connection.request(method, target.path, body=body, headers=headers)
         response = connection.getresponse()
         received = {k.lower(): v for k, v in response.getheaders()}
         announced = declared_length(received)
-        if max_bytes is not None and announced is not None and announced > cap:
-            return Response(response.status, received, b"", truncated=True)
-        chunks, size = [], 0
+        if max_bytes is not None:
+            if announced is not None and announced > cap:
+                return Response(response.status, received, b"", truncated=True)
+            if response.status in REDIRECT_STATUSES and received.get("location", "").strip():
+                # The caller follows the redirect; its body is not wanted.
+                return Response(response.status, received, b"")
+        chunks, size, ended = [], 0, False
         while size <= cap and not expired.is_set():
             chunk = response.read1(min(65536, cap + 1 - size))
             if not chunk:
+                ended = True
                 break
             chunks.append(chunk)
             size += len(chunk)
         if expired.is_set():
             raise too_slow
+        if max_bytes is not None and ended and response.length:
+            # The connection closed before the announced length arrived. A
+            # short body must not look like the whole page.
+            raise ToolError(f"{target.host} closed the connection before the whole body "
+                            f"arrived ({size} of {announced} bytes)", "fetch_failed", 502)
         data = b"".join(chunks)
         return Response(
             status=response.status,
@@ -719,7 +741,7 @@ class WebTools:
         for _ in range(MAX_REDIRECTS + 1):
             target = check_url(current, self.resolver)
             headers = {
-                "Host": target.host,
+                "Host": target.host_header,
                 "User-Agent": USER_AGENT,
                 "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.1",
                 "Accept-Encoding": "gzip",
@@ -753,6 +775,7 @@ class WebTools:
                 or not accept.isascii() or not accept.isprintable()):
             raise ToolError(f"accept must be at most {RAW_MAX_ACCEPT_CHARS} printable ASCII "
                             "characters", "invalid_argument")
+        accept = accept or RAW_DEFAULT_ACCEPT  # an empty value means "not given"
         if (not isinstance(max_bytes, int) or isinstance(max_bytes, bool)
                 or not 1 <= max_bytes <= MAX_DOWNLOAD_BYTES):
             raise ToolError(f"max_bytes must be between 1 and {MAX_DOWNLOAD_BYTES}",
@@ -773,7 +796,7 @@ class WebTools:
                 raise too_slow
             # No Accept-Encoding, no cookies, no language: only what the caller
             # asked for and the sandbox's own User-Agent.
-            headers = {"Host": target.host, "User-Agent": USER_AGENT, "Accept": accept}
+            headers = {"Host": target.host_header, "User-Agent": USER_AGENT, "Accept": accept}
             try:
                 response = self.transport("GET", target, headers, None,
                                           deadline=remaining, max_bytes=max_bytes)
@@ -795,15 +818,17 @@ class WebTools:
                 "status": response.status,
                 "content_type": response.headers.get("content-type", ""),
                 "body_base64": base64.b64encode(response.body).decode("ascii"),
+                # null when the site sent no Content-Encoding.
+                "content_encoding": response.headers.get("content-encoding"),
             }
-            if "content-encoding" in response.headers:
-                result["content_encoding"] = response.headers["content-encoding"]
             return result
         raise ToolError("too many redirects", "too_many_redirects", 502)
 
     def _checked_target(self, url, remaining: float, too_slow: ToolError) -> Target:
         """check_url, but given up on when the name lookup outlasts the
-        deadline. The lookup cannot be stopped; its thread ends by itself."""
+        deadline. The lookup cannot be stopped; its thread ends when the resolver
+        gives up (some 10 to 30 s), and counts against the VM's process limit
+        until then."""
         if remaining <= 0:
             raise too_slow
         outcome: dict = {}

@@ -470,6 +470,7 @@ class RawTests(unittest.TestCase):
             "final_url": "https://example.com/a",
             "status": 200,
             "content_type": "text/html; charset=ISO-8859-1",
+            "content_encoding": None,
             "body_base64": base64.b64encode(body).decode(),
         })
         self.assertEqual(base64.b64decode(result["body_base64"], validate=True), body)
@@ -649,10 +650,25 @@ class RawTests(unittest.TestCase):
             self.assertEqual(self.transport.calls, [])
 
     def test_a_good_accept_is_sent_as_given(self):
-        for accept in ("application/pdf", "*/*", "text/html;q=0.9, */*;q=0.1", "a" * 512, ""):
+        for accept in ("application/pdf", "*/*", "text/html;q=0.9, */*;q=0.1", "a" * 512):
             tools = self.tools({"https://example.com/a": page("x")})
             tools.raw("https://example.com/a", accept=accept)
             self.assertEqual(self.transport.calls[0][2]["Accept"], accept)
+
+    def test_an_empty_accept_means_the_default(self):
+        tools = self.tools({"https://example.com/a": page("x")})
+        tools.raw("https://example.com/a", accept="")
+        self.assertEqual(self.transport.calls[0][2]["Accept"], server.RAW_DEFAULT_ACCEPT)
+
+    def test_an_ipv6_literal_keeps_its_brackets_in_host_and_final_url(self):
+        url = "http://[2606:4700:4700::1111]/x"
+        tools = self.tools({url: redirect("/y"), "http://[2606:4700:4700::1111]/y": page("v6")})
+        result = tools.raw(url)
+        self.assertEqual(result["final_url"], "http://[2606:4700:4700::1111]/y")
+        self.assertEqual(self.transport.calls[0][2]["Host"], "[2606:4700:4700::1111]")
+        self.assertEqual(self.transport.calls[0][1].address, "2606:4700:4700::1111")
+        tools.fetch(url)
+        self.assertEqual(self.transport.calls[-1][2]["Host"], "[2606:4700:4700::1111]")
 
     def test_a_bad_max_bytes_is_refused(self):
         for value in (0, -1, server.MAX_DOWNLOAD_BYTES + 1, 1.5, 10.0, "10", None, True, [1]):
@@ -724,7 +740,9 @@ class RawTests(unittest.TestCase):
             result = self.raw({"https://example.com/a": Response(
                 200, {"content-encoding": value}, b"x")})
             self.assertEqual(result["content_encoding"], value)
-        self.assertNotIn("content_encoding", self.raw({"https://example.com/a": page("x")}))
+        # Without the header the field is still there, as null.
+        self.assertIn("content_encoding", self.raw({"https://example.com/a": page("x")}))
+        self.assertIsNone(self.raw({"https://example.com/a": page("x")})["content_encoding"])
 
     # --- the deadline ---------------------------------------------------------------
 
@@ -832,6 +850,42 @@ class RawTransportTests(unittest.TestCase):
 
         def do_GET(self):
             RawTransportTests.seen.append(dict(self.headers))
+            if self.path == "/short":
+                # Announces 1000 bytes, sends 100 and closes.
+                self.send_response(200)
+                self.send_header("Content-Length", "1000")
+                self.end_headers()
+                self.wfile.write(b"s" * 100)
+                return
+            if self.path == "/chunk-cut":
+                self.send_response(200)
+                self.send_header("Transfer-Encoding", "chunked")
+                self.end_headers()
+                self.wfile.write(b"400\r\n" + b"c" * 100)  # a 1024 byte chunk, cut off
+                return
+            if self.path == "/not-modified":
+                self.send_response(304)
+                self.send_header("Content-Length", "500")
+                self.end_headers()
+                return
+            if self.path == "/redirect":
+                self.send_response(302)
+                self.send_header("Location", "/elsewhere")
+                self.send_header("Content-Length", "2000")
+                self.end_headers()
+                self.wfile.write(b"r" * 2000)
+                return
+            if self.path == "/slow-head":
+                # The status line, then one header line every 0.3 s.
+                self.wfile.write(b"HTTP/1.0 200 OK\r\n")
+                try:
+                    for _ in range(30):
+                        self.wfile.write(b"X-Slow: 1\r\n")
+                        self.wfile.flush()
+                        time.sleep(0.3)
+                except OSError:
+                    pass
+                return
             self.send_response(200)
             self.send_header("Content-Type", "application/octet-stream")
             if self.path == "/encoded":
@@ -903,6 +957,76 @@ class RawTransportTests(unittest.TestCase):
         with mock.patch.object(server, "MAX_DOWNLOAD_BYTES", 1500):
             response = self.get("/unknown-length", deadline=5, max_bytes=5000)
         self.assertEqual((len(response.body), response.truncated), (1500, True))
+
+    def test_a_body_that_ends_before_its_content_length_is_an_error(self):
+        with self.assertRaises(ToolError) as caught:
+            self.get("/short", deadline=5, max_bytes=5000)
+        self.assertEqual(caught.exception.code, "fetch_failed")
+        self.assertIn("100 of 1000", caught.exception.message)
+
+    def test_a_cut_off_chunked_body_is_an_error(self):
+        with self.assertRaises(ToolError) as caught:
+            self.get("/chunk-cut", deadline=5, max_bytes=5000)
+        self.assertEqual(caught.exception.code, "fetch_failed")
+
+    def test_a_status_without_a_body_may_announce_a_length(self):
+        # 304 and the like carry a Content-Length but no body: not a short body.
+        response = self.get("/not-modified", deadline=5, max_bytes=5000)
+        self.assertEqual((response.status, response.body, response.truncated), (304, b"", False))
+
+    def test_the_body_of_a_redirect_is_not_read(self):
+        response = self.get("/redirect", deadline=5, max_bytes=5000)
+        self.assertEqual((response.status, response.body, response.truncated), (302, b"", False))
+        self.assertEqual(response.headers["location"], "/elsewhere")
+        # Without a limit (/v1/fetch) it is read as before.
+        self.assertEqual(len(self.get("/redirect", deadline=5).body), 2000)
+
+    def test_without_a_limit_a_short_body_is_left_as_it_was(self):
+        response = self.get("/short", deadline=5)
+        self.assertEqual((len(response.body), response.truncated), (100, False))
+
+    def test_a_content_length_over_the_cap_is_cut_without_a_limit_as_before(self):
+        # The early return for an announced length is only for /v1/raw.
+        with mock.patch.object(server, "MAX_DOWNLOAD_BYTES", 1500):
+            response = self.get("/", deadline=5)
+        self.assertEqual((response.status, len(response.body), response.truncated),
+                         (200, 1500, True))
+
+    def test_a_connection_that_ends_after_the_deadline_stops_the_request(self):
+        # Plain TCP, no TLS: the connect itself finishes 1.4 s in, after the 1 s
+        # timer has fired, and the server then drips headers for 9 s. The
+        # request must end right after the connect, not after the drip.
+        real_connect = server._PinnedHTTPConnection.connect
+
+        def late_connect(connection):
+            time.sleep(1.4)
+            real_connect(connection)
+        started = time.monotonic()
+        with mock.patch.object(server._PinnedHTTPConnection, "connect", late_connect):
+            with self.assertRaises(ToolError) as caught:
+                self.get("/slow-head", deadline=1, max_bytes=5000)
+        self.assertEqual(caught.exception.code, "fetch_timeout")
+        self.assertLess(time.monotonic() - started, 2.5)
+
+    def test_the_same_holds_without_a_limit(self):
+        real_connect = server._PinnedHTTPConnection.connect
+
+        def late_connect(connection):
+            time.sleep(1.4)
+            real_connect(connection)
+        started = time.monotonic()
+        with mock.patch.object(server._PinnedHTTPConnection, "connect", late_connect):
+            with self.assertRaises(ToolError) as caught:
+                self.get("/slow-head", deadline=1)
+        self.assertEqual(caught.exception.code, "fetch_timeout")
+        self.assertLess(time.monotonic() - started, 2.5)
+
+    def test_dripped_response_headers_hit_the_deadline(self):
+        started = time.monotonic()
+        with self.assertRaises(ToolError) as caught:
+            self.get("/slow-head", deadline=1, max_bytes=5000)
+        self.assertEqual(caught.exception.code, "fetch_timeout")
+        self.assertLess(time.monotonic() - started, 2.5)
 
     def test_the_deadline_applies_with_a_limit_too(self):
         started = time.monotonic()
@@ -1419,6 +1543,12 @@ class RawAPITests(unittest.TestCase):
             "final_url": "https://example.com/a", "status": 200,
             "content_type": "text/html", "content_encoding": "gzip",
             "body_base64": base64.b64encode(self.body).decode()})
+
+    def test_content_encoding_is_null_when_the_site_sent_none(self):
+        status, payload = self.raw(url="https://example.com/missing")
+        self.assertEqual(status, 200)
+        self.assertIn("content_encoding", payload)
+        self.assertIsNone(payload["content_encoding"])
 
     def test_only_a_url_is_needed(self):
         status, payload = self.raw(url="https://example.com/a")

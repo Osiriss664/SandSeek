@@ -117,10 +117,13 @@ These hold as long as the design is intact and the VM boundary holds.
   extraction deliberately do **not** apply to it, and a compressed body is not
   unpacked, so the caller must parse and clean what it gets. Other differences:
   GET only, no redirect from https to http, a body over the caller's limit is
-  an error and never a shortened body, no `Accept-Encoding` is sent, no
-  cookies and no page cache, and one time limit (at most 60 seconds) covers
-  the whole request including its redirects. The Host and `application/json`
-  checks and the request size limit are the same as for the other endpoints.
+  an error and never a shortened body (so is a body that ends before its
+  Content-Length), no `Accept-Encoding` is sent, no cookies and no page cache.
+  One time limit, `timeout_seconds` (at most 60), covers the whole request
+  including its redirects; a read can take about 1 second longer than that, so
+  a client should wait `timeout_seconds` + 5 seconds for the answer. The Host
+  and `application/json` checks and the request size limit are the same as
+  for the other endpoints.
 - **The sandbox API is not for web pages.** It refuses a `Host` header that is
   not a loopback name (which stops DNS rebinding from your browser) and
   accepts only `application/json` POSTs (which a page cannot send across
