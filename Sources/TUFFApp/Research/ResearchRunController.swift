@@ -303,6 +303,8 @@ public final class ResearchRunController {
             append(.searching, "Repeated search refused: \(query)", started: started)
         case .repeatedPageRefused(let url):
             append(.reading, "Repeated page refused: \(url)", started: started)
+        case .unseenURLRefused(let url):
+            append(.reading, "Unknown address not opened: \(url)", started: started)
         case .shortenedOlderResults:
             append(.turn, "Shortened older results to fit the model's context", started: started)
         case .retryingAfterTimeout:

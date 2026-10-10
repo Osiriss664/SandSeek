@@ -3,6 +3,10 @@
 # Mac-only test tool. Not part of the product. Read Scripts/garak/README.md
 # before the first run.
 #
+# WARNING: this script installs garak and its dependencies unpinned from PyPI
+# as your user. Run it only on a Mac you can reinstall, or inside a throwaway
+# container (`container run -it python:3.12`), or pin the dependencies first.
+#
 # Settings can be overridden from the environment, for example:
 #   GARAK_PROMPT_CAP=16 GARAK_SPEC=probes.encoding Scripts/garak/run_garak.sh
 
@@ -47,6 +51,9 @@ fi
 
 INSTALLED="$({ "$GARAK_VENV/bin/python" -m pip show garak 2>/dev/null || true; } | sed -n 's/^Version: //p')"
 if [ "$INSTALLED" != "$GARAK_VERSION" ]; then
+  echo "WARNING: this installs garak and its dependencies unpinned from PyPI as your user;" >&2
+  echo "run it only on a Mac you can reinstall, or inside a throwaway container" >&2
+  echo "(container run -it python:3.12), or pin them first." >&2
   echo "Installing garak==$GARAK_VERSION (installed: ${INSTALLED:-none})"
   "$GARAK_VENV/bin/python" -m pip install --upgrade pip
   "$GARAK_VENV/bin/python" -m pip install "garak==$GARAK_VERSION"

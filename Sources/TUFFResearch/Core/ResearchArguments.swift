@@ -60,6 +60,9 @@ public struct ResearchArguments: Equatable, Sendable {
       --nudges on|off          Ask the model once to search, to open pages, or
                                to look wider when it answers too early
                                (default on).
+      --only-seen-urls on|off  Open only addresses that appear verbatim in a
+                               search result, a page read or the question
+                               (default on; off is for measuring the model).
       --rewrite on|off         Ask once for a rewrite when the answer cites
                                pages that were never read, has figures without
                                a source number, or is in the wrong language
@@ -173,6 +176,8 @@ public struct ResearchArguments: Equatable, Sendable {
                 parsed.options.autoOpenPages = try onOff(argument)
             case "--nudges":
                 parsed.options.nudges = try onOff(argument)
+            case "--only-seen-urls":
+                parsed.options.onlySeenURLs = try onOff(argument)
             case "--rewrite":
                 parsed.options.reviseUnreadCitations = try onOff(argument)
             case "--step-timeout":

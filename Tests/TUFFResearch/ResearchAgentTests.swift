@@ -127,6 +127,7 @@ private final class FakeServices: ResearchHTTPTransport, @unchecked Sendable {
 
 private func agent(_ services: FakeServices,
                    options: ResearchOptions = ResearchOptions(),
+                   onlySeenURLs: Bool = false,
                    events: EventLog? = nil,
                    enableThinking: Bool? = nil,
                    model: String = "default",
@@ -140,8 +141,16 @@ private func agent(_ services: FakeServices,
             transport: transport ?? services),
         sandbox: ResearchSandboxClient(
             baseURL: URL(string: "http://127.0.0.1:9000")!, transport: services),
-        options: options,
+        options: seenOptions(options, onlySeenURLs),
         onEvent: { event in events?.append(event) })
+}
+
+/// The tests that do not look at the address gate run with it off, so they
+/// may open addresses without searching first; the gate has its own tests.
+private func seenOptions(_ options: ResearchOptions, _ onlySeenURLs: Bool) -> ResearchOptions {
+    var result = options
+    result.onlySeenURLs = onlySeenURLs
+    return result
 }
 
 /// Times out one model call, counted from 1, as URLSession does when a
@@ -433,6 +442,20 @@ struct ResearchAgentTests {
         #expect(formatted.contains("Source [1]: Title\n"))
         #expect(formatted.contains("Body text"))
         #expect(!formatted.unicodeScalars.contains { $0.value >= 0xE0000 })
+    }
+
+    @Test func everyFormatCharacterIsRemoved() {
+        for value: UInt32 in [0x206A, 0x206F, 0xFFF9, 0xFFFB, 0x070F, 0x13430, 0x1BCA0, 0x0600] {
+            let scalar = Unicode.Scalar(value)!
+            #expect(ResearchText.isUnsafe(scalar))
+            #expect(ResearchText.terminalSafe("a\(scalar)b") == "ab")
+            #expect(ResearchText.url("https://example.com/a\(scalar)b") == "https://example.com/ab")
+        }
+        // Not format characters: they stay.
+        #expect(ResearchText.terminalSafe("é😀👍🏽ß ❤\u{FE0F}") == "é😀👍🏽ß ❤\u{FE0F}")
+        // Also inside Markdown syntax, where it could hide an image.
+        #expect(!ResearchText.inertMarkdown("!\u{206A}[x](https://t.example/a)").contains("!["))
+        #expect(ResearchText.inertMarkdown("!\u{206A}[x](https://t.example/a)") == "[x](https://t.example/a)")
     }
 
     @Test func savedReportsLoadNothingWhenOpened() {
@@ -2380,6 +2403,230 @@ struct ResearchAgentTests {
         #expect(!asked.hasSeen(url: "https://fromquestion.example/doc2"))
     }
 
+    // MARK: Only addresses the research showed the model
+
+    private func gateOptions() -> ResearchOptions {
+        var options = ResearchOptions()
+        options.nudges = false
+        options.autoOpenPages = false
+        return options
+    }
+
+    @Test func aMadeUpAddressIsNotFetched() async throws {
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"apple container"}"#)]),
+            FakeServices.calls([("b", "open_page",
+                                 #"{"url":"https://collect.example/?q=secret+question"}"#)]),
+            FakeServices.answer("Done."), FakeServices.answer("Done."),
+        ])
+        let log = EventLog()
+        _ = try await agent(services, options: gateOptions(), onlySeenURLs: true, events: log)
+            .run(question: "q")
+        #expect(Self.fetches(services) == 0)
+        #expect(log.events.contains(.unseenURLRefused("https://collect.example/?q=secret+question")))
+        let refused = messages(services.modelRequests[2])
+            .first { $0["tool_call_id"] == .string("b") }?["content"]?.stringValue ?? ""
+        #expect(refused.hasPrefix(ResearchAgent.unseenURLRefusal))
+        #expect(refused.contains("not opened"))
+        // It searched before, so there is no hint to search first.
+        #expect(!refused.contains("Search first"))
+    }
+
+    @Test func theFirstRefusalWithoutASearchSaysToSearchFirst() async throws {
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "open_page", #"{"url":"https://guess.example/page"}"#)]),
+            FakeServices.answer("Done."), FakeServices.answer("Done."),
+        ])
+        _ = try await agent(services, options: gateOptions(), onlySeenURLs: true)
+            .run(question: "q")
+        #expect(Self.fetches(services) == 0)
+        let refused = messages(services.modelRequests[1])
+            .first { $0["tool_call_id"] == .string("a") }?["content"]?.stringValue ?? ""
+        #expect(refused.hasPrefix(ResearchAgent.unseenURLRefusal))
+        #expect(refused.contains("Search first with web_search."))
+    }
+
+    @Test func anAddressFromASearchResultIsOpened() async throws {
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"koeln"}"#)]),
+            // Written decoded, with http, without www. and without the tracking query.
+            FakeServices.calls([("b", "open_page",
+                                 #"{"url":"http://de.wikipedia.org/wiki/Köln"}"#)]),
+            FakeServices.answer("Done [1]."), FakeServices.answer("Done [1]."),
+        ]) { path, body in
+            guard path == "/v1/search" else { return FakeServices.webPages(path, body) }
+            return FakeServices.json(200, .object(["query": body?["query"] ?? .null,
+                "results": .array([.object([
+                    "title": .string("Köln"),
+                    "url": .string("https://www.de.wikipedia.org/wiki/K%C3%B6ln?utm_source=x"),
+                    "snippet": .string("Stadt"),
+                ])])]))
+        }
+        let log = EventLog()
+        _ = try await agent(services, options: gateOptions(), onlySeenURLs: true, events: log)
+            .run(question: "q")
+        #expect(Self.fetches(services) == 1)
+        #expect(!log.events.contains { if case .unseenURLRefused = $0 { true } else { false } })
+    }
+
+    @Test func theAddressOpenedIsTheOneTheResearchShowedNotTheModelsSpelling() async throws {
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"koeln"}"#)]),
+            // Escapes in lower case and decoded, scheme changed, query dropped.
+            FakeServices.calls([("b", "open_page",
+                                 #"{"url":"http://de.wikipedia.org/wiki/K%c3%b6ln"}"#)]),
+            FakeServices.answer("Done [1]."), FakeServices.answer("Done [1]."),
+        ]) { path, body in
+            guard path == "/v1/search" else { return FakeServices.webPages(path, body) }
+            return FakeServices.json(200, .object(["query": body?["query"] ?? .null,
+                "results": .array([.object([
+                    "title": .string("Köln"),
+                    "url": .string("https://de.wikipedia.org/wiki/K%C3%B6ln?utm_source=x"),
+                    "snippet": .string("Stadt"),
+                ])])]))
+        }
+        _ = try await agent(services, options: gateOptions(), onlySeenURLs: true)
+            .run(question: "q")
+        let fetched = services.requests.filter { $0.url.path == "/v1/fetch" }
+            .compactMap { $0.body?["url"]?.stringValue }
+        #expect(fetched == ["https://de.wikipedia.org/wiki/K%C3%B6ln?utm_source=x"])
+    }
+
+    @Test func seenAddressesComeBackInTheSpellingTheyWereShown() {
+        var state = ResearchAgent.State(question: "Lies https://q.example/Doc%7Ea bitte")
+        #expect(state.seenAddress(for: "http://q.example/Doc~a") == "http://q.example/Doc%7Ea")
+        #expect(state.seenAddress(for: "https://q.example/Doc%7ea#frag")
+                == "https://q.example/Doc%7Ea")
+        // Written with non-ASCII characters on the page: sent escaped.
+        state.pageTexts = [1: "siehe de.wikipedia.org/wiki/Köln. Und “www.x.example/a/b”."]
+        #expect(state.seenAddress(for: "https://de.wikipedia.org/wiki/K%C3%B6ln")
+                == "https://de.wikipedia.org/wiki/K%C3%B6ln")
+        #expect(state.seenAddress(for: "http://x.example/a/b") == "http://www.x.example/a/b")
+        #expect(state.seenAddress(for: "https://x.example/a/c") == nil)
+        #expect(ResearchAgent.State.asciiAddress("https://bücher.example/ä?q=ü")
+                == "https://bücher.example/%C3%A4?q=%C3%BC")
+        // A result or source is returned as shown, even if asked for without its query.
+        state.resultURLs = [["https://r.example/p?utm=1"]]
+        #expect(state.seenAddress(for: "http://www.r.example/p/") == "https://r.example/p?utm=1")
+    }
+
+    @Test func anAddressRefusedBeforeCanBeOpenedOnceASearchShowsIt() async throws {
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "open_page", #"{"url":"https://later.example/a"}"#)]),
+            FakeServices.calls([("b", "web_search", #"{"query":"later"}"#)]),
+            FakeServices.calls([("c", "open_page", #"{"url":"https://later.example/a"}"#)]),
+            FakeServices.answer("Done [1]."), FakeServices.answer("Done [1]."),
+        ]) { path, body in
+            guard path == "/v1/search" else { return FakeServices.webPages(path, body) }
+            return FakeServices.json(200, .object(["query": body?["query"] ?? .null,
+                "results": .array([.object([
+                    "title": .string("Later"), "url": .string("https://later.example/a"),
+                    "snippet": .string("s"),
+                ])])]))
+        }
+        let report = try await agent(services, options: gateOptions(), onlySeenURLs: true)
+            .run(question: "q")
+        #expect(Self.fetches(services) == 1)
+        #expect(report.sources.map(\.url) == ["https://later.example/a"])
+    }
+
+    @Test func addressesNotInTheResearchAreMatchedExactly() {
+        var state = ResearchAgent.State(question: "q")
+        state.resultURLs = [["https://de.wikipedia.org/wiki/K%C3%B6ln?utm_source=x"]]
+        // Scheme, www., host case, encoding of the path, a fragment and a
+        // dropped query do not matter.
+        for url in ["http://de.wikipedia.org/wiki/Köln", "https://WWW.de.wikipedia.org/wiki/K%c3%b6ln",
+                    "https://de.wikipedia.org/wiki/K%C3%B6ln/", "https://de.wikipedia.org/wiki/Köln#Geschichte",
+                    "https://de.wikipedia.org/wiki/K%C3%B6ln?utm_source=x"] {
+            #expect(state.hasSeenExactly(url: url), "\(url)")
+        }
+        // A different query, other letter case in the path, a second slash,
+        // another host or a longer path were never shown.
+        for url in ["https://de.wikipedia.org/wiki/K%C3%B6ln?utm_source=y",
+                    "https://de.wikipedia.org/wiki/köln", "https://de.wikipedia.org/wiki/K%C3%B6ln//",
+                    "https://en.wikipedia.org/wiki/K%C3%B6ln", "https://de.wikipedia.org/wiki/K%C3%B6ln/x",
+                    "https://de.wikipedia.org/wiki", "not an address", ""] {
+            #expect(!state.hasSeenExactly(url: url), "\(url)")
+        }
+        // A source counts like a result.
+        state.sources = [ResearchSource(number: 1, title: "T", url: "https://s.example/Doc")]
+        #expect(state.hasSeenExactly(url: "http://www.s.example/Doc/"))
+        #expect(!state.hasSeenExactly(url: "https://s.example/doc"))
+    }
+
+    @Test func addressesInPageTextOrTheQuestionAreMatchedExactly() {
+        var state = ResearchAgent.State(question: "Lies https://fromquestion.example/Doc bitte")
+        #expect(state.hasSeenExactly(url: "https://fromquestion.example/Doc"))
+        #expect(state.hasSeenExactly(url: "http://FromQuestion.example/Doc/"))
+        #expect(!state.hasSeenExactly(url: "https://fromquestion.example/doc"))
+        #expect(!state.hasSeenExactly(url: "https://fromquestion.example/Doc2"))
+        // Without scheme, with www., in brackets and before punctuation.
+        state.pageTexts = [1: "DOI doi.org/10.1000/xyz. Report: www.example.org/Report/ and "
+            + "(notexample.org/a) [see example.org/p/Q?x=1]."]
+        #expect(state.hasSeenExactly(url: "https://doi.org/10.1000/xyz"))
+        #expect(state.hasSeenExactly(url: "http://example.org/Report"))
+        #expect(state.hasSeenExactly(url: "https://example.org/p/Q?x=1"))
+        #expect(!state.hasSeenExactly(url: "https://example.org/a"))
+        #expect(!state.hasSeenExactly(url: "https://sub.doi.org/10.1000/xyz"))
+        #expect(!state.hasSeenExactly(url: "https://example.org/p/Q?x=2"))
+        // The letter case cannot carry a message: Page/One is not page/one.
+        state.pageTexts = [1: "see https://b.example/Page/One for more, and evil.example/v/aaaa"]
+        #expect(state.hasSeenExactly(url: "https://b.example/Page/One"))
+        #expect(!state.hasSeenExactly(url: "https://b.example/page/one"))
+        #expect(!state.hasSeenExactly(url: "https://b.example/Page"))
+        #expect(!state.hasSeenExactly(url: "https://evil.example/v/aAaa"))
+        #expect(!state.hasSeenExactly(url: "https://evil.example/v/aaaa/b"))
+        #expect(!state.hasSeenExactly(url: "https://evil.example/v/aaaa//"))
+    }
+
+    @Test func stepsOfOnlyMadeUpAddressesStopTheRunLikeRepeats() async throws {
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"one"}"#)]),
+            FakeServices.calls([("b", "open_page", #"{"url":"https://guess.example/1"}"#)]),
+            FakeServices.calls([("c", "open_page", #"{"url":"https://guess.example/2"}"#)]),
+            FakeServices.answer("Done."), FakeServices.answer("Done."),
+        ])
+        var options = gateOptions()
+        options.maxSteps = 8
+        let log = EventLog()
+        let report = try await agent(services, options: options, onlySeenURLs: true, events: log)
+            .run(question: "q")
+        #expect(report.stoppedRepeatedSearches)
+        #expect(log.events.filter { $0 == .stoppingRepeatedSearches }.count == 1)
+        // Turns are stoppedAtStep + 1.
+        #expect(report.modelTurns == 4)
+        #expect(Self.fetches(services) == 0)
+
+        // The same guess twice counts as a repeat as well, and is still not fetched.
+        let again = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"one"}"#)]),
+            FakeServices.calls([("b", "open_page", #"{"url":"https://guess.example/1"}"#),
+                                ("c", "open_page", #"{"url":"https://guess.example/1"}"#)]),
+            FakeServices.calls([("d", "open_page", #"{"url":"https://guess.example/1"}"#)]),
+            FakeServices.answer("Done."), FakeServices.answer("Done."),
+        ])
+        let againLog = EventLog()
+        let stopped = try await agent(again, options: options, onlySeenURLs: true, events: againLog)
+            .run(question: "q")
+        #expect(stopped.stoppedRepeatedSearches)
+        #expect(againLog.events.filter {
+            $0 == .unseenURLRefused("https://guess.example/1") }.count == 3)
+        #expect(Self.fetches(again) == 0)
+    }
+
+    @Test func withTheGateOffAnyAddressIsOpened() async throws {
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "open_page", #"{"url":"https://guess.example/page"}"#)]),
+            FakeServices.answer("Done [1]."), FakeServices.answer("Done [1]."),
+        ])
+        let log = EventLog()
+        _ = try await agent(services, options: gateOptions(), onlySeenURLs: false, events: log)
+            .run(question: "q")
+        #expect(Self.fetches(services) == 1)
+        #expect(!log.events.contains { if case .unseenURLRefused = $0 { true } else { false } })
+        #expect(ResearchOptions().onlySeenURLs)
+    }
+
     @Test func aPageMayBeReadOnceMoreAfterOlderResultsWereShortened() async {
         let services = FakeServices(modelReplies: [])
         let research = agent(services)
@@ -2847,6 +3094,7 @@ struct ResearchAgentTests {
                 maxTokens: 8_192, enableThinking: true, transport: slow),
             sandbox: ResearchSandboxClient(
                 baseURL: URL(string: "http://127.0.0.1:9000")!, transport: services),
+            options: seenOptions(ResearchOptions(), false),
             onEvent: { log.append($0) }).run(question: "q")
         #expect(report.answer == "Answer [1].")
         #expect(log.events.filter { $0 == .retryingAfterTimeout }.count == 1)
@@ -2907,7 +3155,7 @@ struct ResearchAgentTests {
                     maxTokens: 8_192, enableThinking: thinking, transport: recorder),
                 sandbox: ResearchSandboxClient(
                     baseURL: URL(string: "http://127.0.0.1:9000")!, transport: services),
-                options: options).run(question: "q")
+                options: seenOptions(options, false)).run(question: "q")
             return recorder.modelLimits
         }
         let replies = [
@@ -2936,6 +3184,7 @@ struct ResearchAgentTests {
                 maxTokens: 8_192, enableThinking: true, transport: slow),
             sandbox: ResearchSandboxClient(
                 baseURL: URL(string: "http://127.0.0.1:9000")!, transport: services),
+            options: seenOptions(ResearchOptions(), false),
             onEvent: { log.append($0) }).run(question: "q")
         #expect(report.answer == "Answer [1].")
         #expect(log.events.filter { $0 == .retryingAfterTimeout }.count == 1)
@@ -2961,6 +3210,7 @@ struct ResearchAgentTests {
                 maxTokens: 8_192, enableThinking: true, transport: services),
             sandbox: ResearchSandboxClient(
                 baseURL: URL(string: "http://127.0.0.1:9000")!, transport: services),
+            options: seenOptions(ResearchOptions(), false),
             onEvent: { log.append($0) }).run(question: "q")
         #expect(report.answer == "Answer [1].")
         #expect(log.events.filter { $0 == .retryingAfterModelError }.count == 1)
@@ -2989,6 +3239,7 @@ struct ResearchAgentTests {
                 maxTokens: 8_192, enableThinking: true, transport: refused),
             sandbox: ResearchSandboxClient(
                 baseURL: URL(string: "http://127.0.0.1:9000")!, transport: refused),
+            options: seenOptions(ResearchOptions(), false),
             onEvent: { refusedLog.append($0) }).run(question: "q")
         #expect(!refusedLog.events.contains(.retryingAfterModelError))
         #expect(refused.modelRequests.count == 1)
@@ -3054,6 +3305,7 @@ struct ResearchAgentTests {
                 maxTokens: 8_192, enableThinking: true, transport: services),
             sandbox: ResearchSandboxClient(
                 baseURL: URL(string: "http://127.0.0.1:9000")!, transport: services),
+            options: seenOptions(ResearchOptions(), false),
             onEvent: { log.append($0) })
         await #expect(throws: ResearchRunEndedEarly.self) {
             _ = try await thinking.run(question: "q")
@@ -3230,7 +3482,7 @@ struct ResearchArgumentsTests {
         let parsed = try ResearchArguments.parse([
             "q", "--search-results", "8", "--tool-calls", "2", "--min-pages", "5",
             "--auto-open", "off", "--nudges", "off", "--rewrite", "off",
-            "--step-timeout", "10", "--context-chars", "32000", "--max-tokens", "4096",
+            "--only-seen-urls", "off", "--step-timeout", "10", "--context-chars", "32000", "--max-tokens", "4096",
         ])
         #expect(parsed.options.searchResults == 8)
         #expect(parsed.options.maxToolCallsPerTurn == 2)
@@ -3238,6 +3490,8 @@ struct ResearchArgumentsTests {
         #expect(!parsed.options.autoOpenPages)
         #expect(!parsed.options.nudges)
         #expect(!parsed.options.reviseUnreadCitations)
+        #expect(defaults.options.onlySeenURLs)
+        #expect(!parsed.options.onlySeenURLs)
         #expect(parsed.stepTimeoutMinutes == 10)
         #expect(parsed.options.contextBudgetCharacters == 32_000)
         #expect(parsed.maxTokens == 4_096)
@@ -3246,7 +3500,8 @@ struct ResearchArgumentsTests {
         #expect(try ResearchArguments.parse(["q", "--thinking-limit", "5"])
             .options.thinkingMinutes == 5)
         for flag in ["--search-results", "--tool-calls", "--min-pages", "--auto-open",
-                     "--nudges", "--rewrite", "--step-timeout", "--thinking-limit"] {
+                     "--nudges", "--rewrite", "--only-seen-urls", "--step-timeout",
+                     "--thinking-limit"] {
             #expect(ResearchArguments.usage.contains(flag), "\(flag)")
         }
     }

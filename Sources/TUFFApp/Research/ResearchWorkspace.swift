@@ -12,6 +12,9 @@ public final class ResearchWorkspace {
     public let run: ResearchRunController
     /// The saved report on screen, when no run is.
     public var selectedReportID: UUID?
+    /// The `sandbox.freshStarts` of the VM that a question last ran in.
+    private var lastUsedStart: Int?
+    private var isPreparingQuestion = false
 
     public init(sandbox: ResearchSandboxController,
                 server: ResearchModelServerController,
@@ -40,6 +43,12 @@ public final class ResearchWorkspace {
             && server.state == .ready && !server.models.isEmpty
     }
 
+    /// True when a question already ran in the sandbox VM that is up now, or
+    /// when that VM was left from an earlier session and may have been used.
+    public var sandboxUsed: Bool {
+        sandbox.adoptedFromLastRun || lastUsedStart == sandbox.freshStarts
+    }
+
     public var anyServiceOn: Bool {
         sandbox.state != .off || server.state != .off
     }
@@ -63,12 +72,26 @@ public final class ResearchWorkspace {
         _ = await (sandboxStop, serverStop)
     }
 
-    /// Checks the sandbox's protection again first, so a VM that changed
-    /// since the last check is not used on the old result.
+    /// A sandbox the app started and a question already used is replaced by a
+    /// fresh VM first, so a parser exploit or the page cache of one question
+    /// cannot reach the next; if that fails, no question is started. The
+    /// restart is done before the run, not after it: `stop` sets the phase
+    /// before the run's task ends, so a restart at the end of one run could
+    /// kill the next run's VM. A sandbox started by hand is left alone. Then
+    /// checks the sandbox's protection again, so a VM that changed since the
+    /// last check is not used on the old result.
     public func ask(_ question: String, settings: ResearchRunSettings) async {
+        guard servicesReady, !run.isRunning, !isPreparingQuestion else { return }
+        isPreparingQuestion = true
+        defer { isPreparingQuestion = false }
+        if sandbox.startedByApp && sandboxUsed {
+            // `restart` verifies the protection of the new VM itself.
+            guard await sandbox.restart() else { return }
+        } else {
+            await sandbox.recheckProtection()
+        }
         guard servicesReady, !run.isRunning else { return }
-        await sandbox.recheckProtection()
-        guard servicesReady, !run.isRunning else { return }
+        lastUsedStart = sandbox.freshStarts
         selectedReportID = nil
         run.start(
             question: question,

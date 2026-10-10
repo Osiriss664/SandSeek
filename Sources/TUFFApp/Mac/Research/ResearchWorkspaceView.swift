@@ -116,8 +116,9 @@ struct ResearchWorkspaceView: View {
                 .buttonStyle(.link)
                 Spacer(minLength: 8)
                 if !research.servicesReady && !research.run.isRunning {
-                    Text(research.sandbox.state == .ready && research.server.state == .ready
-                         ? "Waiting for the sandbox check." : "Start both services first.")
+                    Text(research.sandbox.restartNote
+                         ?? (research.sandbox.state == .ready && research.server.state == .ready
+                             ? "Waiting for the sandbox check." : "Start both services first."))
                         .appFont(.callout)
                         .foregroundStyle(.secondary)
                 }
@@ -547,8 +548,10 @@ private struct ResearchServicesCard: View {
         case .failed(let message):
             return message
         case .preparing:
+            if let note = sandbox.restartNote { return note + "…" }
             return "Building the sandbox image. The first time takes a few minutes."
         case .starting:
+            if let note = sandbox.restartNote { return note + "…" }
             return "Starting a fresh Linux VM…"
         case .stopping:
             return "Stopping the VM…"

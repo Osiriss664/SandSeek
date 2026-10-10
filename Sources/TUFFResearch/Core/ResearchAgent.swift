@@ -16,6 +16,12 @@ public struct ResearchOptions: Equatable, Sendable {
     /// Whether the model is asked once to search, to open pages, or to look
     /// wider when it answers too early.
     public var nudges = true
+    /// Whether `open_page` opens only addresses the model can have from the
+    /// research: verbatim in a search result, in the text of a page read, in
+    /// the question or as a source. Stops a page from steering the model into
+    /// writing the question or page text into an address. On by default; the
+    /// command line can switch it off to measure the model alone.
+    public var onlySeenURLs = true
     /// Whether the final answer is sent back once to be rewritten when it
     /// cites pages the research never read, when figures in it carry no
     /// citation (or it has none at all), or when it is not in the language the
@@ -332,6 +338,10 @@ public enum ResearchEvent: Equatable, Sendable {
     case repeatedSearchRefused(String)
     /// The model opened a page part it already read, and was told so instead.
     case repeatedPageRefused(String)
+    /// The model asked to open an address that was in no search result, on no
+    /// page read and not in the question. It was told so instead, and nothing
+    /// was fetched.
+    case unseenURLRefused(String)
     /// Older results were shortened so the conversation fits the model's
     /// context window.
     case shortenedOlderResults
@@ -673,6 +683,7 @@ public struct ResearchAgent: Sendable {
             calledTools = true
             state.messages.append(assistantMessage(turn))
             let refusedBefore = state.refusedRepeats
+            let refusedUnseenBefore = state.refusedUnseen
             for (index, call) in turn.toolCalls.enumerated() {
                 var result: String
                 if index < options.maxToolCallsPerTurn {
@@ -761,7 +772,9 @@ public struct ResearchAgent: Sendable {
             // for the answer, with more top results opened if few pages
             // were read.
             let executed = min(turn.toolCalls.count, options.maxToolCallsPerTurn)
-            if executed > 0, state.refusedRepeats - refusedBefore == executed {
+            let refusedNow = (state.refusedRepeats - refusedBefore)
+                + (state.refusedUnseen - refusedUnseenBefore)
+            if executed > 0, refusedNow == executed {
                 refusedOnlySteps += 1
             } else {
                 refusedOnlySteps = 0
@@ -1612,15 +1625,44 @@ public struct ResearchAgent: Sendable {
                     return "Tool error: open_page needs an http or https url."
                 }
                 let offset = max(0, arguments["offset"]?.intValue ?? 0)
+                // Only addresses the research showed the model. A made-up one
+                // could carry the question or page text to the sandbox's
+                // network request, so it is not fetched at all.
+                let seenKey = State.pageKey(url, offset: offset)
+                var target = url
+                if options.onlySeenURLs {
+                    guard let seenAddress = state.seenAddress(for: url) else {
+                        var refusal = Self.unseenURLRefusal
+                        if !state.searched { refusal += " Search first with web_search." }
+                        onEvent(.unseenURLRefused(ResearchText.oneLine(url, limit: 200)))
+                        if state.pageReads[seenKey]?.refusedUnseen == true {
+                            // The same guess again counts as a repeat.
+                            state.refusedRepeats += 1
+                        } else {
+                            state.refusedUnseen += 1
+                            state.pageReads[seenKey] = State.PageRead(
+                                count: 1, compactions: state.compactions, sourceURL: url,
+                                redirectedElsewhere: refusal, refusedUnseen: true)
+                        }
+                        return refusal
+                    }
+                    // Seen since it was refused (a later search found it).
+                    if state.pageReads[seenKey]?.refusedUnseen == true {
+                        state.pageReads[seenKey] = nil
+                    }
+                    // Open the spelling the research showed, never the
+                    // model's own, so its percent escapes carry nothing.
+                    target = seenAddress
+                }
                 // The same part of a page would only fill the context again.
                 // After older results were shortened, one more read is fair.
-                if let read = state.pageRead(url: url, offset: offset),
+                if let read = state.pageRead(url: target, offset: offset),
                    read.redirectedElsewhere != nil || !read.mayReadAgain {
                     state.refusedRepeats += 1
-                    onEvent(.repeatedPageRefused(ResearchText.oneLine(url, limit: 200)))
+                    onEvent(.repeatedPageRefused(ResearchText.oneLine(target, limit: 200)))
                     // An address that led elsewhere gets the same answer again.
                     if let rejection = read.redirectedElsewhere { return rejection }
-                    let shown = Self.sanitized(ResearchText.url(url))
+                    let shown = Self.sanitized(ResearchText.url(target))
                     let number = state.sources.first { $0.url == read.sourceURL }
                         .map { " as source [\($0.number)]" } ?? ""
                     let more = options.passages
@@ -1629,7 +1671,7 @@ public struct ResearchAgent: Sendable {
                     return "You already read this part of \(shown)\(number). Use what it "
                         + "said, \(more), open a different page, or answer."
                 }
-                return await openPage(url: url, offset: offset, state: &state)
+                return await openPage(url: target, offset: offset, state: &state)
             default:
                 return "Tool error: unknown tool \(call.name). Use web_search or open_page."
             }
@@ -1654,7 +1696,9 @@ public struct ResearchAgent: Sendable {
             // An address the model made up can lead somewhere else, such as an
             // unrelated article or the home page; that page is no source.
             let redirect = Self.redirect(from: url, to: page.url)
-            if redirect != .same, !state.hasSeen(url: url) {
+            let known = options.onlySeenURLs ? state.hasSeenExactly(url: url)
+                                             : state.hasSeen(url: url)
+            if redirect != .same, !known {
                 let rejection = Self.redirectedElsewhere(
                     requested: url, page: page, redirect: redirect)
                 state.recordRead(requested: url, page: page, offset: offset,
@@ -1753,6 +1797,11 @@ public struct ResearchAgent: Sendable {
         while path.hasSuffix("/") { path.removeLast() }
         return (host, path)
     }
+
+    /// The tool result for an address the research never showed the model.
+    static let unseenURLRefusal = "This address was in no search result, on no page read and "
+        + "not in the question, so it was not opened. Open addresses from the search results "
+        + "or from pages you read; do not guess addresses."
 
     /// The tool result for a page that is not the one asked for. Its text is
     /// left out: it is about something else, and it would only fill the context.
@@ -1907,6 +1956,8 @@ public struct ResearchAgent: Sendable {
         var resultURLs: [[String]] = []
         /// Searches and page opens refused because they repeated an earlier one.
         var refusedRepeats = 0
+        /// Page opens refused because the address was never shown to the model.
+        var refusedUnseen = 0
         /// Model turns started so far, for a partial report.
         var modelTurns = 0
         /// Times `compact` shortened results, to tell when an earlier read
@@ -2051,6 +2102,10 @@ public struct ResearchAgent: Sendable {
             /// The tool result given when the address led to another page
             /// (see `redirect`); the same is answered if it is asked again.
             var redirectedElsewhere: String?
+            /// Set when the address was refused as never seen (then
+            /// `redirectedElsewhere` holds the refusal), so that it can be
+            /// opened once a later search or page shows it.
+            var refusedUnseen = false
         }
 
         /// A URL and offset as one key: scheme and host in lower case, no
@@ -2173,6 +2228,175 @@ public struct ResearchAgent: Sendable {
             if let hash = bare.firstIndex(of: "#") { bare = String(bare[..<hash]) }
             return Self.mentions(question, address: bare)
                 || pageTexts.values.contains { Self.mentions($0, address: bare) }
+        }
+
+        /// The strict test behind `onlySeenURLs`; see `seenAddress`.
+        func hasSeenExactly(url: String) -> Bool { seenAddress(for: url) != nil }
+
+        /// The address to open for `url`, or nil when the research never
+        /// showed it to the model: it appears verbatim in a search result, a
+        /// source, the text of a page read or the question. Compared without
+        /// the scheme (http and https alike), the case of the host, `www.`, a
+        /// fragment, one trailing slash and the way characters are
+        /// percent-encoded; path and query are compared case-sensitively, so
+        /// the case of letters cannot carry information. A search result or
+        /// source with a query may be asked for without it.
+        ///
+        /// What comes back is never the model's spelling, which could hide
+        /// bits in its percent escapes: it is the result's or source's own
+        /// string, or the link as the page or question wrote it (with the
+        /// model's scheme, without the fragment), with non-ASCII characters
+        /// percent-encoded.
+        func seenAddress(for url: String) -> String? {
+            guard let wanted = Self.exactAddress(url) else { return nil }
+            for known in Array(resultURLs.joined()) + sources.map(\.url) {
+                guard let seen = Self.exactAddress(known) else { continue }
+                if seen.key == wanted.key
+                    || (wanted.query == nil && seen.withoutQuery == wanted.key) {
+                    return Self.asciiAddress(known.trimmingCharacters(in: .whitespacesAndNewlines))
+                }
+            }
+            let scheme = url.lowercased().hasPrefix("http://") ? "http" : "https"
+            if let found = Self.link(in: question, matching: wanted, scheme: scheme) { return found }
+            for text in pageTexts.values {
+                if let found = Self.link(in: text, matching: wanted, scheme: scheme) { return found }
+            }
+            return nil
+        }
+
+        /// The address with every non-ASCII character of path and query
+        /// written as UTF-8 percent escapes (the host is left alone; the
+        /// sandbox turns an international host name into punycode).
+        static func asciiAddress(_ address: String) -> String {
+            guard !address.allSatisfy(\.isASCII) else { return address }
+            let afterScheme = address.range(of: "://")?.upperBound ?? address.startIndex
+            let tailStart = address[afterScheme...].firstIndex { "/?".contains($0) } ?? address.endIndex
+            var result = String(address[..<tailStart])
+            for byte in address[tailStart...].utf8 {
+                if byte < 0x80 {
+                    result.append(Character(Unicode.Scalar(byte)))
+                } else {
+                    result += "%" + String(byte, radix: 16, uppercase: true)
+                }
+            }
+            return result
+        }
+
+        struct ExactAddress {
+            var host: String
+            var path: String
+            var query: String?
+            var key: String { host + path + (query.map { "?" + $0 } ?? "") }
+            var withoutQuery: String { host + path }
+        }
+
+        /// The comparison form of a web address, nil when it is not one.
+        static func exactAddress(_ text: String) -> ExactAddress? {
+            var rest = Substring(text.trimmingCharacters(in: .whitespacesAndNewlines))
+            if let hash = rest.firstIndex(of: "#") { rest = rest[..<hash] }
+            for prefix in ["https://", "http://"] where rest.lowercased().hasPrefix(prefix) {
+                rest = rest.dropFirst(prefix.count)
+                break
+            }
+            let hostEnd = rest.firstIndex { "/?".contains($0) } ?? rest.endIndex
+            var host = rest[..<hostEnd].lowercased()
+            if host.hasPrefix("www.") { host.removeFirst(4) }
+            guard !host.isEmpty, !host.contains(":") || host.split(separator: ":").count == 2 else {
+                return nil
+            }
+            let tail = rest[hostEnd...]
+            let queryStart = tail.firstIndex(of: "?")
+            var path = percentNormalized(String(queryStart.map { tail[..<$0] } ?? tail))
+            if path.hasSuffix("/") { path.removeLast() }
+            let query = queryStart.map { percentNormalized(String(tail[tail.index(after: $0)...])) }
+            return ExactAddress(host: host, path: path, query: query)
+        }
+
+        /// Every escaped ASCII character decoded and every non-ASCII byte
+        /// written as an escape with upper-case hex digits, so `%C3%B6`,
+        /// `%c3%b6` and `ö`, or `%7E` and `~`, compare equal. Only for
+        /// comparing: what is opened is a spelling the research showed.
+        static func percentNormalized(_ text: String) -> String {
+            let hex = Array("0123456789ABCDEF")
+            func escape(_ byte: UInt8) -> String {
+                "%" + String(hex[Int(byte >> 4)]) + String(hex[Int(byte & 15)])
+            }
+            let bytes = Array(text.utf8)
+            var result = ""
+            var index = 0
+            while index < bytes.count {
+                let byte = bytes[index]
+                if byte == 0x25, index + 2 < bytes.count,
+                   let high = hexValue(bytes[index + 1]), let low = hexValue(bytes[index + 2]) {
+                    let decoded = UInt8(high << 4 | low)
+                    if decoded < 0x80 {
+                        result.append(Character(Unicode.Scalar(decoded)))
+                    } else {
+                        result += escape(decoded)
+                    }
+                    index += 3
+                } else if byte >= 0x80 {
+                    result += escape(byte)
+                    index += 1
+                } else {
+                    result.append(Character(Unicode.Scalar(byte)))
+                    index += 1
+                }
+            }
+            return result
+        }
+
+        private static func hexValue(_ byte: UInt8) -> Int? {
+            switch byte {
+            case 0x30...0x39: return Int(byte) - 0x30
+            case 0x41...0x46: return Int(byte) - 0x41 + 10
+            case 0x61...0x66: return Int(byte) - 0x61 + 10
+            default: return nil
+            }
+        }
+
+        /// The link in `text` that is the address as a whole link, written
+        /// with `scheme` and without a fragment, or nil: found by its host,
+        /// with or without the scheme and `www.`, the host not part of a
+        /// longer name, and the rest of the link (to the next space or closing
+        /// mark, less trailing punctuation) equal to the address.
+        static func link(in text: String, matching wanted: ExactAddress,
+                         scheme: String) -> String? {
+            var rest = text.startIndex..<text.endIndex
+            let ends = Set("<>\"'`|\\^{}")
+            while let found = text.range(of: wanted.host, options: .caseInsensitive, range: rest) {
+                rest = found.upperBound..<text.endIndex
+                // Keep a written "www." so the address opened is the one on the page.
+                var hostStart = found.lowerBound
+                if text[..<hostStart].suffix(4).lowercased() == "www." {
+                    hostStart = text.index(hostStart, offsetBy: -4)
+                }
+                var start = found.lowerBound
+                for prefix in ["www.", "https://", "http://"]
+                where text[..<start].suffix(prefix.count).lowercased() == prefix {
+                    start = text.index(start, offsetBy: -prefix.count)
+                }
+                if let before = text[..<start].last,
+                   before.isLetter || before.isNumber || "./-@".contains(before) {
+                    continue
+                }
+                var end = found.lowerBound
+                while end < text.endIndex, !text[end].isWhitespace, !ends.contains(text[end]) {
+                    end = text.index(after: end)
+                }
+                var candidate = String(text[hostStart..<end])
+                while true {
+                    if let seen = exactAddress(candidate), seen.key == wanted.key {
+                        let written = candidate.firstIndex(of: "#").map { String(candidate[..<$0]) }
+                            ?? candidate
+                        return asciiAddress(scheme + "://" + written)
+                    }
+                    guard let last = candidate.last, ".,;:!?)]}*_“”„«»‘’›‹".contains(last)
+                    else { break }
+                    candidate.removeLast()
+                }
+            }
+            return nil
         }
 
         /// Web links from the searches: the first hit of every search, then

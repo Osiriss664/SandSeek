@@ -287,7 +287,7 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
         let services = FakeResearchServices(sandboxHealthy: false)
         let store = ResearchReportStore(directory: temporaryDirectory())
         let run = ResearchRunController(store: store, transport: services)
-        run.start(question: "Anything", settings: ResearchRunSettings(model: "m"),
+        run.start(question: "Anything about https://github.com/apple/container", settings: ResearchRunSettings(model: "m"),
                   serverURL: server, sandboxURL: sandbox)
         await waitUntil { !run.isRunning }
 
@@ -301,7 +301,8 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
     }
 
     @Test func aTurnWithoutAnAnswerIsAskedOnceMore() async throws {
-        // A page is read first, so the search-first nudge does not apply.
+        // A page is read first, so the search-first nudge does not apply. The question
+        // names the address, so the only-seen-addresses gate lets it through.
         let services = FakeResearchServices(modelReplies: [
             FakeResearchServices.call("open_page", #"{"url": "https://github.com/apple/container"}"#),
             FakeResearchServices.answer("", reasoning: "Thinking until the budget runs out."),
@@ -309,7 +310,7 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
         ])
         let store = ResearchReportStore(directory: temporaryDirectory())
         let run = ResearchRunController(store: store, transport: services)
-        run.start(question: "Anything", settings: ResearchRunSettings(model: "m"),
+        run.start(question: "Anything about https://github.com/apple/container", settings: ResearchRunSettings(model: "m"),
                   serverURL: server, sandboxURL: sandbox)
         await waitUntil { !run.isRunning }
 
@@ -327,7 +328,7 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
         ])
         let store = ResearchReportStore(directory: temporaryDirectory())
         let run = ResearchRunController(store: store, transport: services)
-        run.start(question: "Anything", settings: ResearchRunSettings(model: "m"),
+        run.start(question: "Anything about https://github.com/apple/container", settings: ResearchRunSettings(model: "m"),
                   serverURL: server, sandboxURL: sandbox)
         await waitUntil { !run.isRunning }
 
@@ -342,7 +343,7 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
         ])
         let store = ResearchReportStore(directory: temporaryDirectory())
         let run = ResearchRunController(store: store, transport: services)
-        run.start(question: "Anything", settings: ResearchRunSettings(model: "m"),
+        run.start(question: "Anything about https://github.com/apple/container", settings: ResearchRunSettings(model: "m"),
                   serverURL: server, sandboxURL: sandbox)
         run.stop()
         #expect(run.phase == .stopped)
@@ -362,7 +363,7 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
         let run = ResearchRunController(
             store: ResearchReportStore(directory: temporaryDirectory()),
             transport: services, wake: wake)
-        run.start(question: "Anything", settings: ResearchRunSettings(model: "m"),
+        run.start(question: "Anything about https://github.com/apple/container", settings: ResearchRunSettings(model: "m"),
                   serverURL: server, sandboxURL: sandbox)
         #expect(wake.events == ["begin"])
         await waitUntil { !run.isRunning }
@@ -374,7 +375,7 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
         let failing = ResearchRunController(
             store: ResearchReportStore(directory: temporaryDirectory()),
             transport: FakeResearchServices(sandboxHealthy: false), wake: failedWake)
-        failing.start(question: "Anything", settings: ResearchRunSettings(model: "m"),
+        failing.start(question: "Anything about https://github.com/apple/container", settings: ResearchRunSettings(model: "m"),
                       serverURL: server, sandboxURL: sandbox)
         await waitUntil { !failing.isRunning }
         #expect(failedWake.events == ["begin", "end"])
@@ -386,7 +387,7 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
             transport: FakeResearchServices(modelReplies: [
                 FakeResearchServices.answer("Too late."),
             ]), wake: stoppedWake)
-        stopping.start(question: "Anything", settings: ResearchRunSettings(model: "m"),
+        stopping.start(question: "Anything about https://github.com/apple/container", settings: ResearchRunSettings(model: "m"),
                        serverURL: server, sandboxURL: sandbox)
         stopping.stop()
         await waitUntil { stoppedWake.events.count == 2 }
@@ -431,7 +432,7 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
         ]))
         let store = ResearchReportStore(directory: temporaryDirectory())
         let run = ResearchRunController(store: store, transport: hanging)
-        run.start(question: "Anything", settings: ResearchRunSettings(model: "m"),
+        run.start(question: "Anything about https://github.com/apple/container", settings: ResearchRunSettings(model: "m"),
                   serverURL: server, sandboxURL: sandbox)
         await waitUntil { hanging.chatCalls >= 2 }
         run.stop()
@@ -815,6 +816,180 @@ private final class MemorySettings: ResearchSettingsStore {
             environment: [:], timeout: 0.5)
         #expect(result.status != 0)
         #expect(ContinuousClock.now - started < .seconds(10))
+    }
+}
+
+/// Waits before answering the sandbox script's `start` while `slowStart` is
+/// set, so a test can look at the state during a restart.
+private final class SlowStartRunner: ResearchProcessRunning, @unchecked Sendable {
+    let inner: FakeProcessRunner
+    let slowStart = LockedFlag()
+
+    init(_ inner: FakeProcessRunner) { self.inner = inner }
+
+    func run(executable: URL, arguments: [String], environment: [String: String],
+             timeout: TimeInterval) async throws -> ResearchProcessResult {
+        if slowStart.value, arguments.last == "start" {
+            try await Task.sleep(for: .milliseconds(400))
+        }
+        return try await inner.run(executable: executable, arguments: arguments,
+                                   environment: environment, timeout: timeout)
+    }
+}
+
+@Suite @MainActor struct ResearchWorkspaceRestartTests {
+    private struct Setup {
+        let workspace: ResearchWorkspace
+        let sandbox: ResearchSandboxController
+        let run: ResearchRunController
+        let runServices: FakeResearchServices
+        let stateDirectory: URL
+    }
+
+    private func setup(runner: any ResearchProcessRunning) async throws -> Setup {
+        let stateDirectory = temporaryDirectory()
+        let sandbox = ResearchSandboxController(
+            runner: runner, transport: FakeResearchServices(), defaults: MemorySettings(),
+            environment: [:], searchStart: [try fakeCheckout()], stateDirectory: stateDirectory)
+        let server = ResearchModelServerController(
+            backgroundAPI: AppBackgroundAPIController(
+                settingsURL: temporaryDirectory().appendingPathComponent("server.json")),
+            transport: FakeResearchServices(listedModels: ["m"]),
+            serverExecutable: nil, modelsRoot: nil,
+            logURL: temporaryDirectory().appendingPathComponent("server.log"),
+            stateDirectory: temporaryDirectory(),
+            processInfo: { _ in nil })
+        let reports = ResearchReportStore(directory: temporaryDirectory())
+        // One reply per question is enough with the nudges and rewrites off,
+        // so no request reaches the fake with nothing scripted.
+        let runServices = FakeResearchServices(
+            modelReplies: Array(repeating: FakeResearchServices.answer("An answer."), count: 8))
+        let run = ResearchRunController(store: reports, transport: runServices)
+        await server.refresh()
+        return Setup(
+            workspace: ResearchWorkspace(sandbox: sandbox, server: server, reports: reports, run: run),
+            sandbox: sandbox, run: run, runServices: runServices, stateDirectory: stateDirectory)
+    }
+
+    private static let settings = ResearchRunSettings(
+        model: "m", maxSteps: 2, autoOpenPages: false, nudges: false, reviseUnreadCitations: false)
+
+    private func ask(_ setup: Setup) async {
+        await setup.workspace.ask("Question", settings: Self.settings)
+        await waitUntil { !setup.run.isRunning }
+    }
+
+    @Test func theSecondQuestionRunsInAFreshVMAndTheFirstDoesNot() async throws {
+        let runner = FakeProcessRunner()
+        let setup = try await setup(runner: runner)
+        await setup.sandbox.start()
+        #expect(setup.workspace.servicesReady)
+        #expect(!setup.workspace.sandboxUsed)
+
+        await ask(setup)
+        #expect(runner.scriptCommands == ["build", "start"])
+        #expect(setup.workspace.sandboxUsed)
+
+        await ask(setup)
+        // One more start, no stop and no rebuild; the marker is still there.
+        #expect(runner.scriptCommands == ["build", "start", "start"])
+        #expect(setup.sandbox.state == .ready)
+        #expect(setup.sandbox.protection == .verified)
+        #expect(setup.sandbox.startedByApp)
+        #expect(FileManager.default.fileExists(
+            atPath: setup.stateDirectory.appendingPathComponent("sandbox-started-by-app").path))
+        #expect(setup.workspace.sandboxUsed)
+
+        await ask(setup)
+        #expect(runner.scriptCommands == ["build", "start", "start", "start"])
+        #expect(runner.scriptCommands.filter { $0 == "stop" }.isEmpty)
+    }
+
+    @Test func aSandboxStartedByHandIsNotRestarted() async throws {
+        let runner = FakeProcessRunner()
+        let setup = try await setup(runner: runner)
+        await setup.sandbox.refresh()
+        #expect(setup.sandbox.state == .ready)
+        #expect(!setup.sandbox.startedByApp)
+
+        await ask(setup)
+        await ask(setup)
+        #expect(runner.scriptCommands.isEmpty)
+        #expect(setup.run.phase != .idle)
+    }
+
+    @Test func questionsStayOffAndTheMarkerStaysDuringTheRestart() async throws {
+        let slow = SlowStartRunner(FakeProcessRunner())
+        let setup = try await setup(runner: slow)
+        await setup.sandbox.start()
+        await ask(setup)
+        slow.slowStart.value = true
+
+        let second = Task { @MainActor in await ask(setup) }
+        await waitUntil { setup.sandbox.state == .starting }
+        #expect(setup.sandbox.state == .starting)
+        #expect(!setup.workspace.servicesReady)
+        #expect(setup.sandbox.restartNote == "Restarting the sandbox for this question")
+        #expect(setup.sandbox.startedByApp)
+        #expect(FileManager.default.fileExists(
+            atPath: setup.stateDirectory.appendingPathComponent("sandbox-started-by-app").path))
+        // Another question while it restarts is not started.
+        await setup.workspace.ask("Another", settings: ResearchRunSettings(model: "m"))
+        #expect(!setup.run.isRunning)
+
+        await second.value
+        #expect(setup.sandbox.state == .ready)
+        #expect(setup.sandbox.restartNote == nil)
+        #expect(setup.workspace.servicesReady)
+    }
+
+    @Test func aFailedRestartStartsNoQuestionUntilTheSandboxIsStartedAgain() async throws {
+        let failing = LockedFlag()
+        let runner = FakeProcessRunner { command in
+            if command.last == "start", failing.value {
+                return ResearchProcessResult(status: 1, output: "container: boom\n")
+            }
+            return FakeProcessRunner.healthy(command)
+        }
+        let setup = try await setup(runner: runner)
+        await setup.sandbox.start()
+        await ask(setup)
+        let modelCallsBefore = setup.runServices.paths.filter { $0 == "/v1/chat/completions" }.count
+
+        failing.value = true
+        await ask(setup)
+        guard case .failed(let message) = setup.sandbox.state else {
+            Issue.record("expected a failed sandbox, got \(setup.sandbox.state)")
+            return
+        }
+        #expect(message.contains("restart the sandbox"))
+        #expect(!setup.workspace.servicesReady)
+        #expect(!setup.run.isRunning)
+        #expect(setup.runServices.paths.filter { $0 == "/v1/chat/completions" }.count == modelCallsBefore)
+        // The marker stays, so quitting still stops a VM that may be half started.
+        #expect(setup.sandbox.startedByApp)
+
+        // Starting it again gives a fresh VM, so the next question needs no restart.
+        failing.value = false
+        await setup.sandbox.start()
+        #expect(setup.workspace.servicesReady)
+        #expect(!setup.workspace.sandboxUsed)
+        let startsBefore = runner.scriptCommands.filter { $0 == "start" }.count
+        await ask(setup)
+        #expect(runner.scriptCommands.filter { $0 == "start" }.count == startsBefore)
+    }
+
+    @Test func aChangedSandboxFolderIsRebuiltDuringTheRestart() async throws {
+        let runner = FakeProcessRunner()
+        let setup = try await setup(runner: runner)
+        await setup.sandbox.start()
+        await ask(setup)
+        let root = try #require(setup.sandbox.repository)
+        try Data("print('changed')\n".utf8).write(
+            to: root.appendingPathComponent("Sandbox/web-research/server.py"))
+        await ask(setup)
+        #expect(runner.scriptCommands == ["build", "start", "build", "start"])
+        #expect(setup.sandbox.state == .ready)
     }
 }
 

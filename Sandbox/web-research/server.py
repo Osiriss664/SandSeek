@@ -41,11 +41,13 @@ import math
 import multiprocessing
 import os
 import re
+import signal
 import socket
 import ssl
 import sys
 import threading
 import time
+import unicodedata
 import urllib.parse
 import zlib
 from collections import Counter, OrderedDict
@@ -174,6 +176,11 @@ class Target:
         return f"{self.scheme}://{netloc}{self.path}"
 
 
+# Every ASCII character `quote` must leave alone, so that only non-ASCII
+# characters change.
+ASCII_URL_SAFE = "".join(chr(c) for c in range(0x21, 0x7f))
+
+
 def check_url(url: str, resolver: Callable[[str, int], list[str]]) -> Target:
     """Parses `url` and pins it to one public address, or refuses it."""
     if not isinstance(url, str) or len(url) > 4096:
@@ -188,7 +195,8 @@ def check_url(url: str, resolver: Callable[[str, int], list[str]]) -> Target:
         raise ToolError("only http and https URLs can be fetched", "invalid_url")
     if parts.username or parts.password:
         raise ToolError("URLs with credentials are refused", "invalid_url")
-    if CONTROL_CHARACTERS.search(url) or any(c.isspace() for c in url.strip()):
+    if (CONTROL_CHARACTERS.search(url) or has_format_character(url)
+            or any(c.isspace() for c in url.strip())):
         raise ToolError("URL contains spaces or control characters", "invalid_url")
     host = (parts.hostname or "").rstrip(".").lower()
     if not host:
@@ -213,9 +221,11 @@ def check_url(url: str, resolver: Callable[[str, int], list[str]]) -> Target:
     blocked = [a for a in addresses if not is_public_address(a)]
     if blocked:
         raise ToolError(f"{host} resolves to a non-public address", "blocked_address", 403)
-    path = parts.path or "/"
+    # http.client refuses non-ASCII request lines; send them as UTF-8 escapes,
+    # as a browser does. Existing %XX escapes and ASCII are left as they are.
+    path = urllib.parse.quote(parts.path or "/", safe=ASCII_URL_SAFE)
     if parts.query:
-        path += "?" + parts.query
+        path += "?" + urllib.parse.quote(parts.query, safe=ASCII_URL_SAFE)
     # IPv4 first: the VM may have no IPv6 route, and every answer is public.
     preferred = sorted(addresses, key=lambda a: ":" in a)[0]
     return Target(scheme, host, port, path, preferred)
@@ -354,10 +364,24 @@ CONTROL_CHARACTERS = re.compile(
     "\uffa0\U000e0000-\U000e007f\U000e0100-\U000e01ef]")
 
 
+# Every Unicode format character (category Cf) is removed as well: the list
+# above misses about fifty of them (U+206A-206F, U+FFF9-FFFB, U+070F, the
+# Egyptian hieroglyph and shorthand format controls, ...). Built once at
+# import (about 0.2 s); applying it to a 240 000 character page takes under
+# a millisecond. Arabic number signs (U+0600-0605, U+06DD, U+08E2) are
+# visible but rare and are dropped with the rest.
+FORMAT_CHARACTERS = {
+    cp: None for cp in range(sys.maxunicode + 1) if unicodedata.category(chr(cp)) == "Cf"}
+
+
+def has_format_character(text: str) -> bool:
+    return any(unicodedata.category(c) == "Cf" for c in text)
+
+
 def clean_text(text: str) -> str:
     for separator in ("\r\n", "\r", "\u2028", "\u2029"):
         text = text.replace(separator, "\n")
-    return CONTROL_CHARACTERS.sub("", text)
+    return CONTROL_CHARACTERS.sub("", text.translate(FORMAT_CHARACTERS))
 
 
 # --- Extraction -------------------------------------------------------------
@@ -827,7 +851,8 @@ def unwrap_duckduckgo(href: str) -> str | None:
 
 def is_plain_web_url(url: str) -> bool:
     return (url.startswith(("http://", "https://")) and len(url) <= 4096
-            and not CONTROL_CHARACTERS.search(url) and not any(c.isspace() for c in url))
+            and not CONTROL_CHARACTERS.search(url) and not has_format_character(url)
+            and not any(c.isspace() for c in url))
 
 
 def parse_duckduckgo(markup: str) -> list[dict]:
@@ -944,15 +969,30 @@ def drop_privileges(uid: int = SANDBOX_UID) -> None:
             raise OSError(errno.EPERM, f"{name} is not empty after dropping privileges")
 
 
+def stop_on_sigterm(server) -> None:
+    """The server is PID 1 in the VM and PID 1 ignores SIGTERM unless it has a
+    handler, so `container stop` would wait out its grace period before
+    killing it. The app restarts the VM before every question, so shut down
+    cleanly instead. `shutdown()` waits for `serve_forever()`, which the signal
+    interrupts in this very thread, so it runs in another one."""
+    def handler(signum, frame):
+        threading.Thread(target=server.shutdown, daemon=True).start()
+    signal.signal(signal.SIGTERM, handler)
+
+
 def main():
     drop_privileges()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     server.daemon_threads = True
+    stop_on_sigterm(server)
     sys.stderr.write(f"TUFF web research sandbox listening on :{PORT}\n")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        server.server_close()
+    sys.exit(0)
 
 
 if __name__ == "__main__":

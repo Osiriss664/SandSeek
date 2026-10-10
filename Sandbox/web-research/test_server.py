@@ -302,6 +302,31 @@ class FetchTests(unittest.TestCase):
         self.assertEqual(server.clean_text(text), "ab")
         self.assertEqual(server.clean_text("ok \u2764\ufe0f"), "ok \u2764\ufe0f")
 
+    def test_all_format_characters_are_removed(self):
+        import sys
+        import unicodedata
+        for cp in range(sys.maxunicode + 1):
+            if unicodedata.category(chr(cp)) == "Cf":
+                self.assertEqual(server.clean_text(f"a{chr(cp)}b"), "ab", hex(cp))
+        for kept in ("\u00e9", "\U0001f600", "\U0001f44d\U0001f3fd", "\u00df", "\u2764\ufe0f"):
+            self.assertEqual(server.clean_text(kept), kept)
+
+    def test_non_ascii_path_and_query_are_percent_encoded(self):
+        resolve = resolver({"example.com": ["93.184.216.34"]})
+        target = server.check_url("https://example.com/wiki/K\u00f6ln/%C3%A4?q=\u00fc&a=%20", resolve)
+        self.assertEqual(target.path, "/wiki/K%C3%B6ln/%C3%A4?q=%C3%BC&a=%20")
+        self.assertTrue(target.path.isascii())
+
+    def test_format_characters_in_urls_are_refused(self):
+        resolve = resolver({"example.com": ["93.184.216.34"]})
+        for url in ["https://example.com/a\u206ab", "https://example.com/\U000e0041"]:
+            with self.assertRaises(ToolError, msg=url) as caught:
+                server.check_url(url, resolve)
+            self.assertEqual(caught.exception.code, "invalid_url")
+        self.assertFalse(server.is_plain_web_url("https://example.com/a\u206ab"))
+        self.assertFalse(server.is_plain_web_url("https://example.com/a\ufff9"))
+        self.assertTrue(server.is_plain_web_url("https://example.com/\u00e9"))
+
     def test_meta_charset_is_used_when_the_header_has_none(self):
         markup = '<html><head><meta charset="windows-1252"><title>Gr\xfc\xdfe</title></head>' \
                  '<body><p>M\xfcnchen</p></body></html>'
@@ -799,6 +824,25 @@ class HTTPAPITests(unittest.TestCase):
 
     def test_unknown_path(self):
         self.assertEqual(self.call("POST", "/v1/shell", {})[0], 404)
+
+
+class SigtermTests(unittest.TestCase):
+    def test_sigterm_shuts_the_server_down_cleanly_with_exit_0(self):
+        import signal
+        import subprocess
+        code = ("import server; server.drop_privileges = lambda: None; "
+                "server.PORT = 0; server.main()")
+        process = subprocess.Popen(
+            [sys.executable, "-c", code], cwd=os.path.dirname(os.path.abspath(__file__)),
+            stderr=subprocess.PIPE, text=True)
+        try:
+            self.assertIn("listening", process.stderr.readline())
+            process.send_signal(signal.SIGTERM)
+            self.assertEqual(process.wait(timeout=10), 0)
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.stderr.close()
 
 
 if __name__ == "__main__":

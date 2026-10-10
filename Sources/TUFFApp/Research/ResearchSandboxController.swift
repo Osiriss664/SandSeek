@@ -132,6 +132,12 @@ public final class ResearchSandboxController {
     public private(set) var startedByApp = false {
         didSet { writeMarker() }
     }
+    /// Fresh VMs this controller has started (`start` and `restart`). The
+    /// workspace compares it to know whether a question ran in the current VM.
+    public private(set) var freshStarts = 0
+    /// What the card says while `restart` builds or starts the VM for the
+    /// next question; nil otherwise.
+    public private(set) var restartNote: String?
     public let baseURL: URL
     private let stateDirectory: URL
 
@@ -467,12 +473,63 @@ public final class ResearchSandboxController {
         }
         startedByApp = true
         adoptedFromLastRun = false
+        freshStarts += 1
         guard await isHealthy() else {
             state = .failed("The sandbox started but does not answer on \(baseURL.absoluteString).")
             return
         }
         state = .ready
         await verifyProtection()
+    }
+
+    /// Replaces the running VM with a fresh one, for the next question. Not
+    /// `stop` then `start`: in between the state would be `.off` (the card
+    /// would offer Start, and a click would start the script twice) and the
+    /// marker file would be gone, so a crash during the start would leave the
+    /// VM running with nobody to stop it. Here the state goes straight to
+    /// `.starting`, `startedByApp` and the marker stay, and `start` of the
+    /// script (which stops and deletes the old VM itself) does the work. It
+    /// rebuilds the image first when the sandbox's files changed. On any
+    /// failure the state is `.failed` and no question may start. Does nothing
+    /// for a sandbox the app did not start.
+    @discardableResult
+    public func restart() async -> Bool {
+        guard !state.isBusy, startedByApp else { return false }
+        guard let script, let repository else {
+            state = .failed("Choose your TUFF folder so the app can find the web sandbox.")
+            return false
+        }
+        selfTest = nil
+        state = .starting
+        restartNote = "Restarting the sandbox for this question"
+        defer { restartNote = nil }
+        let fingerprint = Self.fingerprint(
+            of: repository.appendingPathComponent("Sandbox/web-research", isDirectory: true))
+        if await needsBuild(fingerprint: fingerprint) {
+            restartNote = "Rebuilding the sandbox"
+            state = .preparing
+            guard let built = await runScript(script, "build") else { return false }
+            guard built.status == 0 else {
+                state = .failed(Self.message(for: built, doing: "build the sandbox image"))
+                return false
+            }
+            defaults.save(fingerprint, forKey: Self.fingerprintKey)
+            state = .starting
+        }
+        guard let started = await runScript(script, "start") else { return false }
+        guard started.status == 0 else {
+            state = .failed(Self.message(for: started, doing: "restart the sandbox"))
+            return false
+        }
+        adoptedFromLastRun = false
+        freshStarts += 1
+        guard await isHealthy() else {
+            state = .failed("The sandbox restarted but does not answer on \(baseURL.absoluteString).")
+            return false
+        }
+        state = .ready
+        await verifyProtection()
+        return state == .ready && protection == .verified
     }
 
     public func stop() async {

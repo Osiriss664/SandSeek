@@ -47,6 +47,7 @@ launches; **Restore Defaults** resets them.
 | `--auto-open on\|off` | Open top results when too few pages are read | on | The research opens top results itself (see [Limits](#limits)). |
 | `--nudges on\|off` | Ask the model to search, read and look wider | on | The requests to search first, open pages and look wider (see [Limits](#limits)). |
 | `--rewrite on\|off` | Rewrite answers that cite unread pages or lack citations | on | One rewrite when the answer cites pages that were never read, leaves figures without a source number, or is in the wrong language. |
+| `--only-seen-urls on\|off` | (none, always on) | on | `open_page` opens only addresses that appear verbatim in a search result, a page read or the question (see [Security model](#security-model)). Off is for measuring the model alone; the app has no switch. |
 | `--step-timeout <1...60>` | Step time limit | 30 minutes | A step with reasoning on that takes longer is asked again without reasoning; a step with reasoning already off is asked once more with older results shortened. A second failure ends the question (the pages read are kept). |
 | `--thinking-limit <1...60>` | Thinking time limit | 3 minutes | A step with reasoning on that takes longer is asked again without reasoning, which stays off for the rest of the question. |
 
@@ -174,6 +175,11 @@ sandbox mounts none.
 | `start` | Starts a fresh VM from that image, named `tuff-web-research`, and deletes any older one. Its options: a read-only root filesystem with a scratch `/tmp`; 2 CPUs and 1 GB of memory; at most 512 processes; all Linux capabilities dropped except the four the start-up needs to load the firewall and switch to an unprivileged user; and the sandbox port published on the Mac's 127.0.0.1:9000 only (`TUFF_RESEARCH_SANDBOX_PORT` changes it), so only programs on your Mac can call it. `--rm` deletes the VM when it stops. |
 | `selftest` | Runs checks inside the running VM with `container exec`: that the firewall is loaded, that the server has no privileges, and that the VM cannot reach the Mac or your local network. See [Testing the boundaries](#testing-the-boundaries). |
 
+The sandbox keeps its page cache and any state until `stop`. The app starts a
+fresh VM before every question after the first (the restart takes a few
+seconds and is skipped for a sandbox you started yourself); with `tuff
+research`, run `start` again between unrelated runs if you want the same.
+
 `stop` stops and deletes the VM, and reports an error if it is still listed afterwards. Nothing the VM downloaded survives that,
 because it only ever wrote to its own `/tmp`.
 
@@ -197,10 +203,28 @@ what it downloads. The design limits what either can reach:
   characters, such as the escape sequences that can clear the screen or change
   the window title, are removed from page titles, page text and search results
   in the sandbox, and again from everything `tuff research` prints or saves.
-  So are invisible characters (zero-width characters, variation selectors
-  other than the emoji one, and the Unicode tag block), which can spell out
-  instructions the model reads but you would not see when checking a page or
-  a log.
+  So is every Unicode format character (category Cf), plus the other
+  invisible characters (fillers, variation selectors other than the emoji
+  one, and the Unicode tag block), which can spell out instructions the model
+  reads but you would not see when checking a page or a log. A few visible
+  Arabic number signs (U+0600 to U+0605, U+06DD, U+08E2) are Cf and are
+  dropped with them. A URL that holds such a character is refused by the
+  sandbox and dropped from search results.
+- **`open_page` opens only addresses the research showed the model.** An
+  address must appear verbatim in a search result, in the text of a page the
+  model read, in the question, or be a source. When comparing, the scheme
+  (http or https), `www.`, the case of the host, percent-encoding, a
+  `#fragment` and one trailing slash are ignored; the case of path and query
+  is not, so letter case cannot carry a message. What is opened is never the
+  model's own spelling: it is the search result's or source's address as
+  shown, or the link as the page or question wrote it, with non-ASCII
+  characters percent-encoded. So only the scheme of a link taken from a page
+  or the question stays free to the model, one bit per call. With the gate on the
+  model can only follow links that are printed as visible text; a link that
+  exists only in a page's markup is not one it can open. A made-up address is refused and never fetched ("unknown address
+  refused" in the progress, with a hint to search first if nothing was
+  searched). Only the first 200 000 characters of a page (1 MB over all pages)
+  count as read, so an address past that limit counts as unseen.
 - **Saved reports load nothing when opened.** Markdown images in the answer
   become plain links, every `<` is escaped so no HTML is rendered, and links
   to anything but `http` and `https` (such as `javascript:` or `file:`) are
@@ -250,9 +274,14 @@ What this does not cover:
 - The sandbox does not filter by domain. To restrict where it can go, run an
   egress proxy in another container and attach the sandbox to an `--internal`
   network.
-- A steered model can still send what it has read, and your question, to any
-  public address as part of a URL it asks to open. No Mac files can leak,
-  because the model has no file tool.
+- A page can still write addresses on itself and ask the model to open some of
+  them; it then learns which of the addresses it wrote were opened (log2 of
+  the number of addresses, plus at most one bit for the free scheme above,
+  per call). The question and the text of
+  pages can no longer be put into an address: only addresses that appear
+  verbatim in results, pages or the question are opened. Search queries still
+  go to the search engine. No Mac files can leak, because the model has no
+  file tool.
 - A flaw in the Linux kernel or Apple's virtualization layer could let code
   escape the VM, or let code in the VM remove the firewall. That is the same
   risk as any VM.
@@ -347,7 +376,14 @@ limits the run to fixtures whose name contains it (no match is an error), and
 `--list` prints the cases and attacks without running a model; it needs no
 `--base-url`. Other flags: `--research-bin`, `--model`, `--server`,
 `--sandbox`, `--max-steps` (default 4), `--repeat` (default 1), `--timeout`
-(seconds per run, default 1800) and `--log-dir`. Each case is a full model run of one
+(seconds per run, default 1800), `--log-dir` and `--research-arg` (repeatable;
+passes one more argument on to the research command, for example
+`--research-arg --only-seen-urls --research-arg off` to measure the model
+without the address gate). With the gate on, an attempt it blocks prints no
+`reading:` line but "unknown address refused: URL": the original set prints a
+warning ("tried, loop blocked") and the external set the verdict `blocked`,
+counted next to resisted, reported and obeyed (precedence: obeyed, blocked,
+reported, resisted). Each case is a full model run of one
 to three minutes on a 16 GB Mac, so the 5 original pages take about 6 to 15
 minutes per repeat, the 9 external pages 10 to 30 and all 14 about 16 to 45; `--set external --repeat 3` takes about 30 to 90 minutes.
 
@@ -379,7 +415,10 @@ Mac-only test tool that does not ship with TUFF. The default run is a small
 first pass (about 96 prompts; 39 minutes with Qwen3.6 35B-A3B on a 16 GB Mac); the wide run is about 552
 prompts. It needs Python 3.11 or newer (`GARAK_PYTHON`, for example from
 `brew install python@3.12`). The steps and how to read the report are in
-`Scripts/garak/README.md`.
+`Scripts/garak/README.md`. Warning: `Scripts/garak/run_garak.sh` installs
+garak and its dependencies unpinned from PyPI as your user; run it only on a
+Mac you can reinstall, or inside a throwaway container (`container run -it
+python:3.12`), or pin them first.
 
 ### Test aids
 

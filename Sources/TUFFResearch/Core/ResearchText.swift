@@ -129,6 +129,8 @@ public enum ResearchText {
     }
 
     static func isUnsafe(_ scalar: Unicode.Scalar) -> Bool {
+        // Every format character (Unicode category Cf), listed or not.
+        if scalar.properties.generalCategory == .format { return true }
         switch scalar.value {
         case 0x09, 0x0A: return false
         case 0x00...0x1F, 0x7F...0x9F: return true
