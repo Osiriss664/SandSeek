@@ -1087,9 +1087,19 @@ public struct ResearchAgent: Sendable {
     /// `looksCutOff`): it stopped at the end of a word, so a space is added
     /// when neither side has one and the continuation starts with a letter
     /// or a digit.
+    ///
+    /// A cut at the token limit (not `spaced`) may be repeated at the seam by
+    /// the model: the continuation begins with exactly the text the answer
+    /// ends with. That part is dropped from the continuation (see
+    /// `repeatedAtSeam`). A continuation that starts a block is left to the
+    /// rules above.
     static func joined(_ partial: String, _ continuation: String, spaced: Bool = false) -> String {
         let range = NSRange(continuation.startIndex..., in: continuation)
         let startsBlock = blockStart.firstMatch(in: continuation, range: range) != nil
+        if !spaced, !startsBlock {
+            let repeated = repeatedAtSeam(partial, continuation)
+            if repeated > 0 { return partial + continuation.dropFirst(repeated) }
+        }
         if spaced, !startsBlock, let last = partial.last, !last.isWhitespace,
            let first = continuation.first, first.isLetter || first.isNumber {
             return partial + " " + continuation
@@ -1107,6 +1117,51 @@ public struct ResearchAgent: Sendable {
             return String(partial[...lineBreak]) + continuation
         }
         return partial + "\n" + continuation
+    }
+
+    /// How many characters at the start of the continuation repeat the end of
+    /// the cut answer: an overlap of at least 12 characters with a letter in it
+    /// and no repeating pattern (the longest, up to 200), or else 1 to 3
+    /// characters that are all symbols or punctuation (`€`, `%`, `**`) when the
+    /// answer did not end with white space. A backtick is never dropped, and
+    /// a single `-`, `.` or `*` is not either (a cut inside `---`, `...`, `**`).
+    /// Letters and digits are never dropped for a short overlap ("Jahr" + "r 2026"
+    /// keeps both). 0 when nothing is repeated.
+    private static func repeatedAtSeam(_ partial: String, _ continuation: String) -> Int {
+        let end = Array(partial.suffix(200))
+        let start = Array(continuation.prefix(200))
+        let most = min(end.count, start.count)
+        if most >= 12 {
+            for length in stride(from: most, through: 12, by: -1)
+            where end.suffix(length).elementsEqual(start.prefix(length)) {
+                // A table rule or a row of marks repeats by itself, so the
+                // overlap is no sign of a repeat; a real one has a letter.
+                let overlap = start.prefix(length)
+                if overlap.contains(where: \.isLetter), !isPeriodic(overlap) { return length }
+            }
+        }
+        guard let last = end.last, !last.isWhitespace else { return 0 }
+        for length in stride(from: min(3, most), through: 1, by: -1) {
+            let overlap = start.prefix(length)
+            if end.suffix(length).elementsEqual(overlap),
+               overlap.allSatisfy({ !$0.isLetter && !$0.isNumber && !$0.isWhitespace && $0 != "`" }),
+               length > 1 || !"-.*".contains(overlap[overlap.startIndex]) {
+                return length
+            }
+        }
+        return 0
+    }
+
+    /// Whether a text is a shorter unit repeated, with a period of at most
+    /// half its length (`---|---|---|`).
+    private static func isPeriodic(_ text: ArraySlice<Character>) -> Bool {
+        let chars = Array(text)
+        guard chars.count >= 2 else { return false }
+        for period in 1...(chars.count / 2)
+        where (period..<chars.count).allSatisfy({ chars[$0] == chars[$0 - period] }) {
+            return true
+        }
+        return false
     }
 
     /// Whether the unfinished last line of a partial answer is replaced by

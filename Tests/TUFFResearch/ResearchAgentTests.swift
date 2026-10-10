@@ -5726,6 +5726,33 @@ struct ResearchRoundETests {
         #expect(ResearchAgent.joined("Es gab:", "- eins", spaced: true) == "Es gab:\n- eins")
     }
 
+    @Test func aRepeatedSeamIsDroppedAtTheTokenLimit() {
+        // A symbol or punctuation the model wrote again.
+        #expect(ResearchAgent.joined("oft 400–740 €", "€ pro Jahr.") == "oft 400–740 € pro Jahr.")
+        #expect(ResearchAgent.joined("Kosten 30 %", "% der Summe") == "Kosten 30 % der Summe")
+        #expect(ResearchAgent.joined("Das ist **wichtig**", "** und mehr")
+            == "Das ist **wichtig** und mehr")
+        // A repeated word group of 12 or more characters.
+        #expect(ResearchAgent.joined("Hinweis. Die Förderung beträgt bis zu",
+                                     "Die Förderung beträgt bis zu 70 %.")
+            == "Hinweis. Die Förderung beträgt bis zu 70 %.")
+        // Letters and digits are kept for a short overlap, and so is a seam without overlap.
+        #expect(ResearchAgent.joined("Das war im Jahr", "r 2026") == "Das war im Jahrr 2026")
+        #expect(ResearchAgent.joined("Das kostet 20", "0 Euro") == "Das kostet 200 Euro")
+        #expect(ResearchAgent.joined("Das kostet €", "pro Jahr") == "Das kostet €pro Jahr")
+        // A repeating pattern or a cut inside a run of marks is no repeat.
+        #expect(ResearchAgent.joined("|---|---|---|", "---|---|---|\n| x")
+            == "|---|---|---|---|---|---|\n| x")
+        #expect(ResearchAgent.joined("| ✓ | ✓ | ✓ |", " ✓ | ✓ | ✓ |") == "| ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |")
+        #expect(ResearchAgent.joined("Text *", "*wichtig**") == "Text **wichtig**")
+        #expect(ResearchAgent.joined("-", "--\n") == "---\n")
+        #expect(ResearchAgent.joined("`", "``swift") == "```swift")
+        // After white space nothing short is dropped, and a seeming cut-off is left alone.
+        #expect(ResearchAgent.joined("Das kostet € ", "€ pro Jahr") == "Das kostet € € pro Jahr")
+        #expect(ResearchAgent.joined("Kosten 30 %", "% der Summe", spaced: true)
+            == "Kosten 30 %% der Summe")
+    }
+
     @Test func aSourceEntryAfterAHalfEntryDropsTheHalfEntry() {
         // The Berlin case: the model skipped the rest of entry 26.
         let partial = "Quellen:\n[25] Name Eins, https://a.example/\n[26] Name Ko"
