@@ -1,6 +1,6 @@
 import Foundation
 import Testing
-@testable import TUFFResearchCore
+@testable import SandSeekCore
 
 /// Answers the TUFF server and the sandbox from scripts, and records requests.
 private final class FakeServices: ResearchHTTPTransport, @unchecked Sendable {

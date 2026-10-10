@@ -1,5 +1,5 @@
 import Foundation
-import TUFFResearchCore
+import SandSeekCore
 
 private func writeError(_ text: String) {
     FileHandle.standardError.write(Data((text + "\n").utf8))

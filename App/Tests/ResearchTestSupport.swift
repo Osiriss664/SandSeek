@@ -1,6 +1,6 @@
 import Foundation
 @testable import TUFFAppResearch
-@testable import TUFFResearchCore
+@testable import SandSeekCore
 
 /// Answers the model server and the sandbox from scripts, like the fakes in
 /// the research loop's own tests.

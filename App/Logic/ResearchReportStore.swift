@@ -1,6 +1,6 @@
 import Foundation
 import Observation
-import TUFFResearchCore
+import SandSeekCore
 
 /// One entry in a run's progress list.
 public struct ResearchStep: Codable, Equatable, Identifiable, Sendable {

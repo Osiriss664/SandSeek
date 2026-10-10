@@ -1,5 +1,5 @@
 import Foundation
-import TUFFResearchCore
+import SandSeekCore
 
 /// Turns a research answer into text the app can show safely. The answer is
 /// written by a model that read web pages, so it is shown as text only: links

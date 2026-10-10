@@ -3,7 +3,7 @@ import SwiftUI
 import TUFFAppCore
 import TUFFAppResearch
 import TUFFMacPresentation
-import TUFFResearchCore
+import SandSeekCore
 import UniformTypeIdentifiers
 
 /// Web research: a local model searches and reads the web through the

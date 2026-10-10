@@ -1,6 +1,6 @@
 import Foundation
 import Observation
-import TUFFResearchCore
+import SandSeekCore
 
 /// The same settings as the `tuff research` options, with the same
 /// defaults and ranges (`ResearchOptions`).

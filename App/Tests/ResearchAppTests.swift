@@ -3,7 +3,7 @@ import Foundation
 import Testing
 @testable import TUFFAppResearch
 import TUFFAppServer
-@testable import TUFFResearchCore
+@testable import SandSeekCore
 
 @Suite struct ResearchAnswerFormatterTests {
     private func links(in text: AttributedString) -> [URL] {

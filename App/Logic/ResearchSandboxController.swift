@@ -1,7 +1,7 @@
 import CryptoKit
 import Foundation
 import Observation
-import TUFFResearchCore
+import SandSeekCore
 
 /// The two string settings the sandbox controller remembers. Tests pass an
 /// in-memory store so a run never writes real preferences.

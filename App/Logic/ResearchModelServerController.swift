@@ -3,7 +3,7 @@ import Foundation
 import Observation
 import TUFFAppServer
 import TUFFModelCatalog
-import TUFFResearchCore
+import SandSeekCore
 
 public struct ResearchServedModel: Equatable, Identifiable, Hashable, Sendable {
     /// The id the server routes by, such as `gemma-4-e4b-it`.
