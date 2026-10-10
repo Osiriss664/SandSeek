@@ -191,7 +191,8 @@ enum ResearchFigureCheck {
             // In the part that rates the sources, a figure stands next to the
             // source's name, not next to what the question is about.
             for item in figureFindings(scanned: scanned, words: sentenceWords, pages: checked,
-                                       proximity: !ratings[pieceIndex]) {
+                                       proximity: !ratings[pieceIndex],
+                                       todayYear: todayParts.first ?? 0) {
                 add(item)
             }
             // Source lists and headings are lists of titles, not claims. A
@@ -287,15 +288,36 @@ enum ResearchFigureCheck {
     /// cites, or not near what it names.
     private static func figureFindings(scanned: Scan, words: [Word],
                                        pages: [(number: Int, page: PageFacts)],
-                                       proximity: Bool = true)
+                                       proximity: Bool = true,
+                                       todayYear: Int = 0)
         -> [ResearchUnverifiedFigure] {
         guard !pages.isEmpty else { return [] }
         var candidates: [Candidate] = []
         for mention in scanned.dates { candidates.append(.date(mention)) }
         for mention in scanned.monthYears { candidates.append(.monthYear(mention)) }
-        for token in tokens(in: withoutNoise(scanned.remainder)) {
+        let plain = withoutNoise(scanned.remainder)
+        let all = tokens(in: plain)
+        // A rounded range (`32–33 %`) is backed by a value between its ends
+        // on the page (`32,3`).
+        var bounds: [Int: ClosedRange<Double>] = [:]
+        for (low, high) in rangePairs(of: all, in: plain) {
+            // Only a rounded range of whole numbers (`32–33`, not `5,4–6,2`)
+            // with ends close together.
+            guard !all[low].ignored, !all[high].ignored,
+                  all[low].text == all[low].digits, all[high].text == all[high].digits,
+                  let first = numericValues(all[low]).first,
+                  let second = numericValues(all[high]).first, first < second,
+                  second - first <= max(2, first / 10) else { continue }
+            bounds[low] = first...second
+            bounds[high] = first...second
+        }
+        for (index, token) in all.enumerated() {
             if !token.ignored {
-                candidates.append(.number(token))
+                if let range = bounds[index] {
+                    candidates.append(.ranged(token, range))
+                } else {
+                    candidates.append(.number(token))
+                }
             } else if isYear(token.text), !token.glued {
                 candidates.append(.year(token))
             }
@@ -303,7 +325,7 @@ enum ResearchFigureCheck {
         let names = contextNames(in: words)
         var result: [ResearchUnverifiedFigure] = []
         for candidate in candidates {
-            let (figure, present) = candidate.check(in: pages.map { $0.page })
+            let (figure, present) = candidate.check(in: pages.map { $0.page }, todayYear: todayYear)
             if !present {
                 result.append(ResearchUnverifiedFigure(figure: figure, sources: pages.map { $0.number }))
             } else if proximity,
@@ -406,8 +428,18 @@ enum ResearchFigureCheck {
     /// `13-17`, `13 to 17`, and `13 und 17` after `zwischen`, `between`,
     /// `von` or `from`.
     private static func rangeMembers(of tokens: [Token], in text: String) -> Set<Int> {
-        let ns = text as NSString
         var result = Set<Int>()
+        for (low, high) in rangePairs(of: tokens, in: text) {
+            result.insert(low)
+            result.insert(high)
+        }
+        return result
+    }
+
+    /// The indices of the two numbers of each range (see `rangeMembers`).
+    private static func rangePairs(of tokens: [Token], in text: String) -> [(Int, Int)] {
+        let ns = text as NSString
+        var result: [(Int, Int)] = []
         guard tokens.count >= 2 else { return result }
         for index in 0..<(tokens.count - 1) {
             let left = tokens[index]
@@ -422,12 +454,37 @@ enum ResearchFigureCheck {
                     .split(whereSeparator: { !$0.isLetter }).last.map { $0.lowercased() } ?? ""
                 isRange = ["zwischen", "between", "von", "from"].contains(before)
             }
-            if isRange {
-                result.insert(index)
-                result.insert(index + 1)
-            }
+            if isRange { result.append((index, index + 1)) }
         }
         return result
+    }
+
+    /// The values a written number can have: `32,3` and `32.3` are 32.3;
+    /// `1.234` is 1.234 and 1234, `1.234,5` and `1,234.5` are 1234.5. The
+    /// reading as a decimal comes first.
+    static func numericValues(_ token: Token) -> [Double] {
+        let written = token.text.filter { $0 != " " && $0 != "'" && $0 != "\u{2019}" }
+        let marks = written.filter { $0 == "." || $0 == "," }
+        guard !marks.isEmpty else { return Double(written).map { [$0] } ?? [] }
+        func plain(_ text: String, decimal: Character?) -> Double? {
+            var result = ""
+            for character in text {
+                if character == "." || character == "," {
+                    if character == decimal { result.append(".") }
+                } else {
+                    result.append(character)
+                }
+            }
+            return Double(result)
+        }
+        if Set(marks).count == 2 {
+            return plain(written, decimal: marks.last).map { [$0] } ?? []
+        }
+        if marks.count > 1 { return plain(written, decimal: nil).map { [$0] } ?? [] }
+        let after = written.drop { $0 != "." && $0 != "," }.dropFirst().count
+        let decimal = plain(written, decimal: marks.first)
+        let grouped = after == 3 ? plain(written, decimal: nil) : nil
+        return [decimal, grouped].compactMap { $0 }
     }
 
     /// Whether each piece is a line of the answer's source list: a source
@@ -697,14 +754,27 @@ enum ResearchFigureCheck {
         case monthYear(Mention)
         case year(Token)
         case number(Token)
+        /// A number that is an end of a range of the answer: the page may
+        /// have it, or any value between the ends.
+        case ranged(Token, ClosedRange<Double>)
 
-        /// The figure as written, and whether any of the pages has it.
-        func check(in pages: [PageFacts]) -> (String, Bool) {
+        /// The figure as written, and whether any of the pages has it. A
+        /// date also counts when a page has its day and month without a
+        /// year, if the date's year is `todayYear` or the next one.
+        func check(in pages: [PageFacts], todayYear: Int = 0) -> (String, Bool) {
             switch self {
             case .date(let mention):
                 return (mention.text, pages.contains {
                     $0.dates.contains(DateKey(day: mention.day ?? 0, month: mention.month,
                                               year: mention.year))
+                        || (todayYear > 0 && [todayYear, todayYear + 1].contains(mention.year)
+                            && $0.yearlessDates.contains(
+                                DayMonthKey(day: mention.day ?? 0, month: mention.month)))
+                })
+            case .ranged(let token, let range):
+                return (token.text, pages.contains { page in
+                    page.numbers.contains(ResearchFigureCheck.significant(token.digits))
+                        || page.values.contains { range.contains($0.value) }
                 })
             case .monthYear(let mention):
                 return (mention.text, pages.contains {
@@ -728,7 +798,8 @@ enum ResearchFigureCheck {
             switch self {
             case .date: return true
             // A short number matches by chance somewhere else on a page.
-            case .number(let token): return ResearchFigureCheck.significant(token.digits).count >= 3
+            case .number(let token), .ranged(let token, _):
+                return ResearchFigureCheck.significant(token.digits).count >= 3
             case .monthYear, .year: return false
             }
         }
@@ -741,6 +812,9 @@ enum ResearchFigureCheck {
                                                   year: mention.year)] ?? []
             case .number(let token):
                 return page.numberLocations[ResearchFigureCheck.significant(token.digits)] ?? []
+            case .ranged(let token, let range):
+                return (page.numberLocations[ResearchFigureCheck.significant(token.digits)] ?? [])
+                    + page.values.filter { range.contains($0.value) }.map { $0.location }
             case .monthYear, .year:
                 return []
             }
@@ -751,6 +825,11 @@ enum ResearchFigureCheck {
         let day: Int
         let month: Int
         let year: Int
+    }
+
+    private struct DayMonthKey: Hashable {
+        let day: Int
+        let month: Int
     }
 
     private struct MonthKey: Hashable {
@@ -779,6 +858,44 @@ enum ResearchFigureCheck {
             return result
         }()
         lazy var numbers: Set<String> = Set(self.numberLocations.keys)
+
+        /// Every number on the page as a value, with where it starts.
+        lazy var values: [(value: Double, location: Int)] = {
+            var result: [(value: Double, location: Int)] = []
+            for token in ResearchFigureCheck.tokens(in: self.text) where !token.ignored {
+                for value in ResearchFigureCheck.numericValues(token) {
+                    result.append((value: value, location: token.location))
+                }
+            }
+            return result
+        }()
+
+        /// Day and month of every date written without a year (`am 29.
+        /// November an`). Dates with a year are already out of the scan's
+        /// remainder.
+        lazy var yearlessDates: Set<DayMonthKey> = {
+            var result: Set<DayMonthKey> = []
+            let rest = self.scanned.remainder
+            let whole = NSRange(rest.startIndex..., in: rest)
+            for match in ResearchFigureCheck.yearlessDate.matches(in: rest, range: whole) {
+                guard let dayRange = Range(match.range(at: 1), in: rest),
+                      let monthRange = Range(match.range(at: 2), in: rest),
+                      let day = Int(rest[dayRange]), (1...31).contains(day),
+                      let month = ResearchFigureCheck.monthNumber(
+                        String(rest[monthRange]), isNumber: false) else { continue }
+                result.insert(DayMonthKey(day: day, month: month))
+            }
+            // The month first (`Nov. 29`, `November 29th`).
+            for match in ResearchFigureCheck.yearlessMonthFirst.matches(in: rest, range: whole) {
+                guard let monthRange = Range(match.range(at: 1), in: rest),
+                      let dayRange = Range(match.range(at: 2), in: rest),
+                      let day = Int(rest[dayRange]), (1...31).contains(day),
+                      let month = ResearchFigureCheck.monthNumber(
+                        String(rest[monthRange]), isNumber: false) else { continue }
+                result.insert(DayMonthKey(day: day, month: month))
+            }
+            return result
+        }()
 
         /// Every number on the page as its digits alone, trailing zeros kept.
         lazy var writtenNumbers: Set<String> = Set(
@@ -1042,6 +1159,14 @@ enum ResearchFigureCheck {
         DateFormat(regex: expression(#"("# + monthName + #")\s+(\d{4})(?!\d)"#),
                    day: 0, month: 1, year: 2, monthIsNumber: false),
     ]
+
+    /// A day and a month name with no year after them: `29. November`.
+    private static let yearlessDate = expression(
+        #"(?<!\d)(\d{1,2})\.?\s+("# + monthName + #")(?!\p{L})"#)
+
+    /// A month name and a day with no year: `Nov. 29`, `November 29th`.
+    private static let yearlessMonthFirst = expression(
+        #"("# + monthName + #")\s+(\d{1,2})(?!\d)(?:st|nd|rd|th)?"#)
 
     private static func expression(_ pattern: String) -> NSRegularExpression {
         try! NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
@@ -1440,6 +1565,10 @@ enum ResearchFigureCheck {
         return result
     }
 
+    /// Words before a month name that make it part of a date.
+    private static let monthLeaders = wordSet(
+        "im am seit ab bis vom zum ende anfang mitte in since until by of on")
+
     /// The name phrases of a sentence: a word with an inner capital or
     /// directly followed by a number (`macOS`, `iPhone`, `Sequoia 26`), with
     /// the capitalized words after it; and two or more capitalized words in
@@ -1447,9 +1576,6 @@ enum ResearchFigureCheck {
     /// Albertina`, `Bund der Kommunist:innen`). German capitalizes every
     /// noun, so a single capitalized word is no name, and none starts at the
     /// sentence's first word unless that word has an inner capital.
-    private static let monthLeaders = wordSet(
-        "im am seit ab bis vom zum ende anfang mitte in since until by of on")
-
     private static func phrases(in words: [Word]) -> [Phrase] {
         let first = words.firstIndex { !$0.number }
         // The first word, and one after a colon or a bar, is capitalized
@@ -1620,10 +1746,26 @@ enum ResearchFigureCheck {
     private static func isDescriptive(_ word: String) -> Bool {
         let lower = word.lowercased()
         // A short word must match whole: `Dr` is not `Drei`, `Prof` not `Profit`.
+        if strongNounEndings.contains(where: { lower.hasSuffix($0) && lower.count > $0.count }) {
+            return true
+        }
+        // `ung` needs six letters and no vowel before it: `Zeitung`, not
+        // `Young`, `Jung` or `Cheung`.
+        if lower.hasSuffix("ung"), lower.count >= 6,
+           let before = lower.dropLast(3).last, !"aeiouäöüy".contains(before) {
+            return true
+        }
         return descriptiveWords.contains {
             $0.count < 6 ? lower == $0 : lower.hasPrefix($0) && lower.count - $0.count <= 2
         }
     }
+
+    /// Endings that only common nouns have, so a word with one is no part of
+    /// a weak name (`Durchsetzung von Wohnungspolitik`). The weaker endings
+    /// of `nounEndings` (`ie`, `ik`, `ur`) are left out: `Marie Curie` is a
+    /// name.
+    private static let strongNounEndings = ["heit", "keit", "schaft", "tion", "tät",
+        "ismus", "politik"]
 
     /// Whether a word ends like a common noun, so it is not taken for a
     /// surname.

@@ -391,6 +391,9 @@ public enum ResearchEvent: Equatable, Sendable {
     /// The answer is not in the language the question asks for, and the model
     /// is asked to rewrite it.
     case askingForAnswerLanguage
+    /// A requested rewrite was dropped and the first answer stays. The text
+    /// is the short reason, in English.
+    case rewriteNotKept(String)
     /// The final answer stopped at the token limit, and the model is asked
     /// to continue it.
     case continuingCutOffAnswer
@@ -1293,9 +1296,11 @@ public struct ResearchAgent: Sendable {
         } catch {
             // A stopped run stays stopped; any other failure keeps the answer.
             try Task.checkCancellation()
+            onEvent(.rewriteNotKept("request failed"))
             return answer
         }
         guard let content = revision.content, !Self.isIncomplete(revision) else {
+            onEvent(.rewriteNotKept("reply empty or cut off"))
             return answer
         }
         // Kept only if it cites no new unread number, fewer of them if that
@@ -1304,8 +1309,18 @@ public struct ResearchAgent: Sendable {
             .unknownCitations
         let shrunk = ResearchText.terminalSafe(content).count * Self.shortestRewriteDivisor
             < ResearchText.terminalSafe(answer.0).count
-        guard left.allSatisfy(unknown.contains), unknown.isEmpty || left.count < unknown.count,
-              !shrunk else {
+        guard left.allSatisfy(unknown.contains) else {
+            let new = left.filter { !unknown.contains($0) }.map { "[\($0)]" }.joined(separator: ", ")
+            onEvent(.rewriteNotKept("cites new unread pages \(new)"))
+            return answer
+        }
+        guard unknown.isEmpty || left.count < unknown.count else {
+            let still = left.map { "[\($0)]" }.joined(separator: ", ")
+            onEvent(.rewriteNotKept("still cites unread pages \(still)"))
+            return answer
+        }
+        guard !shrunk else {
+            onEvent(.rewriteNotKept("too short"))
             return answer
         }
         if missing {
@@ -1314,10 +1329,17 @@ public struct ResearchAgent: Sendable {
             // the problem, fewer of them, unless the answer also cited unread
             // pages, which the rewrite may leave without any citation.
             let now = ResearchFigureCheck.citationGaps(in: content, read: Set(read))
-            guard now.cited > 0,
-                  now.uncitedFigures <= gaps.uncitedFigures + gaps.unreadFigures,
-                  !unknown.isEmpty || !figuresUncited
-                      || now.uncitedFigures < gaps.uncitedFigures else {
+            guard now.cited > 0 else {
+                onEvent(.rewriteNotKept("no citations"))
+                return answer
+            }
+            guard now.uncitedFigures <= gaps.uncitedFigures + gaps.unreadFigures else {
+                onEvent(.rewriteNotKept("more figures without a citation"))
+                return answer
+            }
+            guard !unknown.isEmpty || !figuresUncited
+                    || now.uncitedFigures < gaps.uncitedFigures else {
+                onEvent(.rewriteNotKept("figures still without a citation"))
                 return answer
             }
         }
@@ -1325,8 +1347,12 @@ public struct ResearchAgent: Sendable {
             // The citations the answer had, other than unread ones, stay, and
             // the text is not clearly in the other language.
             let kept = Set(ResearchFigureCheck.citations(in: answer.0)).subtracting(unknown)
-            guard kept.isSubset(of: Set(ResearchFigureCheck.citations(in: content))),
-                  ResearchFigureCheck.answerLanguage(content) != -wanted else {
+            guard kept.isSubset(of: Set(ResearchFigureCheck.citations(in: content))) else {
+                onEvent(.rewriteNotKept("lost citations"))
+                return answer
+            }
+            guard ResearchFigureCheck.answerLanguage(content) != -wanted else {
+                onEvent(.rewriteNotKept("wrong language"))
                 return answer
             }
         }

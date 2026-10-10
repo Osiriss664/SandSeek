@@ -319,6 +319,8 @@ public final class ResearchRunController {
                    started: started)
         case .revisingUnreadCitations:
             append(.turn, "Answer cites pages it never read; asking for a rewrite", started: started)
+        case .rewriteNotKept(let reason):
+            append(.turn, "Rewrite not kept: \(reason)", started: started)
         case .askingForCitations:
             append(.turn, "Answer lacks source numbers; asking for citations",
                    started: started)

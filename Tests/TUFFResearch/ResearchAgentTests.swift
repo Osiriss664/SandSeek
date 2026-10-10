@@ -5397,9 +5397,12 @@ struct ResearchRoundDLoopTests {
         options.nudges = false
         let stubborn = "Container sind VMs [1]. Das Wachstum lag bei 4,68 Prozent [2]."
         let services = unreadScenario(rewrite: stubborn)
-        let report = try await agent(services, options: options).run(question: "q")
-        // The rewrite still cites [2], so the first answer stays.
+        let log = EventLog()
+        let report = try await agent(services, options: options, events: log).run(question: "q")
+        // The rewrite still cites [2], so the first answer stays, and the
+        // event says why.
         #expect(report.answer == stubborn)
+        #expect(log.events.contains(.rewriteNotKept("still cites unread pages [2]")))
         #expect(report.unknownCitations == [2])
         #expect(report.unverifiedFigures.filter { $0.kind == .sourceNotRead } == [
             ResearchUnverifiedFigure(figure: "4,68", sources: [2], kind: .sourceNotRead),
@@ -5951,5 +5954,79 @@ struct ResearchPaddedSourceListTests {
             answer: "Der Bürgermeister Stiegert spricht viel" + tail, sourceTexts: [1: page],
             question: "")
         #expect(name.map(\.kind) == [.name])
+    }
+}
+
+@Suite("Web research ranges, dates without a year and descriptive phrases")
+struct ResearchRangeAndDatePhraseTests {
+    private func check(_ answer: String, _ page: String, today: String = "")
+        -> [ResearchUnverifiedFigure] {
+        ResearchFigureCheck.unverified(
+            answer: answer, sourceTexts: [1: page], question: "", today: today,
+            knownSources: [1])
+    }
+
+    private let tail = " und ist nicht klein, mit der Zeit für die Leute"
+
+    @Test func aRoundedRangeAroundAValueOnThePageIsBackedUp() {
+        let page = "Die Partei erreichte 32,3% der Stimmen" + tail + "."
+        #expect(check("Die Partei erreichte ca. 32–33 % der Stimmen" + tail + " [1].", page).isEmpty)
+        #expect(check("Die Partei erreichte ca. 32 bis 33 % der Stimmen" + tail + " [1].",
+                      "Die Partei erreichte 32.3 % der Stimmen" + tail + ".").isEmpty)
+        // A single figure without a match is still reported, as is a range
+        // whose page value lies outside it.
+        #expect(check("Die Partei erreichte 43 % der Sitze" + tail + " [1].", page).map(\.figure)
+            == ["43"])
+        #expect(check("Die Partei erreichte 40–41 % der Stimmen" + tail + " [1].", page).map(\.figure)
+            == ["40", "41"])
+    }
+
+    @Test func aDateWithoutAYearOnThePageBacksUpTheDateOfThisOrNextYear() {
+        let today = "2026-10-10"
+        let answer = "Die Wahl ist am 29. November 2026" + tail + " [1]."
+        #expect(check(answer, "Die Regierung kündigt eine Parlamentswahl am 29. November an"
+            + tail + ".", today: today).isEmpty)
+        // A page with another year for that day, or with another day, does not.
+        #expect(check(answer, "Die Regierung kündigt eine Parlamentswahl am 29. November 2019 an"
+            + tail + ".", today: today).map(\.figure) == ["29. November 2026"])
+        #expect(check("Die Wahl ist am 5. Oktober 2026" + tail + " [1].",
+                      "Die Regierung kündigt eine Parlamentswahl am 29. November an"
+                      + tail + ".", today: today).map(\.figure) == ["5. Oktober 2026"])
+        // Without the research date nothing is assumed, and a year too far
+        // away is not backed up.
+        #expect(check(answer, "Die Regierung kündigt eine Parlamentswahl am 29. November an"
+            + tail + ".").map(\.figure) == ["29. November 2026"])
+        #expect(check("Die Wahl ist am 29. November 2028" + tail + " [1].",
+                      "Die Regierung kündigt eine Parlamentswahl am 29. November an"
+                      + tail + ".", today: today).map(\.figure) == ["29. November 2028"])
+    }
+
+    @Test func onlyRoundedRangesOfWholeNumbersAreBackedByTheMiddleOfTheRange() {
+        // A wide range, or a page with only a year or a day, backs nothing.
+        #expect(check("Es kamen 1500–2500 Teilnehmer" + tail + " [1].",
+                      "Die Zahl von 2024 war groß" + tail + ".").map(\.figure) == ["1500", "2500"])
+        #expect(check("Es waren 15–85 % der Leute" + tail + " [1].",
+                      "Seit dem 20. Mai war es so" + tail + ".").map(\.figure) == ["15", "85"])
+    }
+
+    @Test func aDateWithTheMonthFirstAndNoYearBacksUpTheDate() {
+        #expect(check("Die Wahl ist am 29. November 2026" + tail + " [1].",
+                      "The vote is set for Nov. 29 and it is not small" + tail + ".",
+                      today: "2026-10-10").isEmpty)
+    }
+
+    @Test func wordsWithStrongNounEndingsAreDescriptiveInAWeakPhrase() {
+        let page = "Der Text spricht viel von der Zeit und den Leuten, ohne einen Namen "
+            + "zu nennen, und er ist nicht klein."
+        let found = check("Die Partei fordert die Durchsetzung von Wohnungspolitik" + tail + " [1].",
+                          page)
+        #expect(found.isEmpty)
+        // Words that only end like `ung` are names.
+        #expect(check("Der Preis ging an Neil Young" + tail + " [1].", page).map(\.figure)
+            == ["Neil Young"])
+        // A real name stays a name.
+        let name = check("Der Preis ging an Marie Curie" + tail + " [1].", page)
+        #expect(name.map(\.kind) == [.name])
+        #expect(name.map(\.figure) == ["Marie Curie"])
     }
 }

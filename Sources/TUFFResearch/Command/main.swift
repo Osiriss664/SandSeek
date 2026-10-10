@@ -91,6 +91,7 @@ let agent = ResearchAgent(
             writeProgress("    step took too long; shortening older results and asking once more")
         case .continuingAfterCutOff: writeProgress("    step ran out of room while thinking; continuing the research")
         case .revisingUnreadCitations: writeProgress("    answer cites pages it never read; asking for a rewrite")
+        case .rewriteNotKept(let reason): writeProgress("    rewrite not kept: \(reason)")
         case .askingForCitations: writeProgress("    answer lacks source numbers; asking for citations")
         case .askingForAnswerLanguage: writeProgress("    answer is not in the language asked for; asking for a rewrite")
         case .continuingCutOffAnswer: writeProgress("    answer hit the token limit; asking it to continue")
