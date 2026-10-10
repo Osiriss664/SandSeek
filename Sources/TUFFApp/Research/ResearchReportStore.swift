@@ -68,6 +68,10 @@ public struct SavedResearchReport: Codable, Equatable, Identifiable, Sendable {
     /// True when the answer stopped at the model's token limit.
     public var answerCutOff: Bool { answerWasCutOff ?? false }
     /// Optional so reports saved before it existed still load.
+    private let answerWasMidSentence: Bool?
+    /// True when the answer is short and seems to stop in the middle of a sentence.
+    public var answerEndsMidSentence: Bool { answerWasMidSentence ?? false }
+    /// Optional so reports saved before it existed still load.
     private let savedSearchQueries: [String]?
     /// What the model searched for, in order.
     public var searchQueries: [String] { savedSearchQueries ?? [] }
@@ -110,6 +114,7 @@ public struct SavedResearchReport: Codable, Equatable, Identifiable, Sendable {
         self.durationSeconds = durationSeconds
         budgetExhausted = report.budgetExhausted
         answerWasCutOff = report.answerCutOff
+        answerWasMidSentence = report.answerEndsMidSentence
         savedSearchQueries = report.searchQueries.map(ResearchText.terminalSafe)
         stoppedOnRepeats = report.stoppedRepeatedSearches
         endedEarlyReason = report.endedEarly.map(ResearchText.terminalSafe)

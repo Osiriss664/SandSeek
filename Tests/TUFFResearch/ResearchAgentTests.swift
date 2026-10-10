@@ -5121,3 +5121,274 @@ struct ResearchRoundDLoopTests {
         #expect(!plainLog.events.contains(.askingToReadMoreSources))
     }
 }
+
+@Suite("Web research escaped citations, short cut-off answers and look-alike figures, round E")
+struct ResearchRoundETests {
+    private func check(_ answer: String, _ texts: [Int: String]) -> [ResearchUnverifiedFigure] {
+        ResearchFigureCheck.unverified(
+            answer: answer, sourceTexts: texts, knownSources: Set(texts.keys))
+    }
+
+    private func notOnPage(_ answer: String, _ texts: [Int: String]) -> [String] {
+        check(answer, texts).filter { $0.kind == .notOnPage }.map(\.figure)
+    }
+
+    @Test func escapedCitationBracketsAreRead() {
+        #expect(ResearchFigureCheck.citations(in: "A [1][4\\] B \\[5\\] C \\[6] D [7\\] E [8, 9\\]")
+            == [1, 4, 5, 6, 7, 8, 9])
+        #expect(ResearchFigureCheck.citations(in: "A [1][4].") == [1, 4])
+        #expect(ResearchFigureCheck.normalizedCitations("Kosten \\[4\\] hier.") == "Kosten [4] hier.")
+        // A link with a number as its label is no citation, escaped or not.
+        #expect(ResearchFigureCheck.citations(in: "\\[4\\](https://e.example) und [5](https://e.example)")
+            .isEmpty)
+        #expect(ResearchFigureCheck.normalizedCitations("\\[4\\](https://e.example)")
+            == "\\[4\\](https://e.example)")
+        let report = ResearchReport(
+            question: "q", answer: "Es gab Sitze [1][4\\] und \\[2\\] und \\[1, 5].",
+            sources: [ResearchSource(number: 1, title: "", url: "https://e.example/1"),
+                      ResearchSource(number: 2, title: "", url: "https://e.example/2")],
+            modelTurns: 1, budgetExhausted: false)
+        #expect(report.unknownCitations == [4, 5])
+        // The displayed answer is not changed.
+        #expect(report.answer.contains("[4\\]"))
+    }
+
+    @Test func citationGapsSeeEscapedCitations() {
+        let gaps = ResearchFigureCheck.citationGaps(
+            in: "Es gab 350 Sitze \\[1\\]. Es gab 12 Parteien [2\\].", read: [1])
+        #expect(gaps.cited == 2)
+        #expect(gaps.uncitedFigures == 0)
+        #expect(gaps.unreadFigures == 1)
+        #expect(gaps.sentences == 2)
+        // A citation after the full stop stays with its sentence.
+        let after = ResearchFigureCheck.citationGaps(in: "Es gab 350 Sitze. \\[1\\] Ende.", read: [1])
+        #expect(after.uncitedFigures == 0)
+    }
+
+    @Test func theFigureCheckRunsOnAnswersWithEscapedCitations() {
+        let pages = [1: "Die Betriebskosten liegen bei 1500 Euro im Jahr."]
+        let plain = notOnPage("Die Betriebskosten betragen 360 Euro [1][4].", pages)
+        #expect(plain == ["360"])
+        for text in ["Die Betriebskosten betragen 360 Euro [1][4\\].",
+                     "Die Betriebskosten betragen 360 Euro \\[1\\]\\[4\\].",
+                     "Die Betriebskosten betragen 360 Euro \\[1]."] {
+            let found = check(text, pages)
+            #expect(found.map(\.figure) == ["360"], "\(text)")
+            #expect(found.first?.kind == .notOnPage, "\(text)")
+            #expect(found.first?.sources == [1], "\(text)")
+        }
+        // The cited page has the figure: nothing to report.
+        #expect(check("Die Betriebskosten betragen 1500 Euro \\[1\\].", pages).isEmpty)
+        // Citations that cannot be read at all leave an uncited sentence, which
+        // still gets its figures looked up on every page.
+        let unreadable = check("Die Betriebskosten betragen 360 Euro [Quelle 4].", pages)
+        #expect(unreadable == [ResearchUnverifiedFigure(figure: "360", sources: [])])
+        // Round numbers have fewer than three significant digits (`360` is
+        // `36`): they are looked up when the whole answer has no citation, as
+        // when the model wrote them in a form that cannot be read, ...
+        #expect(check("Die Kosten liegen bei 120 bis 160 Euro.", pages).map(\.figure)
+            == ["120", "160"])
+        // The page must have them as written: `36` and `3,6` are not `360`.
+        #expect(check("Die Kosten liegen bei 360 Euro.", [1: "Es sind 36 Euro und 3,6 Euro."])
+            .map(\.figure) == ["360"])
+        #expect(check("Die Kosten liegen bei 360 Euro.", [1: "Es sind 360 Euro."]).isEmpty)
+        // ... but not in one uncited sentence of an answer that cites.
+        #expect(check("Die Kosten liegen bei 360 Euro. Das steht in Quelle [1].", pages).isEmpty)
+    }
+
+    @Test func aShortAnswerThatEndsMidSentenceLooksCutOff() {
+        for text in ["Spanien hat eine Fläche von rund 505.000 Quadratkilometern und liegt in",
+                     "Es gab 350 Sitze [1] und",
+                     "Es gab 350 Sitze im Parlament [1][4\\] und die",
+                     "Die Wahl war am Sonntag (siehe [1]",
+                     "Die Partei gewann 12 Prozent der Stimmen, \"aber",
+                     "Die Partei gewann viele Stimmen -",
+                     "Die Partei gewann viele Stimmen,",
+                     "Es gab zwei Ergebnisse:",
+                     "Das Ergebnis ist klar\n## Fazit hier",
+                     "Beispiel hier:\n```swift\nlet x = 1"] {
+            #expect(ResearchAgent.looksCutOff(text), "\(text)")
+        }
+    }
+
+    @Test func completeAnswersDoNotLookCutOff() {
+        let finished = [
+            "Die Wahl war am Sonntag.", "Die Wahl war am Sonntag. [1]",
+            "Die Wahl war am Sonntag [1].", "Die Wahl war am Sonntag.\\[4\\]",
+            "Die Wahl war am Sonntag [1][4\\].  \n", "Gewann die Partei? Ja!",
+            "Die Wahl war am Sonntag (siehe Seite 3.)", "Er sagte: \"Die Wahl war am Sonntag.\"",
+            "Er sagte: \u{201E}Die Wahl war am Sonntag.\u{201C}", "**Die Wahl war am Sonntag.**",
+            "Die Wahl war am Sonntag\u{2026}", "Ergebnis:\n- Berlin\n- Paris und Rom",
+            "Ergebnis:\n1. Berlin ist die Hauptstadt von Deutschland",
+            "Stadt | Land\n--- | ---\nBerlin | Deutschland und Europa",
+            "Beispiel:\n```swift\nlet x = 1 + 2\n```",
+            // Figures, links, emoji, abbreviations and source lines.
+            "Die Antwort ist 42", "Die Antwort ist **42**", "Die Antwort ist *42*",
+            "Mehr dazu steht unter https://example.org/seite",
+            "Mehr dazu steht auf [Seite](https://x.org)",
+            "Die Hauptstadt ist Berlin", "Es sind 47 Millionen Einwohner", "The answer is Paris",
+            "Mehr dazu steht unter https://x.org [1]", "Der Zusatz lautet usw [1]", "Der Zusatz lautet **usw**",
+            "Das Ergebnis war \u{00BB}Berlin\u{00AB}", "Die Hauptstadt ist Berlin :)",
+            "Das war eine tolle Wahl \u{1F389}", "Es kostet 50 Euro usw", "Es kostet 50 Euro z.B",
+            "Der Zuwachs betrug rund 5 %", "Draußen waren es 20 \u{00B0}C",
+            "Der Stand ist 10.10.2026", "Quellen:\n[1] Statistisches Bundesamt Wiesbaden Seite",
+            "Berlin, Deutschland [1] [2]",
+            // Too few words to tell.
+            "Berlin", "Ja, 42", "ok", "[1] Statistisches Bundesamt", "",
+        ]
+        for text in finished {
+            #expect(!ResearchAgent.looksCutOff(text), "\(text)")
+        }
+        // Long answers are never taken as cut off.
+        let long = String(repeating: "Die Wahl war am Sonntag und ", count: 20)
+        #expect(long.count >= ResearchAgent.shortAnswerLimit)
+        #expect(!ResearchAgent.looksCutOff(long))
+    }
+
+    @Test func aShortAnswerCutOffWithANormalStopIsContinued() async throws {
+        var options = ResearchOptions()
+        options.maxSteps = 1
+        options.nudges = false
+        let services = pageServices("Es gab 350 Sitze im Parlament.", replies: [
+            openContainerPage,
+            FakeServices.calls([("b", "web_search", #"{"query":"two"}"#)]),
+            FakeServices.answer("Es gab 350 Sitze in der Kammer [1] und", finishReason: "stop"),
+            FakeServices.answer("mehr [1]."),
+        ])
+        let log = EventLog()
+        let report = try await agent(services, options: options, events: log)
+            .run(question: "q")
+        // The continuation starts without a space: one is added.
+        #expect(report.answer == "Es gab 350 Sitze in der Kammer [1] und mehr [1].")
+        #expect(!report.answerCutOff)
+        #expect(!report.answerEndsMidSentence)
+        #expect(log.events.contains(.continuingMidSentenceAnswer))
+        #expect(!log.events.contains(.continuingCutOffAnswer))
+        #expect(services.modelRequests.count == 4)
+        #expect(messages(services.modelRequests[3]).last?["content"]?.stringValue
+            == ResearchAgent.continueMidSentenceRequest)
+        #expect(ResearchAgent.continueMidSentenceRequest.contains("reply with nothing"))
+        #expect(!report.markdown.contains("mid-sentence"))
+    }
+
+    @Test func aBlankOrRestartedContinuationOfASeemingCutOffClearsTheFlag() async throws {
+        var options = ResearchOptions()
+        options.maxSteps = 1
+        options.nudges = false
+        // A blank reply, and one that starts the answer over.
+        for reply in ["  \n", "Es gab 350 Sitze in der Kammer [1] und"] {
+            let services = pageServices("Es gab 350 Sitze im Parlament.", replies: [
+                openContainerPage,
+                FakeServices.calls([("b", "web_search", #"{"query":"two"}"#)]),
+                FakeServices.answer("Es gab 350 Sitze in der Kammer [1] und"),
+                FakeServices.answer(reply),
+            ])
+            let log = EventLog()
+            let report = try await agent(services, options: options, events: log)
+                .run(question: "q")
+            #expect(log.events.contains(.droppingRestartedContinuation) == false, "\(reply)")
+            #expect(log.events.contains(.droppingRestartedMidSentenceContinuation)
+                == (reply != "  \n"), "\(reply)")
+            #expect(report.answer == "Es gab 350 Sitze in der Kammer [1] und", "\(reply)")
+            #expect(!report.answerEndsMidSentence, "\(reply)")
+            #expect(!report.answerCutOff, "\(reply)")
+        }
+    }
+
+    @Test func aSeemingCutOffThatCannotBeContinuedIsFlaggedMidSentence() async throws {
+        var options = ResearchOptions()
+        options.maxSteps = 1
+        options.nudges = false
+        let services = pageServices("Es gab 350 Sitze im Parlament.", replies: [
+            openContainerPage,
+            FakeServices.calls([("b", "web_search", #"{"query":"two"}"#)]),
+            FakeServices.answer("Es gab 350 Sitze in der Kammer [1] und"),
+        ])
+        let report = try await agent(services, options: options).run(question: "q")
+        #expect(report.answerEndsMidSentence)
+        #expect(!report.answerCutOff)
+        #expect(report.markdown.contains(
+            "_The answer seems to stop mid-sentence and may be incomplete._"))
+        #expect(!report.markdown.contains("token limit"))
+    }
+
+    @Test func aSpaceIsAddedOnlyForASeemingCutOff() {
+        #expect(ResearchAgent.joined("Es gab und", "mehr.", spaced: true) == "Es gab und mehr.")
+        #expect(ResearchAgent.joined("Es gab und ", "mehr.", spaced: true) == "Es gab und mehr.")
+        #expect(ResearchAgent.joined("Es gab und", ", mehr.", spaced: true) == "Es gab und, mehr.")
+        #expect(ResearchAgent.joined("Es gab und", "mehr.") == "Es gab undmehr.")
+        #expect(ResearchAgent.joined("Es gab:", "- eins", spaced: true) == "Es gab:\n- eins")
+    }
+
+    @Test func aShortCompleteAnswerIsNotContinued() async throws {
+        var options = ResearchOptions()
+        options.maxSteps = 1
+        options.nudges = false
+        let services = pageServices("Es gab 350 Sitze im Parlament.", replies: [
+            openContainerPage,
+            FakeServices.calls([("b", "web_search", #"{"query":"two"}"#)]),
+            FakeServices.answer("Es gab 350 Sitze in der Kammer [1]."),
+        ])
+        let log = EventLog()
+        let report = try await agent(services, options: options, events: log)
+            .run(question: "q")
+        #expect(report.answer == "Es gab 350 Sitze in der Kammer [1].")
+        #expect(!log.events.contains(.continuingCutOffAnswer))
+        #expect(!log.events.contains(.continuingMidSentenceAnswer))
+        #expect(services.modelRequests.count == 3)
+    }
+
+    @Test func financeAbbreviationsAreNoNames() {
+        let pages = [1: "Der Gewinn stieg. Die Rendite lag bei 12 Prozent."]
+        for text in ["Der Gewinn stieg YoY [1].", "Der Gewinn stieg QoQ und MoM [1].",
+                     "Der Gewinn stieg YTD [1].", "Der Gewinn stieg WoW [1].",
+                     "Der Gewinn stieg TTM [1].",
+                     "Die Rendite lag bei 12 Prozent p.a. [1]."] {
+            #expect(check(text, pages).isEmpty, "\(text)")
+        }
+        // A real name is still checked, and so is a label such as `PA28`.
+        #expect(check("Der Gewinn stieg bei SuperCorp [1].", pages).map(\.figure) == ["SuperCorp"])
+        #expect(check("Die Piper PA28 flog [1].", [1: "Die Piper flog."]).map(\.figure)
+            .contains("PA28"))
+    }
+
+    @Test func yearsWithALetterGluedToThemAreNotLookedUp() {
+        let pages = [1: "nichts"]
+        for text in ["Der Plan nennt 2026e als Ziel [1].", "Der Plan nennt 2026F als Ziel [1].",
+                     "In FY2026 stieg es [1].", "Der Plan nennt 2026E als Ziel [1].",
+                     "Die 2020s waren gut [1]."] {
+            #expect(notOnPage(text, pages).isEmpty, "\(text)")
+        }
+        // A year on its own, joined by a hyphen, or with another ending is
+        // still looked up.
+        #expect(notOnPage("Im Jahr 2026 stieg es [1].", pages) == ["2026"])
+        #expect(notOnPage("Der Plan gilt für die 2026-Wahl [1].", pages) == ["2026"])
+        #expect(notOnPage("Die 2026er Zahlen sind gut [1].", pages) == ["2026"])
+        #expect(notOnPage("Die 2026\u{5E74} Zahlen sind gut [1].", pages) == ["2026"])
+        #expect(notOnPage("Das Jahr 2026 war gut, FY2026 auch [1].", pages) == ["2026"])
+    }
+
+    @Test func moreFormsOfAnHTTPStatusCodeAreSkipped() {
+        let pages = [1: "nichts"]
+        for text in ["Der Server meldet HTTP-403 [1].", "Der Server meldet Error-403 [1].",
+                     "Der Server meldet Fehler\u{2013}404 [1].",
+                     "Der Server meldet Error Code 403 [1].", "Der Server meldet Status Code 404 [1].",
+                     "Der Server meldet HTTP Status Code 403 [1].",
+                     "Der Server meldet 403 Forbidden [1].", "Der Server meldet 404 Not Found [1].",
+                     "Der Server meldet 503 Service Unavailable [1].",
+                     "Der Server meldet 429 Too Many Requests [1].",
+                     "Der Server meldet den 403er-Fehler [1].", "Der Server meldet 404er-Error [1]."] {
+            #expect(notOnPage(text, pages).isEmpty, "\(text)")
+        }
+        // Still figures: no status word, no known code, another code's phrase,
+        // an unfinished phrase word, or another meaning.
+        #expect(notOnPage("Es gab 403 Fälle [1].", pages) == ["403"])
+        #expect(notOnPage("Es gab 403 Not Found [1].", pages) == ["403"])
+        #expect(notOnPage("Es gab 404 Forbidden [1].", pages) == ["404"])
+        #expect(notOnPage("Es gab 403 Forbidden-Fälle und 599 Forbidden [1].", pages)
+            == ["403", "599"])
+        #expect(notOnPage("Das Buch Code 403 hat Seiten [1].", pages) == ["403"])
+        #expect(notOnPage("Die Zahl 403er Modelle [1].", pages) == ["403"])
+        #expect(notOnPage("Der Plan gilt für 403-Seiten-Bücher [1].", pages) == ["403"])
+    }
+}

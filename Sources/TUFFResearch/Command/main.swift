@@ -95,6 +95,8 @@ let agent = ResearchAgent(
         case .continuingCutOffAnswer: writeProgress("    answer hit the token limit; asking it to continue")
         case .keepingCutOffAnswerNoRoom: writeProgress("    answer hit the token limit; the request to continue would not fit the context, keeping the cut-off answer")
         case .droppingRestartedContinuation: writeProgress("    the continuation started the answer over; dropping it and keeping the cut-off answer")
+        case .continuingMidSentenceAnswer: writeProgress("    answer seems to stop mid-sentence; asking it to continue")
+        case .droppingRestartedMidSentenceContinuation: writeProgress("    the reply started the answer over; taking the answer as complete")
         case .stepSize(let step, let tool, let assistant, let conversation, let budget):
             writeProgress("    step \(step) added \(tool + assistant) characters "
                 + "(tool results \(tool), assistant \(assistant)); conversation \(conversation) of \(budget)")

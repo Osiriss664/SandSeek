@@ -331,6 +331,11 @@ public final class ResearchRunController {
         case .droppingRestartedContinuation:
             append(.turn, "The continuation started the answer over; dropping it and keeping the cut-off answer",
                    started: started)
+        case .continuingMidSentenceAnswer:
+            append(.turn, "Answer seems to stop mid-sentence; asking it to continue", started: started)
+        case .droppingRestartedMidSentenceContinuation:
+            append(.turn, "The reply started the answer over; taking the answer as complete",
+                   started: started)
         case .stepSize:
             // A measurement for the command line's progress; not worth a line per step here.
             break

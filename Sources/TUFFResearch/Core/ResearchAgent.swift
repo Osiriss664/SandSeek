@@ -102,6 +102,10 @@ public struct ResearchReport: Equatable, Sendable {
     public let budgetExhausted: Bool
     /// True when the answer stopped at the model's token limit.
     public var answerCutOff: Bool = false
+    /// True when the answer is short and seems to stop in the middle of a
+    /// sentence although the server reported a normal stop, and asking the
+    /// model to go on did not settle it.
+    public var answerEndsMidSentence: Bool = false
     /// True when the question asks for an answer in German or English, and the
     /// answer is in the other language.
     public var answerLanguageMismatch: Bool = false
@@ -188,6 +192,9 @@ public struct ResearchReport: Equatable, Sendable {
         if answerCutOff {
             text += "\n_The answer reached the model's token limit and may be cut off._\n"
         }
+        if answerEndsMidSentence {
+            text += "\n_The answer seems to stop mid-sentence and may be incomplete._\n"
+        }
         if answerLanguageMismatch {
             text += "\n_The answer may not be in the language the question asks for._\n"
         }
@@ -271,11 +278,12 @@ public struct ResearchReport: Equatable, Sendable {
 
     /// Citation numbers in the answer that match no source, such as a model
     /// numbering a page it read twice as two sources. Reads `[2]`, `[1, 2]`
-    /// and `[1][2]`; Markdown links are not citations.
+    /// and `[1][2]`, also with backslash-escaped brackets (`[1][4\]`); Markdown
+    /// links are not citations.
     public var unknownCitations: [Int] {
         let known = Set(sources.map(\.number))
         var found: [Int] = []
-        var remaining = Substring(answer)
+        var remaining = Substring(ResearchFigureCheck.normalizedCitations(answer))
         while let open = remaining.firstIndex(of: "[") {
             let afterOpen = remaining.index(after: open)
             guard let close = remaining[afterOpen...].firstIndex(of: "]") else { break }
@@ -380,6 +388,12 @@ public enum ResearchEvent: Equatable, Sendable {
     /// started over instead of going on. It is dropped, and the cut-off
     /// answer stays, marked as cut off.
     case droppingRestartedContinuation
+    /// A short final answer seems to stop mid-sentence although the server
+    /// reported a normal stop, and the model is asked whether it goes on.
+    case continuingMidSentenceAnswer
+    /// That reply began with the answer's own first line; it is dropped and
+    /// the answer is taken as complete.
+    case droppingRestartedMidSentenceContinuation
     /// What a step with tool calls added to the conversation, in characters,
     /// and the conversation's size against the prompt budget. A measurement
     /// only, for finding out why older results are shortened so often.
@@ -680,9 +694,9 @@ public struct ResearchAgent: Sendable {
                     return checkingFigures(
                         state.report(answer: earlier, turns: step, exhausted: false), state: state)
                 }
-                let (text, cutOff) = try await finalAnswer(from: turn, state: &state)
+                let (text, end) = try await finalAnswer(from: turn, state: &state)
                 return checkingFigures(
-                    state.report(answer: text, turns: step, exhausted: false, cutOff: cutOff),
+                    state.report(answer: text, turns: step, exhausted: false, end: end),
                     state: state)
             }
             calledTools = true
@@ -848,9 +862,9 @@ public struct ResearchAgent: Sendable {
             report = checkingFigures(
                 state.report(answer: earlier, turns: turns, exhausted: exhausted), state: state)
         } else {
-            let (text, cutOff) = try await finalAnswer(from: final, state: &state)
+            let (text, end) = try await finalAnswer(from: final, state: &state)
             report = checkingFigures(
-                state.report(answer: text, turns: turns, exhausted: exhausted, cutOff: cutOff),
+                state.report(answer: text, turns: turns, exhausted: exhausted, end: end),
                 state: state)
         }
         report.stoppedRepeatedSearches = stoppedAtStep != nil
@@ -862,9 +876,9 @@ public struct ResearchAgent: Sendable {
     /// the whole token limit, is asked once more for a short answer with
     /// reasoning off.
     private func answer(from turn: ResearchAssistantTurn,
-                        state: inout State) async throws -> (String, Bool) {
+                        state: inout State) async throws -> (String, AnswerEnd) {
         if let content = turn.content, !Self.isBlank(content) {
-            return (content, turn.finishReason == "length")
+            return (content, Self.end(of: turn, content: content))
         }
         state.messages.append(Self.textMessage(turn))
         state.messages.append(.object([
@@ -881,7 +895,7 @@ public struct ResearchAgent: Sendable {
             retry = try await completeAnswer(&state)
         }
         if let content = retry.content, !Self.isBlank(content) {
-            return (content, retry.finishReason == "length")
+            return (content, Self.end(of: retry, content: content))
         }
         throw ResearchError.noAnswer(
             tokenLimit: turn.finishReason == "length" || retry.finishReason == "length")
@@ -911,7 +925,7 @@ public struct ResearchAgent: Sendable {
     /// The final answer of a turn without tool calls: the answer itself, then
     /// its continuation if it stopped at the token limit, then one revision.
     private func finalAnswer(from turn: ResearchAssistantTurn,
-                             state: inout State) async throws -> (String, Bool) {
+                             state: inout State) async throws -> (String, AnswerEnd) {
         // From the first request for the answer on, the prompt is not
         // shortened any more, so the retry, the continuation and the rewrite
         // extend what the server cached (see `send`).
@@ -919,7 +933,7 @@ public struct ResearchAgent: Sendable {
         let first = try await answer(from: turn, state: &state)
         let whole = try await continuingCutOff(first, from: turn, state: &state)
         // A rewrite of a continued answer would be cut off again and dropped.
-        if first.1 { return whole }
+        if first.1 == .tokenLimit { return whole }
         return try await revise(whole, state: &state)
     }
 
@@ -927,12 +941,15 @@ public struct ResearchAgent: Sendable {
     /// a long list) is given back to the model once, to be continued. The
     /// continuation is joined to it. If the continuation fails or is empty,
     /// the cut-off answer stays, still marked as cut off; a stopped run
-    /// stays stopped.
-    private func continuingCutOff(_ answer: (String, Bool),
+    /// stays stopped. An answer that only seems unfinished (`.midSentence`)
+    /// is asked a different question; an empty or restarted reply means it
+    /// was complete, and the flag is cleared.
+    private func continuingCutOff(_ answer: (String, AnswerEnd),
                                   from turn: ResearchAssistantTurn,
-                                  state: inout State) async throws -> (String, Bool) {
+                                  state: inout State) async throws -> (String, AnswerEnd) {
         try Task.checkCancellation()
-        guard answer.1 else { return answer }
+        guard answer.1 != .finished else { return answer }
+        let midSentence = answer.1 == .midSentence
         // The reasoning goes back with the answer, like `textMessage`, for the
         // prompt cache; it is the turn's own only if the answer came from it.
         var cutOff: [String: ResearchJSON] = [
@@ -946,23 +963,26 @@ public struct ResearchAgent: Sendable {
         state.messages.append(.object(cutOff))
         state.messages.append(.object([
             "role": .string("user"),
-            "content": .string(Self.continueCutOffRequest),
+            "content": .string(midSentence
+                ? Self.continueMidSentenceRequest : Self.continueCutOffRequest),
         ]))
         // A request that does not fit the context window is not sent: the server
         // would refuse it, and shortening to make it fit cut the half answer to a few lines
         // (the model then started over from the top, in the Berlin run).
         guard state.size(overhead: toolCharacters) <= contextLimit(state) else {
             state.messages.removeLast(2)
-            onEvent(.keepingCutOffAnswerNoRoom)
+            if !midSentence { onEvent(.keepingCutOffAnswerNoRoom) }
             return answer
         }
-        onEvent(.continuingCutOffAnswer)
+        onEvent(midSentence ? .continuingMidSentenceAnswer : .continuingCutOffAnswer)
         // Not even an overflow the estimate missed may shorten the cut-off
         // answer (see `send`).
         state.keepsHistoryWhole = true
         defer { state.keepsHistoryWhole = false }
-        // Nothing is removed afterwards: a cut-off answer is not revised, so
-        // no request follows, and completeAnswer may have added messages.
+        // Nothing is removed afterwards: a token-limit answer is not revised,
+        // so no request follows (a mid-sentence one is, and the revision
+        // request is appended after these messages), and completeAnswer may
+        // have added messages.
         // Continuing needs no reasoning, which would only make the turn slow.
         let continuation: ResearchAssistantTurn
         do {
@@ -976,14 +996,20 @@ public struct ResearchAgent: Sendable {
             try Task.checkCancellation()
             return answer
         }
-        guard let content = continuation.content, !Self.isBlank(content) else { return answer }
+        // Asked about a short answer that only seems unfinished, a blank
+        // reply means it was complete.
+        guard let content = continuation.content, !Self.isBlank(content) else {
+            return midSentence ? (answer.0, AnswerEnd.finished) : answer
+        }
         // A model that starts over (it saw only a shortened start of its
         // answer) would give the answer twice.
         if Self.startsOver(answer.0, with: content) {
-            onEvent(.droppingRestartedContinuation)
-            return answer
+            onEvent(midSentence ? .droppingRestartedMidSentenceContinuation
+                                : .droppingRestartedContinuation)
+            return midSentence ? (answer.0, AnswerEnd.finished) : answer
         }
-        return (Self.joined(answer.0, content), continuation.finishReason == "length")
+        return (Self.joined(answer.0, content, spaced: midSentence),
+                continuation.finishReason == "length" ? AnswerEnd.tokenLimit : AnswerEnd.finished)
     }
 
     /// Whether a continuation begins with the answer's own first line, ignoring
@@ -1008,9 +1034,18 @@ public struct ResearchAgent: Sendable {
     /// where it stopped, in the middle of a word or a line, so nothing is
     /// added between them, unless the answer stopped in the middle of a line
     /// and the continuation begins with a list or heading marker.
-    static func joined(_ partial: String, _ continuation: String) -> String {
+    ///
+    /// `spaced` is for an answer that only seemed unfinished (see
+    /// `looksCutOff`): it stopped at the end of a word, so a space is added
+    /// when neither side has one and the continuation starts with a letter
+    /// or a digit.
+    static func joined(_ partial: String, _ continuation: String, spaced: Bool = false) -> String {
         let range = NSRange(continuation.startIndex..., in: continuation)
         let startsBlock = listOrHeadingStart.firstMatch(in: continuation, range: range) != nil
+        if spaced, !startsBlock, let last = partial.last, !last.isWhitespace,
+           let first = continuation.first, first.isLetter || first.isNumber {
+            return partial + " " + continuation
+        }
         // A digit at the end may go on (`2` and `0. x` are `20`).
         let endsInNumber = partial.last?.isNumber ?? false
         return startsBlock && !partial.hasSuffix("\n") && !endsInNumber
@@ -1019,6 +1054,114 @@ public struct ResearchAgent: Sendable {
 
     private static let listOrHeadingStart = try! NSRegularExpression(
         pattern: #"^(?:[-*+•]\s|#{1,6}\s|\d{1,2}[.)]\s)"#)
+
+    /// How a final answer ended. `.midSentence` is a short answer that seems
+    /// to stop in the middle of a sentence although the server reported a
+    /// normal stop (Ternary Bonsai stopped after 63 tokens); it is asked
+    /// once whether it goes on (`continueMidSentenceRequest`).
+    enum AnswerEnd: Equatable {
+        case finished
+        case tokenLimit
+        case midSentence
+    }
+
+    static func end(of turn: ResearchAssistantTurn, content: String) -> AnswerEnd {
+        if turn.finishReason == "length" { return .tokenLimit }
+        return looksCutOff(content) ? .midSentence : .finished
+    }
+
+    /// An answer shorter than this many characters, and of at least
+    /// `shortestCutOffWords` words (without citations), that seems to stop in
+    /// the middle of a sentence is taken as cut off.
+    static let shortAnswerLimit = 300
+    static let shortestCutOffWords = 4
+
+    private static let anyCitation = try! NSRegularExpression(
+        pattern: #"\[\d+(?:\s*[,;]\s*\d+)*\](?!\()"#)
+    private static let trailingCitations = try! NSRegularExpression(
+        pattern: #"(?:\s*\[\d+(?:\s*[,;]\s*\d+)*\])+\s*$"#)
+    private static let trailingEmoticon = try! NSRegularExpression(
+        pattern: #"(?<=\s)[:;]-?[)(DP]$"#)
+    private static let headingStart = try! NSRegularExpression(pattern: #"^#{1,6}\s"#)
+
+    /// Last words that are abbreviations: the answer ends there on purpose.
+    private static let abbreviations: Set<String> = [
+        "usw", "bzw", "etc", "ca", "ggf", "evtl", "inkl", "vgl", "zb", "ua", "dh", "uvm",
+        "uä", "ie", "eg", "approx", "incl", "resp", "sog", "bspw", "max", "min", "mind",
+    ]
+
+    /// Whether a short answer seems to stop in the middle of a sentence. It
+    /// does when, after trailing white space, citations, closing quotes and
+    /// brackets and Markdown emphasis, it ends in a lowercase letter or in
+    /// `, ; - – (` or `:`, or when its last line is a heading or it ends in an
+    /// unclosed code block. Everything else is taken as finished: a sentence
+    /// end, a figure (`42`, `5 %`, `20 °C`), a list item, a table row, the end
+    /// of a code block, a source-list line, a web address or link, an
+    /// abbreviation (`usw`) and an emoji. Longer answers and answers of fewer
+    /// than four words (`Berlin`) are never taken as cut off.
+    static func looksCutOff(_ answer: String) -> Bool {
+        var text = ResearchFigureCheck.normalizedCitations(answer)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let bare = anyCitation.stringByReplacingMatches(
+            in: text, range: NSRange(text.startIndex..., in: text), withTemplate: " ")
+        guard text.count < shortAnswerLimit,
+              bare.split(whereSeparator: \.isWhitespace).count >= shortestCutOffWords else {
+            return false
+        }
+        let lastLine = text.split(whereSeparator: \.isNewline).last
+            .map { $0.trimmingCharacters(in: .whitespaces) } ?? text
+        func matches(_ expression: NSRegularExpression) -> Bool {
+            expression.firstMatch(
+                in: lastLine, range: NSRange(lastLine.startIndex..., in: lastLine)) != nil
+        }
+        // An unclosed code block is cut off, a closed one is finished.
+        if text.components(separatedBy: "```").count % 2 == 0 { return true }
+        if lastLine.hasPrefix("```") { return false }
+        if matches(headingStart) { return true }
+        if lastLine.contains("|") || matches(listOrHeadingStart)
+            || ResearchFigureCheck.isSourceLine(lastLine) {
+            return false
+        }
+        let closers: Set<Character> = [
+            ")", "]", "\"", "'", "\u{201C}", "\u{201D}", "\u{2018}", "\u{2019}", "\u{00AB}",
+            "\u{00BB}", "\u{2039}", "\u{203A}", "*", "_", "`", "~",
+        ]
+        // Citations, closers, emphasis and a trailing emoticon go first.
+        while true {
+            if let match = trailingCitations.firstMatch(
+                in: text, range: NSRange(text.startIndex..., in: text)),
+               let range = Range(match.range, in: text) {
+                text.removeSubrange(range)
+            } else if let match = trailingEmoticon.firstMatch(
+                in: text, range: NSRange(text.startIndex..., in: text)),
+                      let range = Range(match.range, in: text) {
+                text.removeSubrange(range)
+            } else if let last = text.last, closers.contains(last) || last.isWhitespace {
+                text.removeLast()
+            } else {
+                break
+            }
+        }
+        guard let last = text.last, !".!?\u{2026}\u{3002}\u{FF01}\u{FF1F}".contains(last) else {
+            return false
+        }
+        // A web address or an abbreviation at the end is on purpose.
+        let lastWord = text.split(whereSeparator: \.isWhitespace).last.map(String.init) ?? ""
+        let lowered = lastWord.lowercased()
+        if lowered.contains("://") || lowered.hasPrefix("www.") { return false }
+        if abbreviations.contains(lowered.filter { $0.isLetter }),
+           lowered.allSatisfy({ $0.isLetter || $0 == "." || $0 == "," }) {
+            return false
+        }
+        // An unfinished sentence ends in a connecting word or a sign that goes
+        // on; a capitalized word, a figure or an emoji can end a sentence.
+        if ",;-\u{2013}(:".contains(last) { return true }
+        return lastWord.first(where: { $0.isLetter })?.isLowercase ?? false
+    }
+
+    static let continueMidSentenceRequest = "Your answer seems to stop mid-sentence. If it is "
+        + "unfinished, continue exactly where it stopped, without repeating anything; if it is "
+        + "complete, reply with nothing."
 
     static let continueCutOffRequest = "Your answer stopped at the token limit. Continue exactly "
         + "where it stopped, without repeating anything you already wrote, in the same language "
@@ -1038,8 +1181,8 @@ public struct ResearchAgent: Sendable {
     /// with an uncited figure and some citation (if citations were missing),
     /// and is in the wanted language (if that was a problem). Otherwise the
     /// first answer stays, and the report flags what is left.
-    private func revise(_ answer: (String, Bool),
-                        state: inout State) async throws -> (String, Bool) {
+    private func revise(_ answer: (String, AnswerEnd),
+                        state: inout State) async throws -> (String, AnswerEnd) {
         try Task.checkCancellation()
         guard options.reviseUnreadCitations else { return answer }
         let read = state.sources.map(\.number)
@@ -1112,7 +1255,7 @@ public struct ResearchAgent: Sendable {
                 return answer
             }
         }
-        return (content, false)
+        return (content, .finished)
     }
 
     /// Sentences with a figure and no citation from which the model is asked
@@ -2470,11 +2613,12 @@ public struct ResearchAgent: Sendable {
         }
 
         func report(answer: String, turns: Int, exhausted: Bool,
-                    cutOff: Bool = false) -> ResearchReport {
+                    end: AnswerEnd = .finished) -> ResearchReport {
             var report = ResearchReport(
                 question: question, answer: answer, sources: sources,
-                modelTurns: turns, budgetExhausted: exhausted, answerCutOff: cutOff,
-                searchQueries: shownQueries)
+                modelTurns: turns, budgetExhausted: exhausted,
+                answerCutOff: end == .tokenLimit, searchQueries: shownQueries)
+            report.answerEndsMidSentence = end == .midSentence
             report.requestedSources = requested?.minimum
             report.passagesOn = passagesOn
             return report

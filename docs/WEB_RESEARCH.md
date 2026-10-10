@@ -662,6 +662,28 @@ run can be compared with and without it.
   A stopped run is not asked. A continuation runs once, and an answer that was
   cut off is not revised afterwards, since a longer rewrite would be cut off
   again.
+  Round E: a short final answer (under 300 characters, at least four words
+  without citations) that seems to stop in the middle of a sentence is
+  treated separately from the token limit, although the server reported a
+  normal stop (Ternary Bonsai stopped after 63 tokens). It seems unfinished
+  only if, after trailing white space, citations (also escaped ones), closing
+  quotes and brackets, Markdown emphasis and a trailing emoticon, its last
+  word starts with a lowercase letter (`und`, `die`), or it ends in
+  `, ; - – (` or `:`, or its last line is a heading, or it ends in an
+  unclosed code block. A sentence end, a last word that is capitalized
+  (`Die Hauptstadt ist Berlin`), a figure (`42`, `5 %`, `20 °C`), a
+  list item, a table row, a closed code block, a source-list line, a web
+  address or link, an abbreviation (`usw`, `bzw`, `z.B`), an emoji, a longer
+  answer and an answer of one to three words (`Berlin`) are finished. The
+  model is asked once: "Your answer seems to stop mid-sentence. If it is
+  unfinished, continue exactly where it stopped, without repeating anything;
+  if it is complete, reply with nothing." The continuation is joined with a
+  space if neither side has one and it starts with a letter or digit. An
+  empty reply, or one that starts the answer over, means the answer was
+  complete and clears the flag. Unlike an answer at the token limit, this
+  answer is still revised afterwards. If the continuation fails, the report
+  says "The answer seems to stop mid-sentence and may be incomplete" (not that
+  it reached the token limit); the app saves and shows the same note.
 - An answer that was not cut off is then checked for up to three problems,
   and a single request lists all that apply (`--rewrite off` or the app's
   setting turns the whole step off). The model rewrites with reasoning off:
@@ -807,6 +829,36 @@ run can be compared with and without it.
     429, 451, 500 to 504) joined by a hyphen (or a dash, `‐ ‑ –`) to one of those words is skipped
     too (`403-Fehler`, `404-Error`); `35-Stunden`, `2026-Wahl` and
     `500-Euro-Schein` are still checked.
+  Round E:
+  - Citations written with Markdown-escaped brackets (`\[4\]`, `[4\]`,
+    `\[4]`; Ternary Bonsai wrote `[1][4\]`) are read like `[4]` everywhere
+    citations are parsed (the figure check, the sentences' citations, the
+    citation gaps, unknown source numbers in the report and the rewrite
+    checks) through one shared normaliser, `ResearchFigureCheck.normalizedCitations`.
+    The answer text shown in the report is not changed.
+  - Why the Bonsai report had no figure check: the section only lists
+    findings. With the citations unreadable every sentence counted as
+    uncited, and an uncited figure is looked up only with at least three
+    significant digits, which drop trailing zeros (`360`, `120`, `160` count
+    as `36`, `12`, `16`), so the invented operating costs were never looked
+    up. Now, when the whole answer has no readable citation, a number of
+    three written digits is looked up on all pages read too, and it counts
+    as found only if a page has the same digits as written (`36` or `3,6` is
+    not `360`).
+  - Finance abbreviations (`YoY`, `QoQ`, `MoM`, `WoW`, `YTD`, `MTD`, `QTD`,
+    `TTM`, `LTM`) are no names; `p.a.` splits into single letters. The name
+    check alone skips them, so labels such as `FY2026` and `PA28` are still
+    checked.
+  - A year with a letter directly before it (`FY2026`) or `e`, `E`, `F` or
+    `s` directly after it that ends the word (`2026e`, `2026F`, `2020s`) is
+    not looked up on the cited pages; a year alone, `2026-Wahl`, `2026er`
+    and `2026年` still are.
+  - More forms of an HTTP status code are skipped, for the well-known codes
+    only: `HTTP-403`, `Error-404`, `Error Code 403`, `Status Code 404`, a code
+    followed by its own reason phrase as a whole word (`403 Forbidden`,
+    `404 Not Found`, `503 Service Unavailable`, `429 Too Many Requests`, ...)
+    and `403er-Fehler`. `403 Not Found`, `403 Forbidden-Fälle` and
+    `Es gab 403 Fälle` are still checked.
   - Month names of German, English and Indonesian (`Januari`, `Maret`, `Mei`,
     `Agustus`, `Desember`, ...) are the same month, so `Februar 2026`
     matches `Februari 2026`.

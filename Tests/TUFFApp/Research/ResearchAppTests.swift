@@ -128,6 +128,7 @@ import TUFFAppServer
         var object = try #require(
             try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any])
         #expect(object.removeValue(forKey: "answerWasCutOff") != nil)
+        #expect(object.removeValue(forKey: "answerWasMidSentence") != nil)
         #expect(object.removeValue(forKey: "savedSearchQueries") != nil)
         #expect(object.removeValue(forKey: "stoppedOnRepeats") != nil)
         try JSONSerialization.data(withJSONObject: object).write(to: url)
@@ -135,6 +136,7 @@ import TUFFAppServer
         let reloaded = ResearchReportStore(directory: directory)
         #expect(reloaded.reports.map(\.id) == [saved.id])
         #expect(reloaded.reports.first?.answerCutOff == false)
+        #expect(reloaded.reports.first?.answerEndsMidSentence == false)
         #expect(reloaded.reports.first?.searchQueries == [])
         #expect(reloaded.reports.first?.stoppedRepeatedSearches == false)
     }

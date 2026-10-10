@@ -886,6 +886,11 @@ private struct ResearchReportView: View {
                     .appFont(.caption)
                     .foregroundStyle(.orange)
             }
+            if report.answerEndsMidSentence {
+                Text("The answer seems to stop mid-sentence and may be incomplete.")
+                    .appFont(.caption)
+                    .foregroundStyle(.orange)
+            }
             if !report.sources.isEmpty {
                 Text("Sources").appFont(.headline)
                 VStack(alignment: .leading, spacing: 6) {

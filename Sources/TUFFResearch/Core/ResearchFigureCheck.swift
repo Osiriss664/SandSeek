@@ -71,6 +71,11 @@ enum ResearchFigureCheck {
         let ignored: Bool
         /// Where it starts in the text, in UTF-16 units.
         let location: Int
+        /// A year with a letter directly before it (`FY2026`) or one of
+        /// `e E F s` directly after it that ends the word (`2026e`, `2026F`,
+        /// `2020s`): a fiscal year, a forecast or a decade, not a claim about
+        /// the year, so it is not looked up. `2026er` and `2026年` are not glued.
+        let glued: Bool
     }
 
     /// The figures, dates and names not backed up, each once per
@@ -119,7 +124,7 @@ enum ResearchFigureCheck {
             return made
         }
         // One form of every accented letter, so words and offsets agree.
-        let text = answer.precomposedStringWithCanonicalMapping
+        let text = normalizedCitations(answer).precomposedStringWithCanonicalMapping
         let questionWords = WordIndex(question)
         let questionNumbers = Set(tokens(in: question).map { significant($0.digits) })
         let todayParts = today.split(separator: "-").compactMap { Int($0) }
@@ -146,6 +151,10 @@ enum ResearchFigureCheck {
         let allPieces = pieces(of: text)
         let notices = noticeFlags(for: allPieces)
         let ratings = ratingFlags(for: allPieces)
+        // An answer with no readable citation at all (the model wrote them in
+        // a form that is none) is all uncited, and its figures get the
+        // looser test of `uncitedFindings`.
+        let nothingCited = allPieces.allSatisfy { citations(in: $0).isEmpty }
         for (pieceIndex, piece) in allPieces.enumerated() {
             let cited = citations(in: piece)
             let usable = cited.filter { sourceTexts[$0] != nil }
@@ -198,7 +207,8 @@ enum ResearchFigureCheck {
                     .compactMap { number in facts(number).map { (number: number, page: $0) } }
                 let unlinked = piece.contains("](") ? scan(withoutCitationsAndLinks(bare)) : scanned
                 for item in uncitedFindings(scanned: unlinked, pages: everyPage,
-                                            question: questionNumbers, today: todayParts) {
+                                            question: questionNumbers, today: todayParts,
+                                            nothingCited: nothingCited) {
                     add(item)
                 }
             }
@@ -281,7 +291,7 @@ enum ResearchFigureCheck {
         for token in tokens(in: withoutNoise(scanned.remainder)) {
             if !token.ignored {
                 candidates.append(.number(token))
-            } else if isYear(token.text) {
+            } else if isYear(token.text), !token.glued {
                 candidates.append(.year(token))
             }
         }
@@ -307,25 +317,42 @@ enum ResearchFigureCheck {
     /// knowledge, a month and year or a year alone is too common, and a number
     /// needs three significant digits (`12,4`, `125`, not `12`). A number the
     /// question has is not checked either.
+    ///
+    /// Round E: significant digits drop trailing zeros, so `360`, `120` and
+    /// `160` were never looked up, and an answer whose citations were all
+    /// unreadable got no figure check at all. When the whole answer has no
+    /// citation (`nothingCited`), a number of three written digits counts too.
     private static func uncitedFindings(scanned: Scan,
                                         pages: [(number: Int, page: PageFacts)],
                                         question: Set<String>,
-                                        today: [Int]) -> [ResearchUnverifiedFigure] {
+                                        today: [Int],
+                                        nothingCited: Bool = false) -> [ResearchUnverifiedFigure] {
         guard !pages.isEmpty else { return [] }
         var candidates: [Candidate] = []
         for mention in scanned.dates
         where [mention.year, mention.month, mention.day ?? 0] != today {
             candidates.append(.date(mention))
         }
+        // Numbers let in only by `nothingCited` (`360` is `36` when trailing
+        // zeros are dropped) must be on a page with the same digits as
+        // written: `36` or `3,6` is not `360`.
+        var written: [Token] = []
         for token in tokens(in: withoutNoise(scanned.remainder))
-        where !token.ignored && significant(token.digits).count >= 3
-            && !question.contains(significant(token.digits)) {
-            candidates.append(.number(token))
+        where !token.ignored && !question.contains(significant(token.digits)) {
+            if significant(token.digits).count >= 3 {
+                candidates.append(.number(token))
+            } else if nothingCited, token.digits.count >= 3 {
+                written.append(token)
+            }
         }
         var result: [ResearchUnverifiedFigure] = []
         for candidate in candidates {
             let (figure, present) = candidate.check(in: pages.map { $0.page })
             if !present { result.append(ResearchUnverifiedFigure(figure: figure, sources: [])) }
+        }
+        for token in written
+        where !pages.contains(where: { $0.page.writtenNumbers.contains(token.digits) }) {
+            result.append(ResearchUnverifiedFigure(figure: token.text, sources: []))
         }
         return result
     }
@@ -547,6 +574,10 @@ enum ResearchFigureCheck {
             return result
         }()
         lazy var numbers: Set<String> = Set(self.numberLocations.keys)
+
+        /// Every number on the page as its digits alone, trailing zeros kept.
+        lazy var writtenNumbers: Set<String> = Set(
+            ResearchFigureCheck.tokens(in: self.text).map(\.digits))
 
         /// Every full date on the page, in any format, with where it starts.
         lazy var dateLocations: [DateKey: [Int]] = {
@@ -1015,6 +1046,13 @@ enum ResearchFigureCheck {
         return result
     }()
 
+    /// Finance abbreviations (year over year, ...), which the name check
+    /// skips: `YoY` has an inner capital and would be read as a name. They
+    /// are not in `ignoredWords`, so the label check (`FY2026`, `PA28`) is
+    /// not affected. `p.a.` splits into single letters, which are no names.
+    private static let financeWords: Set<String> = wordSet(
+        "yoy qoq mom wow ytd mtd qtd ttm ltm")
+
     private static let germanFunctionWords = wordSet("der die das und ist nicht mit von für auf ein eine")
     private static let englishFunctionWords = wordSet("the and is of to with for that on are")
 
@@ -1118,7 +1156,7 @@ enum ResearchFigureCheck {
         var unread = 0
         var sentences = 0
         var cited = 0
-        let all = pieces(of: answer.precomposedStringWithCanonicalMapping)
+        let all = pieces(of: normalizedCitations(answer).precomposedStringWithCanonicalMapping)
         let notices = noticeFlags(for: all)
         for (index, piece) in all.enumerated() where !skipsNameCheck(piece) && !notices[index] {
             guard !piece.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
@@ -1143,6 +1181,11 @@ enum ResearchFigureCheck {
     private static let markdownLink = try! NSRegularExpression(
         pattern: #"\[([^\]]*)\]\([^)]*\)"#)
 
+    /// Whether a line is a line of a source list (`[1] Title`, `2. [Title]`).
+    static func isSourceLine(_ line: String) -> Bool {
+        sourceLine.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)) != nil
+    }
+
     /// Whether a line is a heading or a line of a source list, whose words
     /// are titles.
     private static func skipsNameCheck(_ piece: String) -> Bool {
@@ -1152,7 +1195,8 @@ enum ResearchFigureCheck {
     }
 
     private static func isIgnored(_ word: String) -> Bool {
-        ignoredWords.contains(word.lowercased())
+        let lowered = word.lowercased()
+        return ignoredWords.contains(lowered) || financeWords.contains(lowered)
     }
 
     /// A word without its gender ending (`:innen`, `*innen`, `innen`) and one
@@ -1476,7 +1520,7 @@ enum ResearchFigureCheck {
 
     /// The text without citations and web addresses; ISO dates stay.
     private static func withoutCitationsAndLinks(_ text: String) -> String {
-        var result = text
+        var result = normalizedCitations(text)
         for expression in [citation, link] {
             result = expression.stringByReplacingMatches(
                 in: result, range: NSRange(result.startIndex..., in: result), withTemplate: " ")
@@ -1532,7 +1576,8 @@ enum ResearchFigureCheck {
 
     /// Source numbers cited in the text: `[4]`, `[6], [8]`, `[6][8]` and
     /// `[1, 2]`. A Markdown link is not a citation.
-    static func citations(in text: String) -> [Int] {
+    static func citations(in raw: String) -> [Int] {
+        let text = normalizedCitations(raw)
         var numbers: [Int] = []
         let whole = NSRange(text.startIndex..., in: text)
         for match in citation.matches(in: text, range: whole) {
@@ -1546,6 +1591,20 @@ enum ResearchFigureCheck {
 
     private static let citation = try! NSRegularExpression(
         pattern: #"\[(\d+(?:\s*[,;]\s*\d+)*)\](?!\()"#)
+    private static let escapedCitation = try! NSRegularExpression(
+        pattern: #"\\*\[(\d+(?:\s*[,;]\s*\d+)*)\s*\\*\](?!\()"#)
+
+    /// The text with Markdown-escaped citation brackets written plainly:
+    /// `\[4\]`, `[4\]` and `\[4]` become `[4]` (Ternary Bonsai wrote
+    /// `[1][4\]`). Every place that reads citations goes through this, so
+    /// they agree on what a citation is. It is for parsing only; the
+    /// displayed answer is not changed. A Markdown link (`\[1\](url)`) is
+    /// left as it is.
+    static func normalizedCitations(_ text: String) -> String {
+        guard text.contains("\\") else { return text }
+        return escapedCitation.stringByReplacingMatches(
+            in: text, range: NSRange(text.startIndex..., in: text), withTemplate: "[$1]")
+    }
     private static let link = try! NSRegularExpression(
         pattern: #"(?:https?://|www\.)\S+"#)
     private static let httpVersion = try! NSRegularExpression(
@@ -1556,8 +1615,9 @@ enum ResearchFigureCheck {
     /// The text without citations, web addresses and ISO dates.
     static func withoutNoise(_ text: String) -> String {
         // `HTTP/1.1 403`: the version is no number, the word stays.
+        let plain = normalizedCitations(text)
         var result = httpVersion.stringByReplacingMatches(
-            in: text, range: NSRange(text.startIndex..., in: text), withTemplate: " ")
+            in: plain, range: NSRange(plain.startIndex..., in: plain), withTemplate: " ")
         for expression in [citation, link, isoDate] {
             result = expression.stringByReplacingMatches(
                 in: result, range: NSRange(result.startIndex..., in: result), withTemplate: " ")
@@ -1619,8 +1679,15 @@ enum ResearchFigureCheck {
                 || (written.count <= 2 && following == ".")
                 || isTime(characters, start: start, end: index)
                 || isStatusCode(characters, written: written, start: start, end: index)
+            // A letter before the year, or one of `e E F s` right after it that
+            // ends the word (`2026e`, `2026F`, `2020s`); `2026er` stays a
+            // year, and so does `2026年`.
+            let afterNext = index + 1 < characters.count ? characters[index + 1] : " "
+            let glued = isYear(written)
+                && ((start > 0 && characters[start - 1].isLetter)
+                    || ("eEFs".contains(following) && !afterNext.isLetter))
             result.append(Token(text: written, digits: digits, ignored: ignored,
-                                location: offsets[start]))
+                                location: offsets[start], glued: glued))
         }
         return result
     }
@@ -1635,18 +1702,32 @@ enum ResearchFigureCheck {
         400, 401, 403, 404, 405, 408, 410, 418, 429, 451, 500, 501, 502, 503, 504,
     ]
 
+    /// The reason phrase of each well-known code (`403 Forbidden`,
+    /// `404 Not Found`), as the words after the number.
+    private static let reasonPhrases: [Int: [String]] = [
+        400: ["bad", "request"], 401: ["unauthorized"], 403: ["forbidden"],
+        404: ["not", "found"], 405: ["method", "not", "allowed"], 408: ["request", "timeout"],
+        429: ["too", "many", "requests"], 500: ["internal", "server", "error"],
+        501: ["not", "implemented"], 502: ["bad", "gateway"], 503: ["service", "unavailable"],
+        504: ["gateway", "timeout"],
+    ]
+
     /// A three-digit code from 100 to 599 directly next to `HTTP`, `Fehler`,
     /// `error` or `Status` (`HTTP 403`, `Fehler 404`, `403 error`), in any
     /// case. `Fehlerquote 5 %` is no code, and a longer word is another word.
     /// A well-known error code (see `errorCodes`) is also one when a hyphen
-    /// joins it to such a word (`403-Fehler`, `404-Error`); `500-Euro-Schein`
-    /// and `2026-Wahl` are figures.
+    /// joins it to such a word, before or after it (`403-Fehler`, `404-Error`,
+    /// `HTTP-403`), when `Code` stands between it and one of them (`Error Code
+    /// 403`), when its reason phrase follows (`403 Forbidden`, `404 Not
+    /// Found`), and as `403er-Fehler`; `500-Euro-Schein` and `2026-Wahl` are
+    /// figures.
     private static func isStatusCode(_ characters: [Character], written: String,
                                      start: Int, end: Int) -> Bool {
         guard written.count == 3, let value = Int(written), (100...599).contains(value) else {
             return false
         }
-        func word(before position: Int) -> String {
+        /// The word before `position` and where it starts.
+        func word(before position: Int) -> (text: String, from: Int) {
             var index = position
             while index > 0, isSpace(characters[index - 1]) || characters[index - 1] == ":" {
                 index -= 1
@@ -1661,25 +1742,63 @@ enum ResearchFigureCheck {
             }
             var low = index
             while low > 0, characters[low - 1].isLetter { low -= 1 }
-            return String(characters[low..<index]).lowercased()
+            return (String(characters[low..<index]).lowercased(), low)
         }
-        func word(after position: Int) -> String {
+        /// Up to `count` words after `position`, in lower case, and where the
+        /// last one ends.
+        func words(after position: Int, count: Int) -> (words: [String], end: Int) {
+            var result: [String] = []
             var index = position
-            while index < characters.count, isSpace(characters[index]) { index += 1 }
-            var high = index
-            while high < characters.count, characters[high].isLetter { high += 1 }
-            return String(characters[index..<high]).lowercased()
+            while result.count < count {
+                while index < characters.count, isSpace(characters[index]) { index += 1 }
+                var high = index
+                while high < characters.count, characters[high].isLetter { high += 1 }
+                guard high > index else { break }
+                result.append(String(characters[index..<high]).lowercased())
+                index = high
+            }
+            return (result, index)
         }
-        if statusWords.contains(word(before: start)) || statusWords.contains(word(after: end)) {
+        let before = word(before: start)
+        if statusWords.contains(before.text)
+            || statusWords.contains(words(after: end, count: 1).words.first ?? "") {
             return true
         }
-        // `403-Fehler`, `404-Error`: a hyphen and then the word.
-        guard errorCodes.contains(value), end + 1 < characters.count,
-              "-\u{2010}\u{2011}\u{2013}".contains(characters[end])
-        else { return false }
-        var high = end + 1
+        // The rest is for the well-known codes only.
+        guard errorCodes.contains(value) else { return false }
+        // `Error Code 403`, `Status Code 404`.
+        if before.text == "code", statusWords.contains(word(before: before.from).text) {
+            return true
+        }
+        // `HTTP-403`, `Error-404`: the word, a hyphen and then the code.
+        let hyphens = "-\u{2010}\u{2011}\u{2013}"
+        if start > 1, hyphens.contains(characters[start - 1]) {
+            var low = start - 1
+            while low > 0, characters[low - 1].isLetter { low -= 1 }
+            if statusWords.contains(String(characters[low..<(start - 1)]).lowercased()) {
+                return true
+            }
+        }
+        // `403 Forbidden`, `404 Not Found`.
+        // The phrase's last word must be complete: `403 Forbidden-Fälle` is not.
+        if let phrase = reasonPhrases[value] {
+            let following = words(after: end, count: phrase.count)
+            let glued = following.end + 1 < characters.count
+                && hyphens.contains(characters[following.end])
+                && characters[following.end + 1].isLetter
+            if following.words == phrase, !glued { return true }
+        }
+        // `403-Fehler`, `404-Error`, `403er-Fehler`: a hyphen and then the word.
+        var after = end
+        if after + 1 < characters.count, characters[after] == "e", characters[after + 1] == "r" {
+            after += 2
+        }
+        guard after + 1 < characters.count, hyphens.contains(characters[after]) else {
+            return false
+        }
+        var high = after + 1
         while high < characters.count, characters[high].isLetter { high += 1 }
-        return statusWords.contains(String(characters[(end + 1)..<high]).lowercased())
+        return statusWords.contains(String(characters[(after + 1)..<high]).lowercased())
     }
 
     private static func isDigit(_ character: Character) -> Bool {
