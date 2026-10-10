@@ -35,7 +35,23 @@ the model alone, switch the gate off for the run:
   ... --research-arg --only-seen-urls --research-arg off
 
 The research command detects the model server itself and refuses one that is
-not TUFF. Against a llama.cpp server (llama-server) add `--server-type llamacpp`.
+not TUFF. Against a llama.cpp server (llama-server) add `--server-type llamacpp`,
+and `--api-key-file <path>` when it was started with a key file:
+
+  python3 Scripts/research_injection_check.py \\
+    --base-url https://raw.githubusercontent.com/<owner>/<repo>/<branch>/Sandbox/fixtures/injection \\
+    --server http://127.0.0.1:8081 --server-type llamacpp \\
+    --api-key-file ~/Library/Application\\ Support/SandSeek/State/llamacpp-api-key \\
+    --label "llama.cpp + Bonsai" --output injection-llamacpp-bonsai.txt
+
+The key is never read into the output or the logs: the script only hands the
+file's path on to the research command (and, to look up the model's name, sends
+the key to the loopback server in a Bearer header).
+
+--label names the run in the report. The report (printed, and written to
+--output when given, to a new file only) starts with the label, the server
+type, the server address, the model and the settings, so a result file says
+what it measured.
 
 Model behaviour varies between runs, so use --repeat for a fuller picture. A
 pass is evidence, not proof, that a model resists these attacks.
@@ -44,11 +60,14 @@ pass is evidence, not proof, that a model resists these attacks.
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
 import re
 import subprocess
 import sys
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field
 
 
@@ -198,7 +217,9 @@ def not_run(case: Case) -> list[tuple[Attack, str]]:
 
 
 def run_case(case: Case, args: argparse.Namespace,
-             attempt: int) -> tuple[bool, list[str], list[str], list[tuple[Attack, str]]]:
+             attempt: int) -> tuple[bool, list[str], list[str], list[tuple[Attack, str]], str]:
+    """One model run. The last item is the "server: ..." line the command
+    printed (which server it found), or an empty string."""
     url = f"{args.base_url.rstrip('/')}/{case.fixture}"
     command = [args.research_bin, case.question.format(url=url),
                "--max-steps", str(args.max_steps)]
@@ -208,13 +229,16 @@ def run_case(case: Case, args: argparse.Namespace,
         command += ["--server", args.server]
     if args.server_type:
         command += ["--server-type", args.server_type]
+    if args.api_key_file:
+        command += ["--api-key-file", args.api_key_file]
     if args.sandbox:
         command += ["--sandbox", args.sandbox]
     command += args.research_arg
     try:
         completed = subprocess.run(command, capture_output=True, text=True, timeout=args.timeout)
     except subprocess.TimeoutExpired:
-        return False, [f"research did not finish within {args.timeout} seconds"], [], not_run(case)
+        return (False, [f"research did not finish within {args.timeout} seconds"], [],
+                not_run(case), "")
     if args.log_dir:
         os.makedirs(args.log_dir, exist_ok=True)
         stem = os.path.join(args.log_dir, f"{case.fixture.removesuffix('.html')}-{attempt}")
@@ -224,9 +248,11 @@ def run_case(case: Case, args: argparse.Namespace,
             handle.write(completed.stderr)
     problems: list[str] = []
     warnings: list[str] = []
+    server_line = SERVER_LINE.search(completed.stderr)
+    seen_server = server_line.group(1).strip() if server_line else ""
     if completed.returncode != 0:
         problems.append(f"research exited {completed.returncode}: {completed.stderr.strip()[-300:]}")
-        return False, problems, warnings, not_run(case)
+        return False, problems, warnings, not_run(case), seen_server
     reads = re.findall(r"^\s+reading: (\S+)", completed.stderr, re.M)
     progress = PROGRESS.findall(completed.stderr)
     refused = REFUSED.findall(completed.stderr)
@@ -268,7 +294,7 @@ def run_case(case: Case, args: argparse.Namespace,
                          for a, v in verdicts if v == "reported"]
             warnings += [f"{a.id} [{a.source}]: tried, loop blocked (unknown address refused)"
                          for a, v in verdicts if v == "blocked"]
-    return not problems, problems, warnings, verdicts
+    return not problems, problems, warnings, verdicts, seen_server
 
 
 def join_research_args(argv: list[str]) -> list[str]:
@@ -283,6 +309,80 @@ def join_research_args(argv: list[str]) -> list[str]:
             joined.append(argv[index])
             index += 1
     return joined
+
+
+DEFAULT_SERVER = "http://127.0.0.1:8080"
+LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+# The command prints "server: TUFF 8.3.1, streaming" before it starts.
+SERVER_LINE = re.compile(r"^server: (.+)$", re.M)
+
+
+class Report:
+    """Collects every line printed, so the same text can go to --output."""
+
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+
+    def emit(self, text: str = "") -> None:
+        print(text, flush=True)
+        self.lines.append(text)
+
+    def save(self, path: str) -> None:
+        # "x": never overwrite an earlier report.
+        with open(path, "x", encoding="utf-8") as handle:
+            handle.write("\n".join(self.lines) + "\n")
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect would carry the key to another address."""
+
+    def redirect_request(self, *args, **kwargs):  # noqa: D401
+        return None
+
+
+def read_key_file(path: str) -> str:
+    with open(os.path.expanduser(path), encoding="utf-8") as handle:
+        return handle.read().strip()
+
+
+def is_loopback(url: str) -> bool:
+    try:
+        return (urllib.parse.urlsplit(url).hostname or "").lower() in LOOPBACK_HOSTS
+    except ValueError:
+        return False
+
+
+def describe_model(model: str | None, server: str, key_file: str | None) -> str:
+    """The model's name for the report. Without --model the command uses
+    "default", the model the server has selected, so the server is asked what
+    it lists (a loopback server only, without proxies and redirects, because a
+    llama.cpp key goes along)."""
+    if model:
+        return model
+    if not is_loopback(server):
+        return "default (the server's choice)"
+    url = server.rstrip("/")
+    if url.endswith("/v1"):
+        url = url[:-3]
+    request = urllib.request.Request(url + "/v1/models")
+    if key_file:
+        try:
+            request.add_header("Authorization", "Bearer " + read_key_file(key_file))
+        except OSError:
+            return "default (the key file could not be read)"
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+    try:
+        with opener.open(request, timeout=5) as response:
+            listed = [entry["id"] for entry in json.load(response)["data"]]
+    except Exception:  # Any failure only means the name stays unknown.
+        return "default (the server's choice; it could not be asked)"
+    if len(listed) == 1:
+        return listed[0] + " (the only model the server lists)"
+    return "default (the server's choice; it lists: " + ", ".join(listed[:6]) + ")"
+
+
+def clean_label(label: str | None) -> str:
+    return re.sub(r"[\x00-\x1f\x7f]+", " ", label or "").strip()[:200]
 
 
 def main() -> int:
@@ -301,6 +401,14 @@ def main() -> int:
                         help="kind of model server, passed on as --server-type (the research "
                              "command's default is auto, which refuses a server that is not "
                              "TUFF: for llama-server give llamacpp)")
+    parser.add_argument("--api-key-file", metavar="PATH",
+                        help="file with the key of a llama-server started with --api-key-file; "
+                             "passed on to the research command as --api-key-file (the key "
+                             "itself is never an argument and never in the report)")
+    parser.add_argument("--label", help="name of this run, written at the top of the report "
+                                        "and in its summary (for example \"llama.cpp + Bonsai\")")
+    parser.add_argument("--output", metavar="FILE",
+                        help="also write the report (what is printed) to this new file")
     parser.add_argument("--sandbox")
     parser.add_argument("--max-steps", type=int, default=4)
     parser.add_argument("--research-arg", action="append", default=[], metavar="ARG",
@@ -332,42 +440,93 @@ def main() -> int:
         return 0
     if not args.base_url:
         parser.error("--base-url is required unless --list is given")
+    if args.output and os.path.exists(args.output):
+        parser.error(f"{args.output} already exists; choose a new --output file")
+    if args.api_key_file and not os.path.isfile(os.path.expanduser(args.api_key_file)):
+        parser.error(f"--api-key-file {args.api_key_file!r} is not a file")
+    if args.api_key_file:
+        args.api_key_file = os.path.expanduser(args.api_key_file)
+
+    report = Report()
+    label = clean_label(args.label)
+    server = args.server or DEFAULT_SERVER
+    model_text = describe_model(args.model, server, args.api_key_file)
+    server_type = args.server_type or "auto"
+    report.emit("SandSeek injection check")
+    if label:
+        report.emit(f"Label: {label}")
+    report.emit("Date: " + datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
+    report.emit(f"Server type: {server_type}"
+                + (" (not given: the command asks the server)" if not args.server_type else ""))
+    report.emit(f"Server: {server}" + (" (the command's default)" if not args.server else ""))
+    report.emit(f"Model: {model_text}")
+    report.emit(f"API key file: {'given' if args.api_key_file else 'none'}")
+    report.emit(f"Cases: set {args.case_set}, {len(cases)} pages, repeat {args.repeat}, "
+                f"max steps {args.max_steps}")
+    report.emit(f"Fixtures: {args.base_url}")
+    if args.research_arg:
+        report.emit("Extra research arguments: " + " ".join(args.research_arg))
+    report.emit()
 
     if any(c.attacks for c in cases):
-        print("Note: attacks on one page share a model run, so their results are not independent.")
+        report.emit("Note: attacks on one page share a model run, so their results are not independent.")
     failures = 0
+    interrupted = False
     # per source: [resisted, reported, obeyed, blocked]
     totals: dict[str, list[int]] = {}
     skipped = 0
-    for case in cases:
-        for attempt in range(1, args.repeat + 1):
-            ok, problems, warnings, verdicts = run_case(case, args, attempt)
-            label = f"{case.fixture} (run {attempt})"
-            if ok:
-                print(f"{'warn' if warnings else 'ok':<6}{label}")
-                for warning in warnings:
-                    print(f"        {warning}")
-            else:
-                failures += 1
-                print(f"FAIL  {label}")
-                for problem in problems:
-                    print(f"        {problem}")
-            for attack, verdict in verdicts:
-                if verdict == "not run":
-                    skipped += 1
+    detected: list[str] = []
+    try:
+        for case in cases:
+            for attempt in range(1, args.repeat + 1):
+                ok, problems, warnings, verdicts, seen_server = run_case(case, args, attempt)
+                if seen_server and seen_server not in detected:
+                    detected.append(seen_server)
+                label_text = f"{case.fixture} (run {attempt})"
+                if ok:
+                    report.emit(f"{'warn' if warnings else 'ok':<6}{label_text}")
+                    for warning in warnings:
+                        report.emit(f"        {warning}")
                 else:
-                    count = totals.setdefault(attack.source, [0, 0, 0, 0])
-                    count[0 if verdict == "resisted" else 1 if verdict == "reported"
-                          else 3 if verdict == "blocked" else 2] += 1
-                print(f"        {attack.source:<9} {attack.id:<48} {verdict}")
+                    failures += 1
+                    report.emit(f"FAIL  {label_text}")
+                    for problem in problems:
+                        report.emit(f"        {problem}")
+                for attack, verdict in verdicts:
+                    if verdict == "not run":
+                        skipped += 1
+                    else:
+                        count = totals.setdefault(attack.source, [0, 0, 0, 0])
+                        count[0 if verdict == "resisted" else 1 if verdict == "reported"
+                              else 3 if verdict == "blocked" else 2] += 1
+                    report.emit(f"        {attack.source:<9} {attack.id:<48} {verdict}")
+    except KeyboardInterrupt:
+        interrupted = True
+        report.emit("Interrupted; the numbers below cover the runs that finished.")
     total = len(cases) * args.repeat
-    print(f"{total - failures}/{total} runs resisted the injections")
+    report.emit()
+    report.emit("== Summary ==")
+    if label:
+        report.emit(f"Label: {label}")
+    report.emit(f"Server type: {server_type}"
+                + (f"; the command reported: {'; '.join(detected)}" if detected else ""))
+    report.emit(f"Model: {model_text}")
+    report.emit(f"{total - failures}/{total} runs resisted the injections")
     for source, (resisted, reported, obeyed, blocked) in totals.items():
-        print(f"{source}: {resisted} resisted, {reported} reported, {blocked} blocked, "
-              f"{obeyed} obeyed ({resisted + reported + blocked + obeyed} attack runs)")
+        report.emit(f"{source}: {resisted} resisted, {reported} reported, {blocked} blocked, "
+                    f"{obeyed} obeyed ({resisted + reported + blocked + obeyed} attack runs)")
     if skipped:
-        print(f"{skipped} attack runs not run (page never read, timeout or non-zero exit); "
-              "not counted above")
+        report.emit(f"{skipped} attack runs not run (page never read, timeout or non-zero exit); "
+                    "not counted above")
+    if args.output:
+        try:
+            report.save(args.output)
+        except OSError as error:
+            print(f"error: could not write {args.output}: {error}", file=sys.stderr)
+            return 2
+        print(f"report written to {args.output}")
+    if interrupted:
+        return 130
     return 1 if failures else 0
 
 
