@@ -537,11 +537,14 @@ private final class ExposureProbe: @unchecked Sendable {
     private var asked: [Int] = []
     private let reachable: [ResearchHostAddress]
     private let checked: [ResearchHostAddress]
+    private let unknown: [ResearchHostAddress]
 
     init(reachable: [ResearchHostAddress] = [],
-         checked: [ResearchHostAddress] = [.ipv4(192, 168, 1, 5)]) {
+         checked: [ResearchHostAddress] = [.ipv4(192, 168, 1, 5)],
+         unknown: [ResearchHostAddress] = []) {
         self.reachable = reachable
         self.checked = checked
+        self.unknown = unknown
     }
 
     var ports: [Int] { lock.withLock { asked } }
@@ -549,7 +552,8 @@ private final class ExposureProbe: @unchecked Sendable {
     func run(_ port: Int) async -> ResearchExposureReport {
         lock.withLock { asked.append(port) }
         return ResearchExposureReport(
-            port: port, loopbackAnswered: true, checked: checked, reachable: reachable)
+            port: port, loopbackAnswered: true, checked: checked, reachable: reachable,
+            unknown: unknown)
     }
 }
 
@@ -608,8 +612,40 @@ private final class ExposureProbe: @unchecked Sendable {
         let server = controller(probe: probe)
         await server.check()
         #expect(server.state == .ready)
-        #expect(server.exposure == .reachable(
-            "Reachable from the network at 192.168.1.5:8080; start the server with --host 127.0.0.1"))
+        let warning = "Something answers at 192.168.1.5:8080. "
+            + "Other machines on that network can reach it. "
+            + "Start the server so that it listens on 127.0.0.1 only "
+            + "(llama-server: --host 127.0.0.1)."
+        #expect(server.exposure == .reachable(warning))
+        // The text names no flag that TUFF lacks without saying who has it.
+        #expect(warning.contains("llama-server: --host"))
+    }
+
+    @Test func anAddressWithoutAnAnswerIsUnclearNotClear() async {
+        let probe = ExposureProbe(
+            checked: [.ipv4(192, 168, 1, 5), .ipv4(192, 168, 64, 1)],
+            unknown: [.ipv4(192, 168, 1, 5)])
+        let server = controller(probe: probe)
+        await server.check()
+        #expect(server.state == .ready)
+        guard case .unclear(let note) = server.exposure else {
+            Issue.record("expected an unclear result, got \(server.exposure)")
+            return
+        }
+        #expect(note.contains("Could not tell for 1 address (192.168.1.5:8080)"))
+        #expect(note.contains("Local Network"))
+    }
+
+    @Test func aWarningWinsOverAnUnclearAddress() async {
+        let probe = ExposureProbe(
+            reachable: [.ipv4(10, 0, 0, 9)],
+            checked: [.ipv4(10, 0, 0, 9), .ipv4(192, 168, 1, 5)],
+            unknown: [.ipv4(192, 168, 1, 5)])
+        let server = controller(probe: probe)
+        await server.check()
+        if case .reachable = server.exposure {} else {
+            Issue.record("expected a warning, got \(server.exposure)")
+        }
     }
 
     @Test func aMacWithoutNetworkAddressesIsCountedAsNotReachable() async {
@@ -637,8 +673,11 @@ private final class ExposureProbe: @unchecked Sendable {
             return
         }
         #expect(probe.ports == [8080])
-        #expect(server.exposure == .reachable(
-            "Reachable from the network at 10.0.0.9:8080; start the server with --host 127.0.0.1"))
+        if case .reachable(let warning) = server.exposure {
+            #expect(warning.hasPrefix("Something answers at 10.0.0.9:8080."))
+        } else {
+            Issue.record("expected a warning, got \(server.exposure)")
+        }
     }
 
     @Test func changingTheAddressOrTypeForgetsTheResult() async {
@@ -667,6 +706,21 @@ private final class ExposureProbe: @unchecked Sendable {
         await server.refresh()
         #expect(server.state == .off)
         #expect(server.exposure == .notChecked)
+    }
+
+    @Test func aServerThatChangedBetweenTwoLooksForgetsTheResult() async {
+        let services = FakeResearchServices()
+        let probe = ExposureProbe(reachable: [.ipv4(192, 168, 1, 5)])
+        let server = controller(services: services, probe: probe)
+        await server.check()
+        if case .reachable = server.exposure {} else {
+            Issue.record("expected a warning, got \(server.exposure)")
+        }
+        // The port now answers like something other than TUFF.
+        services.setTuffStatus(false)
+        await server.refresh()
+        #expect(server.exposure == .notChecked)
+        #expect(probe.ports == [8080])
     }
 
     @Test func aNewAddressDuringTheCheckDropsItsAnswer() async {

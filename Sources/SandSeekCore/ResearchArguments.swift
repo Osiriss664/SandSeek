@@ -129,11 +129,15 @@ public struct ResearchArguments: Equatable, Sendable {
                                the command tries a plain TCP connect, with no
                                data sent, to each of this Mac's own non-loopback
                                addresses. Needs no question. Exit code 0 when
-                               nothing answered on the network, 3 when
-                               something did, 4 when the model server does not
-                               answer on this Mac at all (nothing to judge).
+                               every address refused the connection, 2 for
+                               bad arguments, 3 when something answered on
+                               the network, 4 when the model server does not
+                               answer on this Mac at all, 5 when some address
+                               neither accepted nor refused (a timeout or a
+                               block, for example macOS Local Network
+                               privacy); 4 and 5 mean "cannot tell".
                                Start llama-server with --host 127.0.0.1 if it
-                               answers.
+                               answers; TUFF listens on 127.0.0.1 only.
     """
 
     public init() {}
@@ -171,7 +175,7 @@ public struct ResearchArguments: Equatable, Sendable {
         var maxTokensGiven = false
         // The first option other than the replay's own, which it cannot take.
         var runOption: String?
-        // The same for --check-exposure, which takes only --server and --sandbox.
+        // The same for --check-exposure, which takes only --server, --sandbox and --quiet.
         var exposureOption: String?
         func value(_ flag: String) throws -> String {
             guard index + 1 < arguments.count else {
@@ -202,7 +206,7 @@ public struct ResearchArguments: Equatable, Sendable {
                 runOption = argument
             }
             if argument.hasPrefix("-"), argument != "--", exposureOption == nil,
-               !["--help", "-h", "--check-exposure", "--server", "--sandbox"].contains(argument) {
+               !["--help", "-h", "--check-exposure", "--server", "--sandbox", "--quiet"].contains(argument) {
                 exposureOption = argument
             }
             switch argument {

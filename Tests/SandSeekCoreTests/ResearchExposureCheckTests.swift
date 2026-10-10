@@ -13,28 +13,50 @@ private func v6(_ groups: UInt16...) -> ResearchHostAddress {
     ResearchHostAddress.ipv6(groups: groups)!
 }
 
-/// Accepts connections on chosen addresses and remembers what it was asked.
+/// Answers per address as told and remembers what it was asked. An address
+/// that is not listed refuses, as a closed port on the Mac's own address does.
 private final class FakeConnector: ResearchPortConnecting, @unchecked Sendable {
     private let lock = NSLock()
     private let accepting: Set<ResearchHostAddress>
+    private let silent: Set<ResearchHostAddress>
     private let onlyPort: Int?
     private var asked: [ResearchHostAddress] = []
     private var timeouts: [TimeInterval] = []
 
-    init(accepting: Set<ResearchHostAddress> = [], onlyPort: Int? = nil) {
+    /// `accepting` accepts (on `onlyPort` if given); `silent` neither accepts
+    /// nor refuses.
+    init(accepting: Set<ResearchHostAddress> = [],
+         silent: Set<ResearchHostAddress> = [],
+         onlyPort: Int? = nil) {
         self.accepting = accepting
+        self.silent = silent
         self.onlyPort = onlyPort
     }
 
     var askedAddresses: [ResearchHostAddress] { lock.withLock { asked } }
     var askedTimeouts: [TimeInterval] { lock.withLock { timeouts } }
 
-    func accepts(address: ResearchHostAddress, port: Int, timeout: TimeInterval) async -> Bool {
+    func answer(address: ResearchHostAddress, port: Int, timeout: TimeInterval) async
+        -> ResearchPortAnswer {
         lock.withLock {
             asked.append(address)
             timeouts.append(timeout)
         }
-        return accepting.contains(address) && (onlyPort == nil || onlyPort == port)
+        if accepting.contains(address), onlyPort == nil || onlyPort == port { return .accepted }
+        return silent.contains(address) ? .unknown : .refused
+    }
+}
+
+/// Accepts on loopback and refuses everywhere else, except that one address
+/// stays silent on one port.
+private struct PortSilentConnector: ResearchPortConnecting {
+    let silentPort: Int
+    let silent: ResearchHostAddress
+
+    func answer(address: ResearchHostAddress, port: Int, timeout: TimeInterval) async
+        -> ResearchPortAnswer {
+        if address == .ipv4(127, 0, 0, 1) { return .accepted }
+        return address == silent && port == silentPort ? .unknown : .refused
     }
 }
 
@@ -205,11 +227,38 @@ private final class LocalListener {
         #expect(report.reachable == [lan])
         // In numeric order, whatever order they were given in.
         #expect(report.checked == [lan, bridge])
-        #expect(report.warning == "Reachable from the network at 192.168.1.5:8080; "
-            + "start the server with --host 127.0.0.1")
-        let lower = report.warning?.lowercased() ?? ""
-        #expect(lower.contains("reachable from the network at 192.168.1.5:8080; "
-            + "start the server with --host 127.0.0.1"))
+        #expect(report.warning == "Something answers at 192.168.1.5:8080. "
+            + "Other machines on that network can reach it. "
+            + "Start the server so that it listens on 127.0.0.1 only "
+            + "(llama-server: --host 127.0.0.1).")
+        #expect(report.unknown.isEmpty)
+        #expect(report.refusedCount == 1)
+    }
+
+    @Test func anAddressWithoutAnAnswerIsUnknownNeverClear() async {
+        let lan = ResearchHostAddress.ipv4(192, 168, 1, 5)
+        let bridge = ResearchHostAddress.ipv4(192, 168, 64, 1)
+        let connector = FakeConnector(accepting: [.ipv4(127, 0, 0, 1)], silent: [lan])
+        let report = await ResearchExposureCheck.run(
+            port: 8080, addresses: [bridge, lan], connector: connector)
+        #expect(report.loopbackAnswered)
+        #expect(!report.isExposed)
+        #expect(report.warning == nil)
+        #expect(report.unknown == [lan])
+        #expect(report.hasUnknown)
+        #expect(report.refusedCount == 1)
+        let note = report.unknownNote ?? ""
+        #expect(note.contains("Could not tell for 1 address (192.168.1.5:8080)"))
+        #expect(note.contains("neither accepted nor refused"))
+        #expect(note.contains("Local Network"))
+    }
+
+    @Test func aSilentLoopbackIsNotAnAnswerEither() async {
+        let lan = ResearchHostAddress.ipv4(192, 168, 1, 5)
+        let connector = FakeConnector(silent: [.ipv4(127, 0, 0, 1)])
+        let report = await ResearchExposureCheck.run(
+            port: 8080, addresses: [lan], connector: connector)
+        #expect(!report.loopbackAnswered)
     }
 
     @Test func severalAddressesAreAllNamedAndIPv6HasBrackets() async {
@@ -220,7 +269,7 @@ private final class LocalListener {
             port: 8080, addresses: [global, lan], connector: connector)
         #expect(report.reachable == [lan, global])
         #expect(report.reachableText == "192.168.1.5:8080, [2001:db8::5]:8080")
-        #expect(report.warning?.contains("at 192.168.1.5:8080, [2001:db8::5]:8080;") == true)
+        #expect(report.warning?.contains("answers at 192.168.1.5:8080, [2001:db8::5]:8080.") == true)
         // Nothing answered on loopback here: the report says so.
         #expect(!report.loopbackAnswered)
     }
@@ -273,6 +322,7 @@ private final class LocalListener {
         #expect(result.exitCode == 0)
         #expect(result.text.contains("Addresses tried: 192.168.1.5"))
         #expect(result.text.contains("RESULT: nothing answered on the network."))
+        #expect(result.text.contains("answers on the network: no (all 1 address refused the connection)"))
         #expect(result.text.contains("Model server, port 8080:"))
         #expect(result.text.contains("Web sandbox, port 9100:"))
     }
@@ -284,8 +334,8 @@ private final class LocalListener {
             serverPort: 8080, sandboxPort: 9100, addresses: [lan], connector: connector)
         #expect(result.exitCode == 3)
         #expect(result.text.contains("answers on the network: YES, at 192.168.1.5:8080"))
-        #expect(result.text.contains("RESULT: Reachable from the network at 192.168.1.5:8080; "
-            + "start the server with --host 127.0.0.1"))
+        #expect(result.text.contains("RESULT: Something answers at 192.168.1.5:8080."))
+        #expect(result.text.contains("llama-server: --host 127.0.0.1"))
     }
 
     @Test func anExposedSandboxAlsoExitsThree() async {
@@ -312,26 +362,59 @@ private final class LocalListener {
         #expect(sandboxOff.text.contains("no (not running; that is fine)"))
     }
 
+    @Test func aSilentAddressGivesExitFiveNotZero() async {
+        let lan = ResearchHostAddress.ipv4(192, 168, 1, 5)
+        let connector = FakeConnector(accepting: [.ipv4(127, 0, 0, 1)], silent: [lan])
+        let result = await ResearchExposureCommand.run(
+            serverPort: 8080, sandboxPort: 9100, addresses: [lan], connector: connector)
+        #expect(result.exitCode == 5)
+        #expect(result.text.contains("answers on the network: NOT KNOWN"))
+        #expect(result.text.contains("RESULT: cannot tell. Could not tell for 1 address (192.168.1.5:8080)"))
+        #expect(!result.text.contains("RESULT: nothing answered on the network."))
+    }
+
+    @Test func aSilentAddressOnTheSandboxPortAlsoGivesExitFive() async {
+        let lan = ResearchHostAddress.ipv4(192, 168, 1, 5)
+        // Accepts nothing but loopback, and stays silent only on 9100.
+        let connector = PortSilentConnector(silentPort: 9100, silent: lan)
+        let result = await ResearchExposureCommand.run(
+            serverPort: 8080, sandboxPort: 9100, addresses: [lan], connector: connector)
+        #expect(result.exitCode == 5)
+        #expect(result.text.contains("(192.168.1.5:9100)"))
+    }
+
+    @Test func anExposedAddressStillWinsOverASilentOne() async {
+        let lan = ResearchHostAddress.ipv4(192, 168, 1, 5)
+        let bridge = ResearchHostAddress.ipv4(192, 168, 64, 1)
+        let connector = FakeConnector(accepting: [.ipv4(127, 0, 0, 1), lan], silent: [bridge])
+        let result = await ResearchExposureCommand.run(
+            serverPort: 8080, sandboxPort: 9100, addresses: [lan, bridge], connector: connector)
+        #expect(result.exitCode == 3)
+        #expect(result.text.contains("no clear answer from: 192.168.64.1:8080"))
+    }
+
     // MARK: the real connector
 
     @Test func theRealConnectorSeesAListenerAndAClosedPort() async throws {
         let listener = try #require(LocalListener())
         let connector = ResearchTCPConnector()
-        let open = await connector.accepts(
+        let open = await connector.answer(
             address: .ipv4(127, 0, 0, 1), port: listener.port, timeout: 2)
-        #expect(open)
+        #expect(open == .accepted)
         listener.stop()
-        let closed = await connector.accepts(
+        // A closed port on the Mac's own address is refused, which is
+        // different from "no answer".
+        let closed = await connector.answer(
             address: .ipv4(127, 0, 0, 1), port: listener.port, timeout: 2)
-        #expect(!closed)
+        #expect(closed == .refused)
     }
 
-    @Test func theRealConnectorRefusesAnInvalidPort() async {
+    @Test func theRealConnectorCannotTellForAnInvalidPort() async {
         let connector = ResearchTCPConnector()
-        let zero = await connector.accepts(address: .ipv4(127, 0, 0, 1), port: 0, timeout: 1)
-        let tooHigh = await connector.accepts(address: .ipv4(127, 0, 0, 1), port: 70_000, timeout: 1)
-        #expect(!zero)
-        #expect(!tooHigh)
+        let zero = await connector.answer(address: .ipv4(127, 0, 0, 1), port: 0, timeout: 1)
+        let tooHigh = await connector.answer(address: .ipv4(127, 0, 0, 1), port: 70_000, timeout: 1)
+        #expect(zero == .unknown)
+        #expect(tooHigh == .unknown)
     }
 
     @Test func theRealCheckFindsNoLoopbackListenerOnAFreePort() async throws {
@@ -356,6 +439,9 @@ private final class LocalListener {
              "--sandbox", "http://127.0.0.1:9100"], environment: [:])
         #expect(both.checkExposure)
         #expect(both.serverURL.port == 8081)
+        let quiet = try ResearchArguments.parse(["--check-exposure", "--quiet"], environment: [:])
+        #expect(quiet.checkExposure)
+        #expect(quiet.quiet)
         let plain = try ResearchArguments.parse(["q"], environment: [:])
         #expect(!plain.checkExposure)
         #expect(ResearchArguments.usage.contains("--check-exposure"))

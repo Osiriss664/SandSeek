@@ -161,9 +161,13 @@ public final class ResearchServerController {
         /// server did not answer.
         case notChecked
         case checking
-        /// Connections to this Mac's own network addresses were not accepted.
+        /// Every connection to this Mac's own network addresses was refused.
         /// `addresses` is how many were tried (0: the Mac has none).
         case notReachable(addresses: Int)
+        /// No connection was accepted, but some address neither accepted nor
+        /// refused (a timeout, a block, a missing permission), so nothing can
+        /// be said. The text is the note to show.
+        case unclear(String)
         /// A connection to a network address was accepted. The text is the
         /// warning to show.
         case reachable(String)
@@ -442,6 +446,8 @@ public final class ResearchServerController {
         guard mine == exposureGeneration else { return }
         if let warning = report.warning {
             exposure = .reachable(warning)
+        } else if let note = report.unknownNote {
+            exposure = .unclear(note)
         } else {
             exposure = .notReachable(addresses: report.checked.count)
         }
@@ -492,6 +498,9 @@ public final class ResearchServerController {
                     dropExposure()
                 }
             default:
+                // A server that changed (restarted, another one on the port) is
+                // not the one an earlier Check looked at.
+                dropExposure()
                 await look(showProgress: false)
             }
         }

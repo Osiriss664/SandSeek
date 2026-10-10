@@ -160,6 +160,12 @@ struct ConnectionCard: View {
                 .foregroundStyle(.orange)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
+        case .unclear(let note):
+            Label(note, systemImage: "questionmark.circle.fill")
+                .font(.callout)
+                .foregroundStyle(.orange)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
         case .notReachable(let addresses):
             Text(verbatim: notReachableText(addresses))
                 .font(.caption)
@@ -182,7 +188,7 @@ struct ConnectionCard: View {
             return "This Mac has no network address to try; the server is not reachable from the network."
         }
         let noun = addresses == 1 ? "address" : "addresses"
-        return "Not reachable from the network (\(addresses) \(noun) tried)."
+        return "Not reachable from the network (\(addresses) \(noun) tried, all refused)."
     }
 
     private var hint: some View {

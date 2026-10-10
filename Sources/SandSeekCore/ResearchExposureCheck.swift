@@ -14,8 +14,13 @@ import Musl
 // (a `--host 0.0.0.0` or a wildcard default). This file lists the Mac's own
 // non-loopback addresses and tries a plain TCP connect to each one on the
 // server's port. A connect that is accepted means someone on that network
-// could reach the server too. Nothing is sent over the connection: it is
-// closed at once, so no HTTP request reaches the server and no key is used.
+// could reach the server too. A connect that is refused (ECONNREFUSED, which
+// the Mac's own network stack answers at once) means nothing listens there.
+// Anything else (a timeout, "no route", "not permitted", for example macOS
+// Local Network privacy or a firewall rule) is neither: the check says it
+// could not tell, never "not reachable". Nothing is sent over the connection:
+// it is closed at once, so no HTTP request reaches the server and no key is
+// used.
 
 // MARK: - Addresses
 
@@ -174,12 +179,24 @@ public struct ResearchHostAddress: Equatable, Hashable, Sendable {
 
 // MARK: - Connecting
 
-/// Tries a TCP connection and says only whether it was accepted. A fake
-/// stands in for it in tests.
+/// What a TCP connection attempt to one address and port came to.
+public enum ResearchPortAnswer: Equatable, Sendable {
+    /// The connection was accepted: something listens there.
+    case accepted
+    /// The connection was refused (ECONNREFUSED): nothing listens there.
+    case refused
+    /// Neither: it timed out or failed in another way (blocked, no route,
+    /// not permitted, an error in the probe itself).
+    case unknown
+}
+
+/// Tries a TCP connection and says how it came out. A fake stands in for it
+/// in tests.
 public protocol ResearchPortConnecting: Sendable {
-    /// True if a connection to `address` on `port` was accepted within
-    /// `timeout` seconds. The connection is closed at once; nothing is sent.
-    func accepts(address: ResearchHostAddress, port: Int, timeout: TimeInterval) async -> Bool
+    /// Connects to `address` on `port`, waiting up to `timeout` seconds, and
+    /// closes the connection at once; nothing is sent.
+    func answer(address: ResearchHostAddress, port: Int, timeout: TimeInterval) async
+        -> ResearchPortAnswer
 }
 
 /// The real thing: a POSIX socket, set to non-blocking, connected with `poll`
@@ -188,22 +205,24 @@ public protocol ResearchPortConnecting: Sendable {
 public struct ResearchTCPConnector: ResearchPortConnecting {
     public init() {}
 
-    public func accepts(address: ResearchHostAddress, port: Int, timeout: TimeInterval) async -> Bool {
+    public func answer(address: ResearchHostAddress, port: Int, timeout: TimeInterval) async
+        -> ResearchPortAnswer {
         let bytes = address.bytes
         let milliseconds = Int32(min(max(timeout, 0.05), 60) * 1000)
-        return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+        return await withCheckedContinuation {
+            (continuation: CheckedContinuation<ResearchPortAnswer, Never>) in
             DispatchQueue.global(qos: .userInitiated).async {
-                continuation.resume(returning: Self.connectionIsAccepted(
+                continuation.resume(returning: Self.attempt(
                     bytes: bytes, port: port, timeoutMilliseconds: milliseconds))
             }
         }
     }
 
-    private static func connectionIsAccepted(bytes: [UInt8], port: Int,
-                                             timeoutMilliseconds: Int32) -> Bool {
-        guard let portNumber = UInt16(exactly: port), portNumber != 0 else { return false }
+    private static func attempt(bytes: [UInt8], port: Int,
+                                timeoutMilliseconds: Int32) -> ResearchPortAnswer {
+        guard let portNumber = UInt16(exactly: port), portNumber != 0 else { return .unknown }
         let isIPv6 = bytes.count == 16
-        guard isIPv6 || bytes.count == 4 else { return false }
+        guard isIPv6 || bytes.count == 4 else { return .unknown }
         // Glibc imports SOCK_STREAM as an enum with a raw value; macOS and
         // musl import it as an integer.
         #if canImport(Glibc)
@@ -212,10 +231,10 @@ public struct ResearchTCPConnector: ResearchPortConnecting {
         let streamType = SOCK_STREAM
         #endif
         let descriptor = socket(isIPv6 ? AF_INET6 : AF_INET, streamType, 0)
-        guard descriptor >= 0 else { return false }
+        guard descriptor >= 0 else { return .unknown }
         defer { close(descriptor) }
         let flags = fcntl(descriptor, F_GETFL)
-        guard flags >= 0, fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) >= 0 else { return false }
+        guard flags >= 0, fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) >= 0 else { return .unknown }
 
         let started: Int32
         if isIPv6 {
@@ -245,10 +264,14 @@ public struct ResearchTCPConnector: ResearchPortConnecting {
                 }
             }
         }
-        // A connect to an address of this Mac usually finishes (or is refused)
-        // at once; a filtered one needs the wait below.
-        if started == 0 { return true }
-        guard errno == EINPROGRESS else { return false }
+        // A connect to an address of this Mac usually finishes (accepted or
+        // refused) at once; a filtered one needs the wait below. Only a refusal
+        // counts as "nothing listens there": a block, a missing permission or
+        // a timeout leaves the question open.
+        let connectError = errno
+        if started == 0 { return .accepted }
+        if connectError == ECONNREFUSED { return .refused }
+        guard connectError == EINPROGRESS else { return .unknown }
 
         var waiting = pollfd(fd: descriptor, events: Int16(POLLOUT), revents: 0)
         var ready: Int32 = -1
@@ -256,14 +279,15 @@ public struct ResearchTCPConnector: ResearchPortConnecting {
             ready = poll(&waiting, 1, timeoutMilliseconds)
             if ready >= 0 || errno != EINTR { break }
         }
-        guard ready > 0 else { return false }
+        guard ready > 0 else { return .unknown }
         // Writable can also mean "failed": the socket's own error says which.
         var failure: Int32 = 0
         var length = socklen_t(MemoryLayout<Int32>.size)
         guard getsockopt(descriptor, SOL_SOCKET, SO_ERROR, &failure, &length) == 0 else {
-            return false
+            return .unknown
         }
-        return failure == 0
+        if failure == 0 { return .accepted }
+        return failure == ECONNREFUSED ? .refused : .unknown
     }
 }
 
@@ -280,28 +304,59 @@ public struct ResearchExposureReport: Equatable, Sendable {
     public let checked: [ResearchHostAddress]
     /// The ones that accepted a connection.
     public let reachable: [ResearchHostAddress]
+    /// The ones that neither accepted nor refused (a timeout or another
+    /// failure). Together with `reachable` these are the addresses for which
+    /// "refused" was not seen.
+    public let unknown: [ResearchHostAddress]
 
     public init(port: Int, loopbackAnswered: Bool,
-                checked: [ResearchHostAddress], reachable: [ResearchHostAddress]) {
+                checked: [ResearchHostAddress], reachable: [ResearchHostAddress],
+                unknown: [ResearchHostAddress] = []) {
         self.port = port
         self.loopbackAnswered = loopbackAnswered
         self.checked = checked
         self.reachable = reachable
+        self.unknown = unknown
     }
 
     public var isExposed: Bool { !reachable.isEmpty }
+
+    /// True if at least one address gave neither an acceptance nor a refusal.
+    public var hasUnknown: Bool { !unknown.isEmpty }
+
+    /// How many addresses refused the connection.
+    public var refusedCount: Int { max(0, checked.count - reachable.count - unknown.count) }
 
     /// `192.168.1.5:8080, [2001:db8::5]:8080`
     public var reachableText: String {
         reachable.map { $0.hostAndPort(port) }.joined(separator: ", ")
     }
 
+    /// `192.168.1.5:8080` for each address that gave no clear answer.
+    public var unknownText: String {
+        unknown.map { $0.hostAndPort(port) }.joined(separator: ", ")
+    }
+
     /// The warning the app and the command show, or nil when nothing
-    /// answered on the network.
+    /// answered on the network. It names no flag for every server type: TUFF
+    /// has none, and listens on 127.0.0.1 only by itself.
     public var warning: String? {
         guard isExposed else { return nil }
-        return "Reachable from the network at \(reachableText); "
-            + "start the server with --host 127.0.0.1"
+        return "Something answers at \(reachableText). "
+            + "Other machines on that network can reach it. "
+            + "Start the server so that it listens on 127.0.0.1 only "
+            + "(llama-server: --host 127.0.0.1)."
+    }
+
+    /// The note the app and the command show when some address gave no clear
+    /// answer, or nil.
+    public var unknownNote: String? {
+        guard hasUnknown else { return nil }
+        let noun = unknown.count == 1 ? "address" : "addresses"
+        return "Could not tell for \(unknown.count) \(noun) (\(unknownText)): the connection "
+            + "was neither accepted nor refused. If macOS asked SandSeek for Local Network "
+            + "access, allow it (System Settings > Privacy & Security > Local Network) "
+            + "and check again."
     }
 }
 
@@ -325,31 +380,41 @@ public enum ResearchExposureCheck {
     ) async -> ResearchExposureReport {
         let toCheck = ResearchHostAddress.networkAddresses(
             from: addresses ?? ResearchHostAddress.localNetworkAddresses())
-        let onLoopback = await answering(
+        let onLoopback = await answers(
             loopbackAddresses, port: port, connector: connector, timeout: timeout)
-        let onNetwork = await answering(
+        let onNetwork = await answers(
             toCheck, port: port, connector: connector, timeout: timeout)
+        var reachable: [ResearchHostAddress] = []
+        var unknown: [ResearchHostAddress] = []
+        for (address, answer) in zip(toCheck, onNetwork) {
+            switch answer {
+            case .accepted: reachable.append(address)
+            case .unknown: unknown.append(address)
+            case .refused: break
+            }
+        }
         return ResearchExposureReport(
-            port: port, loopbackAnswered: !onLoopback.isEmpty,
-            checked: toCheck, reachable: onNetwork)
+            port: port, loopbackAnswered: onLoopback.contains(.accepted),
+            checked: toCheck, reachable: reachable, unknown: unknown)
     }
 
-    /// The addresses of `addresses` that accept a connection, in their order.
-    static func answering(_ addresses: [ResearchHostAddress],
-                          port: Int,
-                          connector: any ResearchPortConnecting,
-                          timeout: TimeInterval) async -> [ResearchHostAddress] {
-        await withTaskGroup(of: (Int, Bool).self, returning: [ResearchHostAddress].self) { group in
+    /// How each of `addresses` answered, in their order.
+    static func answers(_ addresses: [ResearchHostAddress],
+                        port: Int,
+                        connector: any ResearchPortConnecting,
+                        timeout: TimeInterval) async -> [ResearchPortAnswer] {
+        await withTaskGroup(of: (Int, ResearchPortAnswer).self,
+                            returning: [ResearchPortAnswer].self) { group in
             for (index, address) in addresses.enumerated() {
                 group.addTask {
-                    (index, await connector.accepts(address: address, port: port, timeout: timeout))
+                    (index, await connector.answer(address: address, port: port, timeout: timeout))
                 }
             }
-            var accepted: [Int] = []
-            for await (index, isAccepted) in group where isAccepted {
-                accepted.append(index)
+            var result = [ResearchPortAnswer](repeating: .unknown, count: addresses.count)
+            for await (index, answer) in group {
+                result[index] = answer
             }
-            return accepted.sorted().map { addresses[$0] }
+            return result
         }
     }
 }
@@ -358,13 +423,19 @@ public enum ResearchExposureCheck {
 
 /// The text and exit status of `sandseek --check-exposure`.
 public enum ResearchExposureCommand {
-    /// Nothing answered on the network.
+    /// Nothing answered on the network, and every address refused.
     public static let exitClear: Int32 = 0
+    /// Bad arguments (`sandseek` uses 2 for those everywhere).
+    public static let exitBadArguments: Int32 = 2
     /// Something answered on the network.
     public static let exitExposed: Int32 = 3
     /// Nothing answered on the network, but the model server does not answer
     /// on this Mac either, so the result says nothing.
     public static let exitServerNotRunning: Int32 = 4
+    /// Nothing accepted, but some address neither accepted nor refused (for
+    /// example macOS Local Network privacy or a firewall rule), so the result
+    /// says nothing.
+    public static let exitUnclear: Int32 = 5
 
     /// Checks the model server's port and the web sandbox's port. Only the
     /// model server's port decides "not running": the sandbox is started and
@@ -386,11 +457,33 @@ public enum ResearchExposureCommand {
         return render(server: server, sandbox: sandbox)
     }
 
+    /// The line about one port's network addresses.
+    private static func networkLine(_ report: ResearchExposureReport) -> [String] {
+        var lines: [String] = []
+        if report.isExposed {
+            lines.append("  answers on the network: YES, at \(report.reachableText)")
+        } else if report.hasUnknown {
+            lines.append("  answers on the network: NOT KNOWN (no answer and no refusal from "
+                + "\(report.unknownText))")
+        } else if report.checked.isEmpty {
+            lines.append("  answers on the network: no")
+        } else {
+            let noun = report.checked.count == 1 ? "address" : "addresses"
+            lines.append("  answers on the network: no (all \(report.checked.count) \(noun) "
+                + "refused the connection)")
+        }
+        if report.isExposed, report.hasUnknown {
+            lines.append("  no clear answer from: \(report.unknownText)")
+        }
+        return lines
+    }
+
     static func render(server: ResearchExposureReport,
                        sandbox: ResearchExposureReport) -> (text: String, exitCode: Int32) {
         var lines = [
             "Network exposure check: does a connection to this Mac's own network addresses succeed?",
-            "A plain TCP connect only; nothing is sent to the servers.",
+            "A plain TCP connect only; nothing is sent to the servers. A connection that is",
+            "refused counts as \"nothing listens\"; a timeout or any other failure is \"not known\".",
         ]
         if server.checked.isEmpty {
             lines.append("This Mac has no network address besides loopback, so there is nothing to try.")
@@ -402,17 +495,13 @@ public enum ResearchExposureCommand {
         lines.append(server.loopbackAnswered
             ? "  answers on 127.0.0.1 or ::1: yes"
             : "  answers on 127.0.0.1 or ::1: NO (the server is not running here)")
-        lines.append(server.isExposed
-            ? "  answers on the network: YES, at \(server.reachableText)"
-            : "  answers on the network: no")
+        lines.append(contentsOf: networkLine(server))
         lines.append("")
         lines.append("Web sandbox, port \(sandbox.port):")
         lines.append(sandbox.loopbackAnswered
             ? "  answers on 127.0.0.1 or ::1: yes"
             : "  answers on 127.0.0.1 or ::1: no (not running; that is fine)")
-        lines.append(sandbox.isExposed
-            ? "  answers on the network: YES, at \(sandbox.reachableText)"
-            : "  answers on the network: no")
+        lines.append(contentsOf: networkLine(sandbox))
         lines.append("")
 
         let exitCode: Int32
@@ -430,6 +519,9 @@ public enum ResearchExposureCommand {
             exitCode = exitServerNotRunning
             lines.append("RESULT: cannot tell. Nothing answers on port \(server.port) at all. "
                 + "Start the model server on that port, then run this check again.")
+        } else if let note = server.unknownNote ?? sandbox.unknownNote {
+            exitCode = exitUnclear
+            lines.append("RESULT: cannot tell. " + note)
         } else {
             exitCode = exitClear
             lines.append("RESULT: nothing answered on the network.")
