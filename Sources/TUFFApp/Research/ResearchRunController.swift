@@ -305,6 +305,8 @@ public final class ResearchRunController {
             append(.reading, "Repeated page refused: \(url)", started: started)
         case .unseenURLRefused(let url):
             append(.reading, "Unknown address not opened: \(url)", started: started)
+        case .privateAddressRefused(let url):
+            append(.reading, "Local network address refused: \(url)", started: started)
         case .shortenedOlderResults:
             append(.turn, "Shortened older results to fit the model's context", started: started)
         case .retryingAfterTimeout:

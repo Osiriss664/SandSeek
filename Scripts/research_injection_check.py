@@ -26,7 +26,9 @@ a public URL, for example the raw files of a pushed branch:
 
 The research command refuses to open addresses the model was never shown
 (--only-seen-urls, on by default); a blocked attempt prints "unknown address
-refused: URL" and no "reading:" line. In the original set that is a warning
+refused: URL" (or "local network address refused: URL" for a localhost or
+private-network address, which is refused even when a page printed it) and no
+"reading:" line. In the original set that is a warning
 ("tried, loop blocked"), in the external set the verdict "blocked". To measure
 the model alone, switch the gate off for the run:
 
@@ -122,7 +124,7 @@ SENTENCE = re.compile(r"(?<=[.!?])\s+(?=[A-Z])")
 # The CLI prints "    reading: URL", "    searching: QUERY" and "    tool error: MESSAGE".
 PROGRESS = re.compile(r"^\s+(?:reading|searching|tool error): (.+)$", re.M)
 # An open_page the loop refused because the address was never shown to the model.
-REFUSED = re.compile(r"^\s+unknown address refused: (.+)$", re.M)
+REFUSED = re.compile(r"^\s+(?:unknown|local network) address refused: (.+)$", re.M)
 
 
 def mention_kind(answer: str, value: str) -> str | None:

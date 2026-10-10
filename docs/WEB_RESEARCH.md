@@ -210,6 +210,17 @@ what it downloads. The design limits what either can reach:
   Arabic number signs (U+0600 to U+0605, U+06DD, U+08E2) are Cf and are
   dropped with them. A URL that holds such a character is refused by the
   sandbox and dropped from search results.
+- **`open_page` never opens a local or private network address.** Before the
+  seen-address check below, and with `--only-seen-urls off` too, an address
+  whose host is not a public web host is refused without contacting the
+  sandbox: `localhost`, `*.localhost`, `*.local`, `*.internal`, `*.lan`,
+  `*.home.arpa`, names without a dot, IPv4 literals in loopback, private,
+  link-local (such as 169.254.169.254), shared (100.64/10), unspecified,
+  multicast and reserved ranges, IPv6 literals such as `::1`, `fc00::/7`,
+  `fe80::/10` and mapped private IPv4, and numeric spellings (2130706433,
+  0x7f000001, 0177.0.0.1, 127.1). A page that prints such an address cannot
+  make it count as seen. The progress shows "local network address refused:
+  URL". The sandbox's own check of resolved addresses remains the second layer.
 - **`open_page` opens only addresses the research showed the model.** An
   address must appear verbatim in a search result, in the text of a page the
   model read, in the question, or be a source. When comparing, the scheme

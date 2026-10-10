@@ -2627,6 +2627,108 @@ struct ResearchAgentTests {
         #expect(ResearchOptions().onlySeenURLs)
     }
 
+    @Test func privateAndLocalHostsAreRefusedAndPublicOnesAreNot() {
+        let refused = [
+            "localhost", "LOCALHOST", "app.localhost", "printer.local", "db.internal",
+            "router.lan", "nas.home.arpa", "home.arpa", "intranet", "localhost.",
+            "127.0.0.1", "127.255.255.254", "10.0.0.1", "172.16.0.1", "172.31.255.255",
+            "192.168.64.1", "169.254.169.254", "100.64.0.1", "100.127.255.255", "0.0.0.0",
+            "0.1.2.3", "224.0.0.1", "239.255.255.250", "240.0.0.1", "255.255.255.255",
+            "[::1]", "::1", "[::]", "[fc00::1]", "[fd12:3456::1]", "[fe80::1]",
+            "[fe80::1%en0]", "[::ffff:127.0.0.1]", "[::ffff:7f00:1]", "[::ffff:192.168.1.1]",
+            "[ff02::1]", "[not:an:address]",
+            "2130706433", "0x7f000001", "0177.0.0.1", "127.1", "127.0.1", "10.1",
+            "0x7f.0.0.1", "017700000001", "1.2.3", "1.2.3.4.5", "08.8.8.8", "256.1.1.1",
+            "", "a..b.example", "198.18.0.1", "198.19.255.255", "192.0.0.8",
+        ]
+        for host in refused {
+            #expect(ResearchAgent.isPrivateHost(host), "\(host)")
+        }
+        let allowed = [
+            "example.com", "www.example.com", "sub.domain.example.org", "en.wikipedia.org",
+            "8.8.8.8", "93.184.216.34", "1.1.1.1", "172.15.0.1", "172.32.0.1", "100.63.0.1",
+            "100.128.0.1", "169.253.0.1", "192.167.0.1", "223.255.255.255",
+            "[2606:2800:220:1:248:1893:25c8:1946]", "[2001:4860:4860::8888]",
+            "localhost.example.com", "mylocal.example", "xn--bcher-kva.example",
+            "deadbeef.example",
+        ]
+        for host in allowed {
+            #expect(!ResearchAgent.isPrivateHost(host), "\(host)")
+        }
+    }
+
+    @Test func addressesAreJudgedByTheirHostNotTheirSpelling() {
+        let refused = [
+            "http://192.168.64.1:8080/", "http://127.0.0.1:8080/", "http://169.254.169.254/",
+            "http://169.254.169.254/latest/meta-data/", "https://user:pw@127.0.0.1/x",
+            "http://example.com@127.0.0.1/", "http://[::1]:3000/", "http://2130706433/",
+            "http://0x7f000001/", "http://localhost:11434/", "http://nas.local/index.html",
+            "HTTP://LocalHost/", "http://127.0.0.1\\@example.com/",
+        ]
+        for url in refused {
+            #expect(ResearchAgent.isPrivateAddress(url: url), "\(url)")
+        }
+        let allowed = [
+            "https://example.com/", "http://example.com:8080/a?b=1#c", "https://8.8.8.8/",
+            "http://93.184.216.34/page", "https://[2606:2800:220:1:248:1893:25c8:1946]/",
+            "http://de.wikipedia.org/wiki/Köln", "https://127.0.0.1.example.com/",
+            "https://localhost.example.org/",
+        ]
+        for url in allowed {
+            #expect(!ResearchAgent.isPrivateAddress(url: url), "\(url)")
+        }
+    }
+
+    @Test func aPrivateAddressOnAPageIsNeverFetchedEvenWhenSeen() async throws {
+        let listed = "http://192.168.64.1:8080/"
+        func services() -> FakeServices {
+            FakeServices(modelReplies: [
+                FakeServices.calls([("a", "web_search", #"{"query":"local network"}"#)]),
+                FakeServices.calls([("b", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
+                FakeServices.calls([("c", "open_page", #"{"url":"\#(listed)"}"#)]),
+                FakeServices.answer("Done [1]."), FakeServices.answer("Done [1]."),
+            ]) { path, body in
+                guard path == "/v1/fetch" else { return FakeServices.webPages(path, body) }
+                return FakeServices.json(200, .object([
+                    "url": .string(body?["url"]?.stringValue ?? ""),
+                    "title": .string("Network"),
+                    "text": .string("Admin console at \(listed) and http://169.254.169.254/ too."),
+                    "offset": .integer(0), "next_offset": .integer(80), "total_chars": .integer(80),
+                ]))
+            }
+        }
+        // With the seen-address gate on, and with it off.
+        for gate in [true, false] {
+            let fake = services()
+            let log = EventLog()
+            _ = try await agent(fake, options: gateOptions(), onlySeenURLs: gate, events: log)
+                .run(question: "q")
+            // Only the page that listed the address was fetched.
+            #expect(Self.fetches(fake) == 1, "gate \(gate)")
+            #expect(log.events.contains(.privateAddressRefused(listed)), "gate \(gate)")
+            #expect(!log.events.contains { if case .unseenURLRefused = $0 { true } else { false } })
+            let answer = messages(fake.modelRequests[3])
+                .first { $0["tool_call_id"] == .string("c") }?["content"]?.stringValue ?? ""
+            #expect(answer == ResearchAgent.privateAddressRefusal)
+            #expect(answer.contains("local or private network"))
+        }
+    }
+
+    @Test func stepsOfOnlyPrivateAddressesStopTheRunLikeRepeats() async throws {
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":"one"}"#)]),
+            FakeServices.calls([("b", "open_page", #"{"url":"http://127.0.0.1:8080/"}"#)]),
+            FakeServices.calls([("c", "open_page", #"{"url":"http://169.254.169.254/"}"#)]),
+            FakeServices.answer("Done."), FakeServices.answer("Done."),
+        ])
+        var options = gateOptions()
+        options.maxSteps = 8
+        let report = try await agent(services, options: options, onlySeenURLs: false)
+            .run(question: "q")
+        #expect(report.stoppedRepeatedSearches)
+        #expect(Self.fetches(services) == 0)
+    }
+
     @Test func aPageMayBeReadOnceMoreAfterOlderResultsWereShortened() async {
         let services = FakeServices(modelReplies: [])
         let research = agent(services)

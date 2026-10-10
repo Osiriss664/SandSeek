@@ -355,6 +355,11 @@ public enum ResearchEvent: Equatable, Sendable {
     /// page read and not in the question. It was told so instead, and nothing
     /// was fetched.
     case unseenURLRefused(String)
+    /// The model asked to open an address on the local or a private network
+    /// (localhost, a private or link-local IP, a `.local` name, ...). It was
+    /// told so instead, whether or not the address had been seen, and the
+    /// sandbox was not contacted.
+    case privateAddressRefused(String)
     /// Older results were shortened so the conversation fits the model's
     /// context window.
     case shortenedOlderResults
@@ -1875,6 +1880,15 @@ public struct ResearchAgent: Sendable {
                     return "Tool error: open_page needs an http or https url."
                 }
                 let offset = max(0, arguments["offset"]?.intValue ?? 0)
+                // An address on the local or a private network is never
+                // opened, even when a page printed it (a page can list
+                // 169.254.169.254 or 192.168.x.x to bait a request). This
+                // comes before the seen-address gate and holds with it off.
+                if Self.isPrivateAddress(url: url) {
+                    onEvent(.privateAddressRefused(ResearchText.oneLine(url, limit: 200)))
+                    state.refusedRepeats += 1
+                    return Self.privateAddressRefusal
+                }
                 // Only addresses the research showed the model. A made-up one
                 // could carry the question or page text to the sandbox's
                 // network request, so it is not fetched at all.
@@ -1932,6 +1946,164 @@ public struct ResearchAgent: Sendable {
             onEvent(.toolFailed(String(describing: error)))
             return "Tool error: \(Self.sanitized(String(describing: error)))"
         }
+    }
+
+    /// The answer to an `open_page` for a local or private network address.
+    static let privateAddressRefusal = "Not opened: this address is on a local or private "
+        + "network and is never opened. Only public web pages can be read; open a page "
+        + "from the search results instead."
+
+    /// Whether the address's host is not a public web host. An address that
+    /// cannot be parsed down to a host counts as private.
+    static func isPrivateAddress(url: String) -> Bool {
+        // A backslash in the authority may be read as a slash by the
+        // sandbox's parser, which would put the real host elsewhere: refuse.
+        if let marker = url.range(of: "://"),
+           url[marker.upperBound...].prefix(while: { !"/?#".contains($0) }).contains("\\") {
+            return true
+        }
+        if let host = URLComponents(string: url)?.host, !host.isEmpty {
+            return isPrivateHost(host)
+        }
+        // URLComponents may refuse a spelling with raw non-ASCII characters;
+        // take the host from the authority by hand then.
+        guard let marker = url.range(of: "://") else { return true }
+        var authority = url[marker.upperBound...]
+        if let end = authority.firstIndex(where: { "/?#".contains($0) }) {
+            authority = authority[..<end]
+        }
+        if let at = authority.lastIndex(of: "@") { authority = authority[authority.index(after: at)...] }
+        var host = String(authority)
+        if host.hasPrefix("[") {
+            guard let close = host.firstIndex(of: "]") else { return true }
+            host = String(host[host.index(after: host.startIndex)..<close])
+        } else if let colon = host.lastIndex(of: ":") {
+            host = String(host[..<colon])
+        }
+        return isPrivateHost(host)
+    }
+
+    /// True for any host that is not a public web host: localhost and
+    /// `*.localhost`, `*.local`, `*.internal`, `*.lan`, `*.home.arpa`, single
+    /// label names, IPv4 and IPv6 literals in loopback, private, link-local,
+    /// shared (CGNAT), unspecified, multicast and reserved ranges, and every
+    /// numeric spelling that is not a plain dotted public quad (2130706433,
+    /// 0x7f000001, 0177.0.0.1, 127.1). Pure; no name lookup.
+    static func isPrivateHost(_ host: String) -> Bool {
+        var name = host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if name.hasPrefix("["), name.hasSuffix("]") { name = String(name.dropFirst().dropLast()) }
+        while name.hasSuffix(".") { name.removeLast() }
+        if name.isEmpty { return true }
+        if name.contains(":") {
+            guard let bytes = ipv6Bytes(name) else { return true }
+            return isPrivateIPv6(bytes)
+        }
+        let labels = name.split(separator: ".", omittingEmptySubsequences: false)
+        // A last label that is a number (decimal or 0x hex) makes the host an
+        // IPv4 spelling for many resolvers, so only a plain public quad passes.
+        if let last = labels.last, isNumericLabel(String(last)) {
+            guard let quad = strictIPv4(name) else { return true }
+            return isPrivateIPv4(quad)
+        }
+        if labels.contains(where: \.isEmpty) { return true }
+        if labels.count < 2 { return true }
+        for suffix in ["localhost", "local", "internal", "lan", "home.arpa"]
+        where name == suffix || name.hasSuffix("." + suffix) {
+            return true
+        }
+        return false
+    }
+
+    private static func isNumericLabel(_ label: String) -> Bool {
+        if label.isEmpty { return false }
+        if label.allSatisfy({ $0.isASCII && $0.isNumber }) { return true }
+        if label.hasPrefix("0x") {
+            let digits = label.dropFirst(2)
+            return digits.isEmpty || digits.allSatisfy { $0.isASCII && $0.isHexDigit }
+        }
+        return false
+    }
+
+    /// Exactly four decimal parts of one to three digits, none with a leading
+    /// zero (which some resolvers read as octal), each at most 255.
+    private static func strictIPv4(_ text: String) -> [UInt8]? {
+        let parts = text.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 4 else { return nil }
+        var result: [UInt8] = []
+        for part in parts {
+            guard (1...3).contains(part.count), part.allSatisfy({ $0.isASCII && $0.isNumber }),
+                  part == "0" || !part.hasPrefix("0"),
+                  let value = UInt8(part) else { return nil }
+            result.append(value)
+        }
+        return result
+    }
+
+    private static func isPrivateIPv4(_ quad: [UInt8]) -> Bool {
+        let (a, b) = (quad[0], quad[1])
+        if a == 0 || a == 10 || a == 127 || a >= 224 { return true }
+        if a == 169 && b == 254 { return true }
+        if a == 172 && (16...31).contains(b) { return true }
+        if a == 192 && b == 168 { return true }
+        if a == 100 && (64...127).contains(b) { return true }
+        if a == 198 && (18...19).contains(b) { return true }
+        if a == 192 && b == 0 && quad[2] == 0 { return true }
+        return false
+    }
+
+    private static func ipv6Bytes(_ literal: String) -> [UInt8]? {
+        var text = literal
+        if let zone = text.firstIndex(of: "%") { text = String(text[..<zone]) }
+        if text.contains(".") {
+            // A trailing dotted quad stands for the last two groups.
+            guard let colon = text.lastIndex(of: ":"),
+                  let quad = strictIPv4(String(text[text.index(after: colon)...]))
+            else { return nil }
+            let high = String(Int(quad[0]) * 256 + Int(quad[1]), radix: 16)
+            let low = String(Int(quad[2]) * 256 + Int(quad[3]), radix: 16)
+            text = String(text[...colon]) + high + ":" + low
+        }
+        func groups(_ part: String) -> [UInt16]? {
+            if part.isEmpty { return [] }
+            var result: [UInt16] = []
+            for piece in part.split(separator: ":", omittingEmptySubsequences: false) {
+                guard (1...4).contains(piece.count), let value = UInt16(piece, radix: 16)
+                else { return nil }
+                result.append(value)
+            }
+            return result
+        }
+        let halves = text.components(separatedBy: "::")
+        var all: [UInt16]
+        switch halves.count {
+        case 1:
+            guard let whole = groups(halves[0]), whole.count == 8 else { return nil }
+            all = whole
+        case 2:
+            guard let head = groups(halves[0]), let tail = groups(halves[1]),
+                  head.count + tail.count <= 7 else { return nil }
+            all = head + Array(repeating: 0, count: 8 - head.count - tail.count) + tail
+        default:
+            return nil
+        }
+        return all.flatMap { [UInt8($0 >> 8), UInt8($0 & 0xff)] }
+    }
+
+    private static func isPrivateIPv6(_ bytes: [UInt8]) -> Bool {
+        // Unspecified, loopback and IPv4-compatible (::a.b.c.d): all-zero prefix.
+        if bytes[0..<12].allSatisfy({ $0 == 0 }) { return true }
+        // IPv4-mapped (::ffff:a.b.c.d) and NAT64 (64:ff9b::/96) carry an IPv4 address.
+        if bytes[0..<10].allSatisfy({ $0 == 0 }), bytes[10] == 0xff, bytes[11] == 0xff {
+            return isPrivateIPv4(Array(bytes[12..<16]))
+        }
+        if bytes[0] == 0x00, bytes[1] == 0x64, bytes[2] == 0xff, bytes[3] == 0x9b,
+           bytes[4..<12].allSatisfy({ $0 == 0 }) {
+            return isPrivateIPv4(Array(bytes[12..<16]))
+        }
+        if bytes[0] & 0xfe == 0xfc { return true }                    // fc00::/7
+        if bytes[0] == 0xfe && bytes[1] & 0x80 != 0 { return true }   // fe80::/10, fec0::/10
+        if bytes[0] == 0xff { return true }                           // multicast
+        return false
     }
 
     private func openPage(url: String, offset: Int, state: inout State,

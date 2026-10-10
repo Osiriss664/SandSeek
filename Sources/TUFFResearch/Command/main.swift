@@ -84,6 +84,7 @@ let agent = ResearchAgent(
         case .repeatedSearchRefused(let query): writeProgress("    repeated search refused: \(query)")
         case .repeatedPageRefused(let url): writeProgress("    repeated page refused: \(url)")
         case .unseenURLRefused(let url): writeProgress("    unknown address refused: \(url)")
+        case .privateAddressRefused(let url): writeProgress("    local network address refused: \(url)")
         case .shortenedOlderResults: writeProgress("    shortened older results to fit the model's context")
         case .retryingAfterTimeout: writeProgress("    step took too long; asking again without thinking")
         case .retryingAfterTimeoutShorter:
