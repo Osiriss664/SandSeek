@@ -993,11 +993,11 @@ public struct ResearchAgent: Sendable {
             .unknownCitations
         guard !unknown.isEmpty else { return answer }
         let stripped = ResearchFigureCheck.removingCitations(Set(unknown), from: answer.0)
-        // Only what really left the text is reported (a source-list entry stays).
-        let left = state.report(answer: stripped, turns: 0, exhausted: false).unknownCitations
-        let dropped = unknown.filter { !left.contains($0) }
-        guard !dropped.isEmpty else { return answer }
-        state.droppedUnreadCitations = dropped
+        // Only what really leaves the text is reported (a source-list entry stays).
+        guard stripped != answer.0 else { return answer }
+        state.droppedUnreadCitations = unknown.filter {
+            ResearchFigureCheck.removingCitations([$0], from: answer.0) != answer.0
+        }
         return (stripped, answer.1)
     }
 

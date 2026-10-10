@@ -619,6 +619,8 @@ struct ResearchAgentTests {
         #expect(removing([3], "Linux 6 \\[3\\].") == "Linux 6.")
         #expect(removing([3], "[3](https://e.example) is a link.") == "[3](https://e.example) is a link.")
         #expect(removing([3], "Sources:\n[3] Some page\n") == "Sources:\n[3] Some page\n")
+        #expect(removing([3], "Linux 6 \\[3\\], \\[1\\].") == "Linux 6 \\[1\\].")
+        #expect(removing([3], "Linux 6 [3].\n\nSources:\n[3] Page") == "Linux 6.\n\nSources:\n[3] Page")
         // A separator between citations goes with the one removed.
         #expect(removing([3], "VMs [1], [3].") == "VMs [1].")
         #expect(removing([3], "Linux 6 [3], [1].") == "Linux 6 [1].")

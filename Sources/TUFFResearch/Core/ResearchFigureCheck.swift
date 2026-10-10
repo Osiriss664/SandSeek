@@ -1998,9 +1998,11 @@ enum ResearchFigureCheck {
                 while forward < edited.length, space.contains(edited.character(at: forward)) {
                     forward += 1
                 }
+                let next = forward
+                while forward < edited.length, edited.character(at: forward) == 92 { forward += 1 }
                 if forward < edited.length, edited.character(at: forward) == open {
                     edited.replaceCharacters(
-                        in: NSRange(location: range.location, length: forward - range.location),
+                        in: NSRange(location: range.location, length: next - range.location),
                         with: "")
                     continue
                 }
