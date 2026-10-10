@@ -76,6 +76,7 @@ struct ConnectionCard: View {
                     .foregroundStyle(.secondary)
             }
             detail
+            exposureNotice
             if server.serverType == .llamacpp {
                 llamaCommand
             }
@@ -146,6 +147,42 @@ struct ConnectionCard: View {
         case .notChecked, .checking:
             hint
         }
+    }
+
+    /// Whether the server can be reached from the network. Found by Check
+    /// only; the periodic look does not touch it.
+    @ViewBuilder
+    private var exposureNotice: some View {
+        switch server.exposure {
+        case .reachable(let warning):
+            Label(warning, systemImage: "exclamationmark.triangle.fill")
+                .font(.callout)
+                .foregroundStyle(.orange)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        case .notReachable(let addresses):
+            Text(verbatim: notReachableText(addresses))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        case .checking:
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Checking whether the server is reachable from the network…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        case .notChecked:
+            EmptyView()
+        }
+    }
+
+    private func notReachableText(_ addresses: Int) -> String {
+        if addresses == 0 {
+            return "This Mac has no network address to try; the server is not reachable from the network."
+        }
+        let noun = addresses == 1 ? "address" : "addresses"
+        return "Not reachable from the network (\(addresses) \(noun) tried)."
     }
 
     private var hint: some View {

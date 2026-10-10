@@ -20,6 +20,11 @@ public struct ResearchArguments: Equatable, Sendable {
     /// model and no sandbox.
     public var savePagesPath: String?
     public var replayFiguresPath: String?
+    /// `--check-exposure`: try this Mac's own network addresses on the model
+    /// server's port and the sandbox's port, and report which answered. It
+    /// needs no question, model or sandbox, only `--server` and `--sandbox`
+    /// for the ports.
+    public var checkExposure = false
     public var maxTokens: Int = 2_048
     public var enableThinking: Bool?
     public var showThinking = false
@@ -118,6 +123,17 @@ public struct ResearchArguments: Equatable, Sendable {
                                from --save-pages and print its section.
                                Needs no question, server or sandbox.
       --quiet                  Do not print progress to standard error.
+      --check-exposure         Check whether the model server (the port of
+                               --server) or the sandbox (the port of
+                               --sandbox) can be reached from the network:
+                               the command tries a plain TCP connect, with no
+                               data sent, to each of this Mac's own non-loopback
+                               addresses. Needs no question. Exit code 0 when
+                               nothing answered on the network, 3 when
+                               something did, 4 when the model server does not
+                               answer on this Mac at all (nothing to judge).
+                               Start llama-server with --host 127.0.0.1 if it
+                               answers.
     """
 
     public init() {}
@@ -155,6 +171,8 @@ public struct ResearchArguments: Equatable, Sendable {
         var maxTokensGiven = false
         // The first option other than the replay's own, which it cannot take.
         var runOption: String?
+        // The same for --check-exposure, which takes only --server and --sandbox.
+        var exposureOption: String?
         func value(_ flag: String) throws -> String {
             guard index + 1 < arguments.count else {
                 throw ResearchArgumentError("missing value for \(flag)")
@@ -182,6 +200,10 @@ public struct ResearchArguments: Equatable, Sendable {
             if argument.hasPrefix("-"), argument != "--", runOption == nil,
                !["--help", "-h", "--replay-figures", "--quiet"].contains(argument) {
                 runOption = argument
+            }
+            if argument.hasPrefix("-"), argument != "--", exposureOption == nil,
+               !["--help", "-h", "--check-exposure", "--server", "--sandbox"].contains(argument) {
+                exposureOption = argument
             }
             switch argument {
             case "--help", "-h":
@@ -254,6 +276,8 @@ public struct ResearchArguments: Equatable, Sendable {
                 parsed.replayFiguresPath = try value(argument)
             case "--quiet":
                 parsed.quiet = true
+            case "--check-exposure":
+                parsed.checkExposure = true
             case "--":
                 words += arguments[(index + 1)...]
                 index = arguments.count
@@ -285,6 +309,18 @@ public struct ResearchArguments: Equatable, Sendable {
                 throw ResearchArgumentError("--replay-figures takes no question")
             }
         }
+        // The exposure check looks at two ports; no run goes with it.
+        if parsed.checkExposure, !parsed.showHelp {
+            if parsed.replayFiguresPath != nil {
+                throw ResearchArgumentError("--check-exposure cannot be combined with --replay-figures")
+            }
+            if let exposureOption {
+                throw ResearchArgumentError("--check-exposure cannot be combined with \(exposureOption)")
+            }
+            if !words.isEmpty {
+                throw ResearchArgumentError("--check-exposure takes no question")
+            }
+        }
         if let output = parsed.outputPath, let saved = parsed.savePagesPath,
            URL(fileURLWithPath: output).standardizedFileURL
                == URL(fileURLWithPath: saved).standardizedFileURL {
@@ -293,7 +329,8 @@ public struct ResearchArguments: Equatable, Sendable {
         if parsed.serverType == .llamacpp, parsed.stream == true, !parsed.showHelp {
             throw ResearchArgumentError(ResearchServerConnection.streamingNeedsConnectorMessage)
         }
-        if !parsed.showHelp && parsed.replayFiguresPath == nil && parsed.question.isEmpty {
+        if !parsed.showHelp && parsed.replayFiguresPath == nil && !parsed.checkExposure
+            && parsed.question.isEmpty {
             throw ResearchArgumentError("a question is required")
         }
         return parsed

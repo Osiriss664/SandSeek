@@ -529,3 +529,188 @@ private final class FixedPropsServices: ResearchHTTPTransport, @unchecked Sendab
         #expect((file[.posixPermissions] as? NSNumber)?.intValue == 0o600)
     }
 }
+
+/// Stands in for the check of the Mac's network addresses: counts the ports
+/// it was asked about and answers from a script.
+private final class ExposureProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var asked: [Int] = []
+    private let reachable: [ResearchHostAddress]
+    private let checked: [ResearchHostAddress]
+
+    init(reachable: [ResearchHostAddress] = [],
+         checked: [ResearchHostAddress] = [.ipv4(192, 168, 1, 5)]) {
+        self.reachable = reachable
+        self.checked = checked
+    }
+
+    var ports: [Int] { lock.withLock { asked } }
+
+    func run(_ port: Int) async -> ResearchExposureReport {
+        lock.withLock { asked.append(port) }
+        return ResearchExposureReport(
+            port: port, loopbackAnswered: true, checked: checked, reachable: reachable)
+    }
+}
+
+@Suite @MainActor struct ResearchServerExposureTests {
+    private func controller(services: any ResearchHTTPTransport = FakeResearchServices(),
+                            probe: ExposureProbe?) -> ResearchServerController {
+        var check: (@Sendable (Int) async -> ResearchExposureReport)?
+        if let probe { check = { port in await probe.run(port) } }
+        return ResearchServerController(
+            defaults: MemorySettings(), keyStore: MemoryKeyStore(key: "test-key"),
+            transport: services, exposureCheck: check)
+    }
+
+    @Test func withoutACheckNothingIsLookedAt() async {
+        let server = controller(probe: nil)
+        await server.check()
+        #expect(server.state == .ready)
+        #expect(server.exposure == .notChecked)
+    }
+
+    @Test func checkTriesTheServersPortOnceAndPollingDoesNot() async {
+        let probe = ExposureProbe()
+        let server = controller(probe: probe)
+        await server.check()
+        #expect(probe.ports == [8080])
+        #expect(server.exposure == .notReachable(addresses: 1))
+
+        // The periodic look and the reload button leave the network alone.
+        await server.refresh()
+        await server.refresh()
+        await server.refreshModels()
+        #expect(probe.ports == [8080])
+        #expect(server.exposure == .notReachable(addresses: 1))
+
+        // Check again, check again.
+        await server.check()
+        #expect(probe.ports == [8080, 8080])
+    }
+
+    @Test func theAddressesPortIsTheOneThatIsTried() async {
+        let probe = ExposureProbe()
+        let services = FakeResearchServices(
+            tuffStatus: false, requiredKey: "test-key", llamaContext: 8192)
+        let llama = controller(services: services, probe: probe)
+        llama.select(.llamacpp)
+        await llama.check()
+        #expect(llama.state == .ready)
+        #expect(probe.ports == [8081])
+        llama.setAddress("http://127.0.0.1:9090")
+        await llama.check()
+        #expect(probe.ports == [8081, 9090])
+    }
+
+    @Test func anAnsweringAddressBecomesTheWarning() async {
+        let probe = ExposureProbe(reachable: [.ipv4(192, 168, 1, 5)])
+        let server = controller(probe: probe)
+        await server.check()
+        #expect(server.state == .ready)
+        #expect(server.exposure == .reachable(
+            "Reachable from the network at 192.168.1.5:8080; start the server with --host 127.0.0.1"))
+    }
+
+    @Test func aMacWithoutNetworkAddressesIsCountedAsNotReachable() async {
+        let server = controller(probe: ExposureProbe(checked: []))
+        await server.check()
+        #expect(server.exposure == .notReachable(addresses: 0))
+    }
+
+    @Test func aServerThatDoesNotAnswerIsNotChecked() async {
+        let probe = ExposureProbe(reachable: [.ipv4(192, 168, 1, 5)])
+        let server = controller(services: NothingListens(), probe: probe)
+        await server.check()
+        #expect(server.state == .off)
+        #expect(server.exposure == .notChecked)
+        #expect(probe.ports.isEmpty)
+    }
+
+    @Test func aServerThatAnswersWithAProblemIsStillChecked() async {
+        // A server that is up but is not the chosen kind can still be reachable.
+        let probe = ExposureProbe(reachable: [.ipv4(10, 0, 0, 9)])
+        let server = controller(services: FakeResearchServices(tuffStatus: false), probe: probe)
+        await server.check()
+        guard case .problem = server.state else {
+            Issue.record("expected a problem, got \(server.state)")
+            return
+        }
+        #expect(probe.ports == [8080])
+        #expect(server.exposure == .reachable(
+            "Reachable from the network at 10.0.0.9:8080; start the server with --host 127.0.0.1"))
+    }
+
+    @Test func changingTheAddressOrTypeForgetsTheResult() async {
+        let probe = ExposureProbe(reachable: [.ipv4(192, 168, 1, 5)])
+        let server = controller(probe: probe)
+        await server.check()
+        if case .reachable = server.exposure {} else {
+            Issue.record("expected a warning, got \(server.exposure)")
+        }
+        server.setAddress("http://127.0.0.1:8090")
+        #expect(server.exposure == .notChecked)
+        await server.check()
+        server.select(.llamacpp)
+        #expect(server.exposure == .notChecked)
+    }
+
+    @Test func aServerThatGoesAwayForgetsTheWarning() async {
+        let services = FakeResearchServices()
+        let probe = ExposureProbe(reachable: [.ipv4(192, 168, 1, 5)])
+        let server = controller(services: services, probe: probe)
+        await server.check()
+        if case .reachable = server.exposure {} else {
+            Issue.record("expected a warning, got \(server.exposure)")
+        }
+        services.setDown(true)
+        await server.refresh()
+        #expect(server.state == .off)
+        #expect(server.exposure == .notChecked)
+    }
+
+    @Test func aNewAddressDuringTheCheckDropsItsAnswer() async {
+        let gate = SlowExposure()
+        let services = FakeResearchServices()
+        let server = ResearchServerController(
+            defaults: MemorySettings(), keyStore: MemoryKeyStore(key: "k"),
+            transport: services,
+            exposureCheck: { port in await gate.run(port) })
+        let check = Task { await server.check() }
+        await gate.waitUntilAsked()
+        #expect(server.exposure == .checking)
+        server.setAddress("http://127.0.0.1:8090")
+        gate.release()
+        await check.value
+        #expect(server.exposure == .notChecked)
+    }
+
+    @Test func theRealCheckIsOnlyGivenToTheWorkspaceNotToTheDefaultController() {
+        // The default controller has no check, so tests and previews never
+        // open connections to this machine's addresses.
+        let server = ResearchServerController(
+            defaults: MemorySettings(), keyStore: MemoryKeyStore(key: "k"))
+        #expect(server.exposure == .notChecked)
+    }
+}
+
+/// An exposure check that waits until `release()`.
+private final class SlowExposure: @unchecked Sendable {
+    private let lock = NSLock()
+    private var asked = false
+    private var released = false
+
+    func waitUntilAsked() async {
+        while !lock.withLock({ asked }) { try? await Task.sleep(for: .milliseconds(5)) }
+    }
+
+    func release() { lock.withLock { released = true } }
+
+    func run(_ port: Int) async -> ResearchExposureReport {
+        lock.withLock { asked = true }
+        while !lock.withLock({ released }) { try? await Task.sleep(for: .milliseconds(5)) }
+        return ResearchExposureReport(
+            port: port, loopbackAnswered: true, checked: [.ipv4(192, 168, 1, 5)],
+            reachable: [.ipv4(192, 168, 1, 5)])
+    }
+}

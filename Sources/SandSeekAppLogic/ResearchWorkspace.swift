@@ -35,7 +35,9 @@ public final class ResearchWorkspace {
         let reports = ResearchReportStore(directory: reportsDirectory)
         self.init(
             sandbox: ResearchSandboxController(defaults: defaults),
-            server: ResearchServerController(defaults: defaults),
+            server: ResearchServerController(
+                defaults: defaults,
+                exposureCheck: ResearchServerController.networkExposureCheck),
             reports: reports,
             run: ResearchRunController(store: reports),
             presets: ResearchPresetStore(defaults: defaults))

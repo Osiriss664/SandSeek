@@ -154,6 +154,21 @@ public final class ResearchServerController {
         case changed
     }
 
+    /// What the last Check found out about the server being reachable from
+    /// the network (see `ResearchExposureCheck`).
+    public enum Exposure: Equatable, Sendable {
+        /// Not looked at: no Check since the type or address changed, or the
+        /// server did not answer.
+        case notChecked
+        case checking
+        /// Connections to this Mac's own network addresses were not accepted.
+        /// `addresses` is how many were tried (0: the Mac has none).
+        case notReachable(addresses: Int)
+        /// A connection to a network address was accepted. The text is the
+        /// warning to show.
+        case reachable(String)
+    }
+
     public static let memoryNote =
         "On a Mac with 16 GB, run only one model server with a loaded model at a time."
     public static let keyNote =
@@ -186,6 +201,9 @@ public final class ResearchServerController {
     public private(set) var lastChecked: Date?
     /// Set when the llama.cpp key could not be written to disk.
     public private(set) var keyProblem: String?
+    /// Whether the server could be reached from the network, found by the
+    /// last Check (not by the periodic look).
+    public private(set) var exposure: Exposure = .notChecked
     /// The key SandSeek sends to llama.cpp. It is used in one request header
     /// and is never shown, copied, logged or put into a command.
     public let apiKey: String
@@ -199,15 +217,29 @@ public final class ResearchServerController {
     /// is the plan's way back to plain requests for a server that streams
     /// wrongly; llama.cpp is always plain for now (its connector is 2b).
     private let tuffStreaming: Bool
+    /// Tries this Mac's network addresses on a port. Nil: the exposure check
+    /// is off, as in most tests; the app passes `networkExposureCheck`.
+    private let exposureProbe: (@Sendable (Int) async -> ResearchExposureReport)?
     @ObservationIgnored private var generation = 0
+    /// Counts the exposure checks and the changes of type or address, so that
+    /// an answer that is no longer wanted is dropped.
+    @ObservationIgnored private var exposureGeneration = 0
+
+    /// The real check: a TCP connect to each of this Mac's network addresses.
+    public nonisolated static let networkExposureCheck:
+        @Sendable (Int) async -> ResearchExposureReport = { port in
+        await ResearchExposureCheck.run(port: port)
+    }
 
     public init(defaults: any ResearchSettingsStore = UserDefaults.standard,
                 keyStore: any ResearchKeyStoring = FileKeyStore(),
                 transport: any ResearchHTTPTransport = URLSessionResearchTransport(timeout: 10),
-                tuffStreaming: Bool = true) {
+                tuffStreaming: Bool = true,
+                exposureCheck: (@Sendable (Int) async -> ResearchExposureReport)? = nil) {
         self.defaults = defaults
         self.transport = transport
         self.tuffStreaming = tuffStreaming
+        exposureProbe = exposureCheck
         keyFilePath = keyStore.keyFilePath
         let saved = defaults.savedString(forKey: Self.typeKey)
             .flatMap(ResearchServerType.init(rawValue:))
@@ -264,8 +296,16 @@ public final class ResearchServerController {
         setAddress(serverType.defaultAddress ?? "")
     }
 
+    /// Forgets what the last exposure check found, and any check still under
+    /// way: the server it was about is gone or was changed.
+    private func dropExposure() {
+        exposureGeneration += 1
+        exposure = .notChecked
+    }
+
     private func resetStatus() {
         generation += 1
+        dropExposure()
         state = .notChecked
         models = []
         connection = nil
@@ -367,9 +407,44 @@ public final class ResearchServerController {
 
     // MARK: - Looking at the server
 
-    /// Looks at the server now and shows that it is looking. For the Check button.
+    /// Looks at the server now and shows that it is looking. For the Check
+    /// button. Then, if a server answers, tries the Mac's network addresses on
+    /// its port to see whether it is reachable from the network. That is done
+    /// here only, not on the periodic look: it makes a connection attempt per
+    /// address.
     public func check() async {
         await look(showProgress: true)
+        await checkExposure()
+    }
+
+    /// Whether something that answers on the chosen port can also be reached
+    /// at the Mac's network addresses. Nothing is sent to it; see
+    /// `ResearchExposureCheck`.
+    private func checkExposure() async {
+        guard let probe = exposureProbe else { return }
+        guard let port = serverURL?.port else {
+            dropExposure()
+            return
+        }
+        // A server that answers can be reachable. One that does not, or an
+        // address that was changed meanwhile, has nothing to check.
+        switch state {
+        case .ready, .problem:
+            break
+        case .notChecked, .checking, .off:
+            dropExposure()
+            return
+        }
+        exposureGeneration += 1
+        let mine = exposureGeneration
+        exposure = .checking
+        let report = await probe(port)
+        guard mine == exposureGeneration else { return }
+        if let warning = report.warning {
+            exposure = .reachable(warning)
+        } else {
+            exposure = .notReachable(addresses: report.checked.count)
+        }
     }
 
     /// Asks the server for its model list again, without changing what the
@@ -414,6 +489,7 @@ public final class ResearchServerController {
                     connection = nil
                     offReason = reason
                     state = .off
+                    dropExposure()
                 }
             default:
                 await look(showProgress: false)
@@ -460,6 +536,7 @@ public final class ResearchServerController {
             connection = nil
             offReason = reason
             state = .off
+            dropExposure()
         case .problem(let message):
             models = []
             connection = nil

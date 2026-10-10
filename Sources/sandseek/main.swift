@@ -44,6 +44,16 @@ if let path = arguments.replayFiguresPath {
     }
 }
 
+// The exposure check needs no model, sandbox or question either: it only
+// tries this Mac's own network addresses on the two ports.
+if arguments.checkExposure {
+    let result = await ResearchExposureCommand.run(
+        serverPort: arguments.serverURL.port ?? 80,
+        sandboxPort: arguments.sandboxURL.port ?? 80)
+    print(result.text)
+    exit(result.exitCode)
+}
+
 // Refuse before any research runs, so a long run never ends in a lost report.
 if let path = arguments.outputPath, FileManager.default.fileExists(atPath: path) {
     writeError("error: \(path) already exists; choose a new --output file")
