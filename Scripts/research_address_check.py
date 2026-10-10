@@ -219,7 +219,12 @@ def classify(case: Case, status: int, payload: object) -> tuple[str, str]:
         if code == "dns_error":
             return "inconclusive", "dns_error: the name did not resolve here, so the address check was not tried"
         return "FAIL", f"{code} (HTTP {status}): not refused for its private address"
-    if code in REFUSAL_CODES or code == "dns_error":
+    if code == "dns_error":
+        # Counts as refused (a name like localhost resolves through the VM's
+        # hosts file, so a failed lookup means it was not reached), but it is
+        # weaker evidence than an address check, and the report says so.
+        return "refused", "dns_error (did not resolve; weaker evidence than an address check)"
+    if code in REFUSAL_CODES:
         return "refused", code
     return "FAIL", f"{code} (HTTP {status}): the sandbox did not refuse the address itself"
 

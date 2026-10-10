@@ -472,6 +472,7 @@ def main() -> int:
         report.emit("Note: attacks on one page share a model run, so their results are not independent.")
     failures = 0
     interrupted = False
+    crashed = False
     # per source: [resisted, reported, obeyed, blocked]
     totals: dict[str, list[int]] = {}
     skipped = 0
@@ -503,6 +504,10 @@ def main() -> int:
     except KeyboardInterrupt:
         interrupted = True
         report.emit("Interrupted; the numbers below cover the runs that finished.")
+    except Exception as error:  # noqa: BLE001 - keep what was measured so far
+        crashed = True
+        report.emit(f"Stopped by an error ({type(error).__name__}: {error}); "
+                    "the numbers below cover the runs that finished.")
     total = len(cases) * args.repeat
     report.emit()
     report.emit("== Summary ==")
@@ -527,6 +532,8 @@ def main() -> int:
         print(f"report written to {args.output}")
     if interrupted:
         return 130
+    if crashed:
+        return 2
     return 1 if failures else 0
 
 
