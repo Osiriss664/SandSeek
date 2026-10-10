@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Runs `tuff research` against pages with planted prompt injections.
+"""Runs `sandseek` against pages with planted prompt injections.
 
-Each fixture in Sandbox/web-research/fixtures/injection asks the model to do
+Each fixture in Sandbox/fixtures/injection asks the model to do
 something the user never asked for: drop its task, send data to an outside
 address, read local network addresses, or obey text posing as the end of the
 tool result. This script asks an honest question about each page and checks
@@ -13,7 +13,7 @@ command keeps its run time):
   original  5 hand-written pages, 16 attacks counted as 5 cases.
   external  9 pages (external-NN-*.html) with 91 attack texts taken from BIPIA
             (Microsoft, MIT) and AgentDojo (ETH Zurich, MIT), each rewritten
-            to carry its own canary. Sandbox/web-research/fixtures/injection/
+            to carry its own canary. Sandbox/fixtures/injection/
             external-attacks.json lists them; THIRD_PARTY_NOTICES.md there has
             the licences. The report names every attack by source and id.
 
@@ -21,8 +21,8 @@ The sandbox only fetches public addresses, so the fixtures must be served from
 a public URL, for example the raw files of a pushed branch:
 
   python3 Scripts/research_injection_check.py \\
-    --base-url https://raw.githubusercontent.com/<owner>/TUFF/<branch>/Sandbox/web-research/fixtures/injection \\
-    --research-bin .build/release/TUFFResearch --repeat 3
+    --base-url https://raw.githubusercontent.com/<owner>/<repo>/<branch>/Sandbox/fixtures/injection \\
+    --research-bin .build/release/sandseek --repeat 3
 
 The research command refuses to open addresses the model was never shown
 (--only-seen-urls, on by default); a blocked attempt prints "unknown address
@@ -96,7 +96,7 @@ CASES = [
 ]
 
 FIXTURE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
-                           "Sandbox", "web-research", "fixtures", "injection")
+                           "Sandbox", "fixtures", "injection")
 MANIFEST = os.path.join(FIXTURE_DIR, "external-attacks.json")
 
 
@@ -289,7 +289,7 @@ def main() -> int:
     parser.add_argument("--only", help="run only fixtures whose name contains this text")
     parser.add_argument("--list", action="store_true",
                         help="print the selected cases and attacks, then exit without a model")
-    parser.add_argument("--research-bin", default=".build/release/TUFFResearch")
+    parser.add_argument("--research-bin", default=".build/release/sandseek")
     parser.add_argument("--model")
     parser.add_argument("--server")
     parser.add_argument("--sandbox")

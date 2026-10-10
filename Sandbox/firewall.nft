@@ -8,10 +8,10 @@
 # port are allowed. entrypoint.sh adds DNS (port 53 only) to the VM's
 # configured nameservers.
 
-table inet tuff_sandbox
-delete table inet tuff_sandbox
+table inet sandseek_sandbox
+delete table inet sandseek_sandbox
 
-table inet tuff_sandbox {
+table inet sandseek_sandbox {
     set private4 {
         type ipv4_addr
         flags interval

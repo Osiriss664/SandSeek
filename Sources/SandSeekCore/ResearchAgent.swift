@@ -64,11 +64,11 @@ public struct ResearchOptions: Equatable, Sendable {
     public var keepPageTexts = false
     /// Whether the run sends `preserve_thinking`, decided once at its start.
     /// A measuring aid: the command line reads it from the environment
-    /// (`TUFF_RESEARCH_PRESERVE_THINKING`), the app leaves it on `auto`.
+    /// (`SANDSEEK_PRESERVE_THINKING`), the app leaves it on `auto`.
     public var preserveThinking: ResearchPreserveThinking = .auto
     /// The markers around web text: `fixed`, the same in every run (the
     /// default), or `nonce`, with a random code per run. A measuring aid: the
-    /// command line reads it from the environment (`TUFF_RESEARCH_MARKERS`).
+    /// command line reads it from the environment (`SANDSEEK_MARKERS`).
     public var markers: ResearchMarkerMode = .fixed
     /// The code of the `code` markers, for tests; random when nil.
     var markerCode: String? = nil

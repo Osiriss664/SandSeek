@@ -1,3 +1,5 @@
+Being rewritten for SandSeek (plan section 4). Commands below may still show the old TUFF names.
+
 # Web research for TUFF
 
 Ask a local TUFF model a question, and it searches the web, reads the pages it

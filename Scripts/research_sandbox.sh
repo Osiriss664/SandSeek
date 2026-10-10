@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Builds and runs the web research sandbox with Apple `container`.
 #
-#   Scripts/research_sandbox.sh build    build the tuff-web-research image
-#   Scripts/research_sandbox.sh start    start a fresh sandbox on 127.0.0.1:9000 (TUFF_RESEARCH_SANDBOX_PORT)
+#   Scripts/research_sandbox.sh build    build the sandseek-sandbox image
+#   Scripts/research_sandbox.sh start    start a fresh sandbox on 127.0.0.1:9100 (SANDSEEK_SANDBOX_PORT)
 #   Scripts/research_sandbox.sh stop     stop and remove the sandbox
 #   Scripts/research_sandbox.sh status   report whether the sandbox answers
 #   Scripts/research_sandbox.sh selftest check that the sandbox refuses the Mac,
 #                                        the local network and metadata addresses
 #
-# The sandbox is the only part of `tuff research` with internet access. It runs
+# The sandbox is the only part of `sandseek` with internet access. It runs
 # in its own Linux VM with a read-only root and no Mac folders mounted. A
 # firewall inside the VM lets it reach public internet addresses, plus DNS on
 # the Mac when the Mac is its name server, and the
@@ -17,15 +17,15 @@
 
 set -euo pipefail
 
-image="tuff-web-research:latest"
-name="tuff-web-research"
-port="${TUFF_RESEARCH_SANDBOX_PORT:-9000}"
+image="sandseek-sandbox:latest"
+name="sandseek-sandbox"
+port="${SANDSEEK_SANDBOX_PORT:-9100}"
 # DNS servers for the VM, space-separated. Unset, the VM asks the Mac, which
 # uses the same DNS as the rest of the Mac; set it (for example to
 # "1.1.1.1 9.9.9.9") to use public resolvers instead.
-dns_servers="${TUFF_RESEARCH_DNS:-}"
+dns_servers="${SANDSEEK_DNS:-}"
 script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-context="$script_directory/../Sandbox/web-research"
+context="$script_directory/../Sandbox"
 
 require_container() {
   if ! command -v container >/dev/null 2>&1; then
@@ -69,7 +69,7 @@ case "${1:-}" in
       --cap-drop ALL --cap-add NET_ADMIN --cap-add SETUID --cap-add SETGID --cap-add SETPCAP
       --ulimit nproc=512
       --cpus 2 --memory 1G
-      --publish "127.0.0.1:$port:9000"
+      --publish "127.0.0.1:$port:9100"
     )
     for server in $dns_servers; do
       run_options+=(--dns "$server")
@@ -151,7 +151,7 @@ for line in open("/proc/net/route").read().splitlines()[1:]:
     done
 
     echo "The VM's own protection:"
-    if container exec "$name" nft list table inet tuff_sandbox >/dev/null 2>&1; then
+    if container exec "$name" nft list table inet sandseek_sandbox >/dev/null 2>&1; then
       pass "the firewall is loaded"
     else
       fail "the firewall is not loaded"

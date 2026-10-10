@@ -4,7 +4,7 @@ public struct ResearchArguments: Equatable, Sendable {
     public var question: String = ""
     public var model: String = "default"
     public var serverURL: URL = URL(string: "http://127.0.0.1:8080")!
-    public var sandboxURL: URL = URL(string: "http://127.0.0.1:9000")!
+    public var sandboxURL: URL = URL(string: "http://127.0.0.1:9100")!
     public var outputPath: String?
     /// Test aids: write the answer and page texts of a finished run to a new
     /// JSON file, and run the figure check again on such a file, with no
@@ -21,18 +21,18 @@ public struct ResearchArguments: Equatable, Sendable {
     public var options = ResearchOptions()
 
     public static let usage = """
-    usage: tuff research <question> [options]
+    usage: sandseek <question> [options]
 
-    Researches a question on the web with a local TUFF model. Web pages are
+    Researches a question on the web with a local model. Web pages are
     fetched by the sandbox, a small server in an Apple container Linux VM
     (Scripts/research_sandbox.sh start). The model can only search and read
     pages; it cannot run commands or touch files.
 
     options:
       --model <name>           Model the server should use (default: default,
-                               the model selected in TUFF).
-      --server <url>           TUFF server (default: http://127.0.0.1:8080).
-      --sandbox <url>          Web sandbox (default: http://127.0.0.1:9000).
+                               the model selected on the server).
+      --server <url>           Model server (default: http://127.0.0.1:8080).
+      --sandbox <url>          Web sandbox (default: http://127.0.0.1:9100).
       --max-steps <1...100>    Model turns that may use tools (default 8).
       --max-tokens <n>         Completion tokens per model turn, 64...32768
                                (default 2048, or 8192 with reasoning on).
@@ -94,12 +94,12 @@ public struct ResearchArguments: Equatable, Sendable {
     /// The environment variable that overrides the `preserve_thinking` rule,
     /// for measuring the prompt cache: `on`, `off` or `auto` (the default).
     /// Not an option and not shown in the app.
-    public static let preserveThinkingVariable = "TUFF_RESEARCH_PRESERVE_THINKING"
+    public static let preserveThinkingVariable = "SANDSEEK_PRESERVE_THINKING"
 
     /// The environment variable that chooses the markers around web text, for
     /// comparing them on a Mac: `fixed` (the default, the same in every run)
     /// or `nonce` (a random code per run). Not an option and not shown in the app.
-    public static let markersVariable = "TUFF_RESEARCH_MARKERS"
+    public static let markersVariable = "SANDSEEK_MARKERS"
 
     public static func parse(_ arguments: [String],
                              environment: [String: String] = ProcessInfo.processInfo.environment

@@ -56,7 +56,7 @@ public struct ResearchSandboxClient: Sendable {
 
     /// What the user is told when the sandbox cannot rank passages.
     public static let passagesUnsupportedMessage =
-        "The web sandbox is older than this TUFF and cannot rank passages. Rebuild it "
+        "The web sandbox is older than this SandSeek and cannot rank passages. Rebuild it "
         + "(Scripts/research_sandbox.sh build), or turn off 'Read the passages that best "
         + "match the question first' (--passages off)."
 

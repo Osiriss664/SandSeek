@@ -140,7 +140,7 @@ private func agent(_ services: FakeServices,
             enableThinking: enableThinking,
             transport: transport ?? services),
         sandbox: ResearchSandboxClient(
-            baseURL: URL(string: "http://127.0.0.1:9000")!, transport: services),
+            baseURL: URL(string: "http://127.0.0.1:9100")!, transport: services),
         options: seenOptions(options, onlySeenURLs),
         onEvent: { event in events?.append(event) })
 }
@@ -330,7 +330,7 @@ private func continuationWindow(_ page: String, contextTokens: Int,
             serverURL: URL(string: "http://127.0.0.1:8080")!, model: "default",
             maxTokens: 4_096, enableThinking: false, transport: services),
         sandbox: ResearchSandboxClient(
-            baseURL: URL(string: "http://127.0.0.1:9000")!, transport: services),
+            baseURL: URL(string: "http://127.0.0.1:9100")!, transport: services),
         options: seenOptions(options, false),
         onEvent: { events?.append($0) })
     return (agent, services)
@@ -664,7 +664,7 @@ struct ResearchAgentTests {
         #expect(request["max_tokens"] == .integer(512))
         let names = request["tools"]?.arrayValue?.compactMap { $0["function"]?["name"]?.stringValue }
         #expect(names == ["web_search", "open_page"])
-        #expect(services.requests.first?.url.absoluteString == "http://127.0.0.1:9000/health")
+        #expect(services.requests.first?.url.absoluteString == "http://127.0.0.1:9100/health")
     }
 
     @Test func thinkingIsSentOnlyWhenChosen() throws {
@@ -790,7 +790,7 @@ struct ResearchAgentTests {
 
     @Test func theEnvironmentOverridesPreserveThinking() throws {
         let name = ResearchArguments.preserveThinkingVariable
-        #expect(name == "TUFF_RESEARCH_PRESERVE_THINKING")
+        #expect(name == "SANDSEEK_PRESERVE_THINKING")
         #expect(try ResearchArguments.parse(["q"], environment: [:]).options.preserveThinking == .auto)
         for (text, mode) in [("on", ResearchPreserveThinking.on), ("OFF", .off), ("auto", .auto)] {
             let parsed = try ResearchArguments.parse(["q"], environment: [name: text])
@@ -803,7 +803,7 @@ struct ResearchAgentTests {
 
     @Test func theEnvironmentChoosesTheMarkers() throws {
         let name = ResearchArguments.markersVariable
-        #expect(name == "TUFF_RESEARCH_MARKERS")
+        #expect(name == "SANDSEEK_MARKERS")
         #expect(try ResearchArguments.parse(["q"], environment: [:]).options.markers == .fixed)
         #expect(try ResearchArguments.parse(["q"], environment: [name: "Nonce"]).options.markers == .nonce)
         #expect(try ResearchArguments.parse(["q"], environment: [name: "fixed"]).options.markers == .fixed)
@@ -3379,7 +3379,7 @@ struct ResearchAgentTests {
         let agent = ResearchAgent(
             chat: chat,
             sandbox: ResearchSandboxClient(
-                baseURL: URL(string: "http://127.0.0.1:9000")!,
+                baseURL: URL(string: "http://127.0.0.1:9100")!,
                 transport: FakeServices(modelReplies: [])))
         var state = ResearchAgent.State(question: "q")
         #expect(agent.promptBudget(state) == ResearchOptions.fallbackBudgetCharacters)
@@ -3555,7 +3555,7 @@ struct ResearchAgentTests {
                 serverURL: URL(string: "http://127.0.0.1:8080")!, model: "default",
                 maxTokens: 8_192, enableThinking: true, transport: slow),
             sandbox: ResearchSandboxClient(
-                baseURL: URL(string: "http://127.0.0.1:9000")!, transport: services),
+                baseURL: URL(string: "http://127.0.0.1:9100")!, transport: services),
             options: seenOptions(ResearchOptions(), false),
             onEvent: { log.append($0) }).run(question: "q")
         #expect(report.answer == "Answer [1].")
@@ -3616,7 +3616,7 @@ struct ResearchAgentTests {
                     serverURL: URL(string: "http://127.0.0.1:8080")!, model: "default",
                     maxTokens: 8_192, enableThinking: thinking, transport: recorder),
                 sandbox: ResearchSandboxClient(
-                    baseURL: URL(string: "http://127.0.0.1:9000")!, transport: services),
+                    baseURL: URL(string: "http://127.0.0.1:9100")!, transport: services),
                 options: seenOptions(options, false)).run(question: "q")
             return recorder.modelLimits
         }
@@ -3645,7 +3645,7 @@ struct ResearchAgentTests {
                 serverURL: URL(string: "http://127.0.0.1:8080")!, model: "default",
                 maxTokens: 8_192, enableThinking: true, transport: slow),
             sandbox: ResearchSandboxClient(
-                baseURL: URL(string: "http://127.0.0.1:9000")!, transport: services),
+                baseURL: URL(string: "http://127.0.0.1:9100")!, transport: services),
             options: seenOptions(ResearchOptions(), false),
             onEvent: { log.append($0) }).run(question: "q")
         #expect(report.answer == "Answer [1].")
@@ -3671,7 +3671,7 @@ struct ResearchAgentTests {
                 serverURL: URL(string: "http://127.0.0.1:8080")!, model: "default",
                 maxTokens: 8_192, enableThinking: true, transport: services),
             sandbox: ResearchSandboxClient(
-                baseURL: URL(string: "http://127.0.0.1:9000")!, transport: services),
+                baseURL: URL(string: "http://127.0.0.1:9100")!, transport: services),
             options: seenOptions(ResearchOptions(), false),
             onEvent: { log.append($0) }).run(question: "q")
         #expect(report.answer == "Answer [1].")
@@ -3700,7 +3700,7 @@ struct ResearchAgentTests {
                 serverURL: URL(string: "http://127.0.0.1:8080")!, model: "default",
                 maxTokens: 8_192, enableThinking: true, transport: refused),
             sandbox: ResearchSandboxClient(
-                baseURL: URL(string: "http://127.0.0.1:9000")!, transport: refused),
+                baseURL: URL(string: "http://127.0.0.1:9100")!, transport: refused),
             options: seenOptions(ResearchOptions(), false),
             onEvent: { refusedLog.append($0) }).run(question: "q")
         #expect(!refusedLog.events.contains(.retryingAfterModelError))
@@ -3766,7 +3766,7 @@ struct ResearchAgentTests {
                 serverURL: URL(string: "http://127.0.0.1:8080")!, model: "default",
                 maxTokens: 8_192, enableThinking: true, transport: services),
             sandbox: ResearchSandboxClient(
-                baseURL: URL(string: "http://127.0.0.1:9000")!, transport: services),
+                baseURL: URL(string: "http://127.0.0.1:9100")!, transport: services),
             options: seenOptions(ResearchOptions(), false),
             onEvent: { log.append($0) })
         await #expect(throws: ResearchRunEndedEarly.self) {
@@ -3890,7 +3890,7 @@ struct ResearchArgumentsTests {
         #expect(parsed.question == "What is TUFF?")
         #expect(parsed.model == "default")
         #expect(parsed.serverURL.absoluteString == "http://127.0.0.1:8080")
-        #expect(parsed.sandboxURL.absoluteString == "http://127.0.0.1:9000")
+        #expect(parsed.sandboxURL.absoluteString == "http://127.0.0.1:9100")
         #expect(parsed.enableThinking == nil)
         #expect(parsed.options.maxSteps == 8)
     }
@@ -5001,7 +5001,7 @@ struct ResearchRequestedSourcesLoopTests {
                 serverURL: URL(string: "http://127.0.0.1:8080")!, model: "default",
                 maxTokens: 8_192, enableThinking: false, transport: services),
             sandbox: ResearchSandboxClient(
-                baseURL: URL(string: "http://127.0.0.1:9000")!, transport: services),
+                baseURL: URL(string: "http://127.0.0.1:9100")!, transport: services),
             options: seenOptions(options, false),
             onEvent: { events.append($0) })
         return (agent, services)
@@ -5174,7 +5174,7 @@ struct ResearchPassagesTests {
     @Test func clientSendsPassageFieldsOnlyWhenAsked() async throws {
         let services = FakeServices(modelReplies: [], sandbox: Self.sandbox)
         let client = ResearchSandboxClient(
-            baseURL: URL(string: "http://127.0.0.1:9000")!, transport: services)
+            baseURL: URL(string: "http://127.0.0.1:9100")!, transport: services)
         let slice = try await client.fetch(
             url: "https://example.com/p", offset: 2, maxCharacters: 2_000,
             passages: true, query: "waermepumpe")
@@ -5189,7 +5189,7 @@ struct ResearchPassagesTests {
 
         let plain = FakeServices(modelReplies: [])
         let plainClient = ResearchSandboxClient(
-            baseURL: URL(string: "http://127.0.0.1:9000")!, transport: plain)
+            baseURL: URL(string: "http://127.0.0.1:9100")!, transport: plain)
         let characters = try await plainClient.fetch(
             url: "https://example.com/p", offset: 0, maxCharacters: 3_000)
         let plainSent = try #require(Self.fetchBodies(plain).first)
@@ -5355,7 +5355,7 @@ struct ResearchPassagesTests {
     @Test func healthMustSayPassagesWhenTheyAreOn() async throws {
         let old = FakeServices(modelReplies: [])
         let client = ResearchSandboxClient(
-            baseURL: URL(string: "http://127.0.0.1:9000")!, transport: old)
+            baseURL: URL(string: "http://127.0.0.1:9100")!, transport: old)
         try await client.checkHealth()
         await #expect(throws: ResearchError.sandboxCannotRankPassages) {
             try await client.checkHealth(requirePassages: true)
@@ -5364,7 +5364,7 @@ struct ResearchPassagesTests {
             FakeServices.json(200, .object(["status": .string("ok"), "passages": .bool(true)]))
         })
         let newer = ResearchSandboxClient(
-            baseURL: URL(string: "http://127.0.0.1:9000")!, transport: current)
+            baseURL: URL(string: "http://127.0.0.1:9100")!, transport: current)
         try await newer.checkHealth(requirePassages: true)
         #expect(ResearchError.sandboxCannotRankPassages.description
             .contains("Scripts/research_sandbox.sh build"))

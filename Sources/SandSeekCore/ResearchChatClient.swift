@@ -26,7 +26,7 @@ public struct ResearchAssistantTurn: Equatable, Sendable {
 
 /// How a run decides whether to send `preserve_thinking`. `auto` is the rule
 /// in `ResearchChatClient.preserveThinkingForRun`; `on` and `off` force it,
-/// for measuring the prompt cache on a Mac (`TUFF_RESEARCH_PRESERVE_THINKING`).
+/// for measuring the prompt cache on a Mac (`SANDSEEK_PRESERVE_THINKING`).
 public enum ResearchPreserveThinking: String, Equatable, Sendable {
     case auto, on, off
 }
@@ -201,7 +201,7 @@ public struct ResearchChatClient: Sendable {
         return Dictionary(windows, uniquingKeysWith: min)
     }
 
-    /// The window for `model`. `tuff research --model qwen36` names it by its
+    /// The window for `model`. `sandseek --model qwen36` names it by its
     /// selector. A name the list does not hold, such as `default`, gets the
     /// smallest window until a reply says which model answered.
     public static func window(for model: String, in windows: [String: Int]) -> Int? {

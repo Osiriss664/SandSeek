@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Web tool server for `tuff research`.
+"""Web tool server for `sandseek`.
 
 This process is the only part of web research that touches the internet. It
 runs inside an Apple `container` Linux VM and is published to the Mac's
@@ -61,11 +61,11 @@ try:
 except ImportError:  # The extractor is optional so tests can run without it.
     trafilatura = None
 
-PORT = int(os.environ.get("PORT", "9000"))
+PORT = int(os.environ.get("PORT", "9100"))
 SEARXNG_URL = os.environ.get("SEARXNG_URL", "").rstrip("/")
 USER_AGENT = os.environ.get(
     "USER_AGENT",
-    "Mozilla/5.0 (compatible; TUFF-web-research/1.0; +https://github.com/rexmhall09/TUFF)")
+    "Mozilla/5.0 (compatible; SandSeek-sandbox/1.0)")
 # Each wait for a connection or data. Some official sites (Bank Indonesia)
 # take over 20 s to answer, so 15 s cut them off.
 FETCH_TIMEOUT = float(os.environ.get("FETCH_TIMEOUT", "30"))
@@ -883,7 +883,7 @@ def host_allowed(header: str | None) -> bool:
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "TUFFWebResearch/1.0"
+    server_version = "SandSeekSandbox/1.0"
     tools: WebTools = WebTools()
 
     def log_message(self, fmt, *args):
@@ -985,7 +985,7 @@ def main():
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     server.daemon_threads = True
     stop_on_sigterm(server)
-    sys.stderr.write(f"TUFF web research sandbox listening on :{PORT}\n")
+    sys.stderr.write(f"SandSeek sandbox listening on :{PORT}\n")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

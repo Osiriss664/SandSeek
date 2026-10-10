@@ -1,4 +1,4 @@
-# Web tool server for `tuff research`. Built and run with Apple `container`
+# Web tool server for `sandseek`. Built and run with Apple `container`
 # by Scripts/research_sandbox.sh; see docs/WEB_RESEARCH.md.
 #
 # The base image is pinned by digest (python:3.12-slim) and every Python
@@ -23,5 +23,5 @@ COPY server.py firewall.nft entrypoint.sh /app/
 
 # Starts as root only to load firewall.nft; server.py then switches to user
 # 10001 and drops every capability before it serves a request.
-EXPOSE 9000
+EXPOSE 9100
 ENTRYPOINT ["/app/entrypoint.sh"]

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Tests for the web research sandbox. No network: resolver and transport are
-replaced with fakes. Run with `python3 -m unittest Sandbox/web-research/test_server.py`."""
+replaced with fakes. Run with `python3 -m unittest Sandbox/test_server.py`."""
 
 import gzip
 import http.client
@@ -813,7 +813,7 @@ class HTTPAPITests(unittest.TestCase):
 
     def test_rebinding_host_is_refused(self):
         status, payload = self.call("POST", "/v1/fetch", {"url": "https://example.com/a"},
-                                    {"Host": "attacker.example:9000"})
+                                    {"Host": "attacker.example:9100"})
         self.assertEqual(status, 403)
         self.assertEqual(payload["error"]["code"], "forbidden_host")
 

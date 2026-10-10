@@ -26,7 +26,7 @@
 # LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
-"""A fixed question set for `tuff research`: pick, run, grade, compare.
+"""A fixed question set for `sandseek`: pick, run, grade, compare.
 
 The questions come from OpenAI's SimpleQA (MIT, https://github.com/openai/simple-evals).
 Each has one short, checked answer that does not change over time, so the same
@@ -43,7 +43,7 @@ Typical use on the Mac (one heavy job at a time; quit the TUFF app first):
     https://openaipublic.blob.core.windows.net/simple-evals/simple_qa_test_set.csv
   python3 Scripts/research_question_set.py select --csv simple_qa_test_set.csv --out questions.json
   python3 Scripts/research_question_set.py run --questions questions.json \\
-    --research-bin .build/release/TUFFResearch --out-dir runs/baseline
+    --research-bin .build/release/sandseek --out-dir runs/baseline
   python3 Scripts/research_question_set.py grade --run-dir runs/baseline --model qwen3.6-35b-a3b
   python3 Scripts/research_question_set.py compare runs/baseline runs/spotlight
 
@@ -230,7 +230,7 @@ def command_run(args: argparse.Namespace) -> int:
                 "thinking": args.thinking, "model": args.model or "default",
                 "max_steps": args.max_steps, "extra": args.extra or [],
                 "env": sorted(f"{k}={v}" for k, v in env.items()
-                              if k.startswith(("TUFF_", "TFF_")))}
+                              if k.startswith("SANDSEEK_"))}
     earlier = {json.dumps(r.get("settings"), sort_keys=True) for r in results.values()}
     now = json.dumps(settings, sort_keys=True)
     if earlier and earlier != {now} and not args.mixed:

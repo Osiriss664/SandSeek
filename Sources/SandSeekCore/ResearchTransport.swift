@@ -100,15 +100,15 @@ public enum ResearchError: Error, Equatable, CustomStringConvertible {
         case .invalidEndpoint(let message):
             message
         case .modelUnavailable(let message):
-            "could not reach the TUFF server: \(message). Start it with `tuff serve` "
-                + "or enable the Background API in TUFF's Server screen."
+            "could not reach the model server: \(message). Start TUFF's Background API "
+                + "(or `tuff serve`), or llama-server on 127.0.0.1."
         case .modelTimedOut:
             "one model step took longer than the request time limit. The model may be too "
                 + "slow on this Mac for this question; try fewer steps, or thinking off."
         case .modelRequestFailed(let status, let message, _):
-            "the TUFF server refused the request (HTTP \(status)): \(message)"
+            "the model server refused the request (HTTP \(status)): \(message)"
         case .malformedModelReply(let message):
-            "the TUFF server sent a reply the research loop cannot read: \(message)"
+            "the model server sent a reply the research loop cannot read: \(message)"
         case .sandboxUnavailable(let message):
             "could not reach the web research sandbox: \(message). "
                 + "Start it with `Scripts/research_sandbox.sh start`."

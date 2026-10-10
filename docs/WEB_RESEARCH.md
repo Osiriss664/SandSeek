@@ -1,3 +1,5 @@
+Being rewritten for SandSeek (plan section 4). Commands below may still show the old TUFF names.
+
 # Web research
 
 `tuff research` answers a question by searching the web and reading pages with
