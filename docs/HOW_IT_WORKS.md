@@ -72,7 +72,7 @@ The model has exactly two tools:
 | Tool | What it does |
 | --- | --- |
 | `web_search(query)` | Searches the web with DuckDuckGo's HTML results, or a SearXNG instance when `SEARXNG_URL` is set for the sandbox. |
-| `open_page(url, offset)` | Reads a page as extracted text, a slice at a time. With the passages option it returns the best matching passages first. |
+| `open_page(url, offset)` | Reads a page or a PDF as extracted text, a slice at a time. With the passages option it returns the best matching passages first. |
 
 There is no shell, no file tool and no other network tool. An address that is
 not http or https, a private or local address, or an address that never showed
@@ -255,7 +255,8 @@ Reports saved by TUFF's research screen are copied once each into this folder
 
 ## What it cannot do
 
-- It cannot read pages that need JavaScript or are PDFs.
+- It cannot read pages that need JavaScript, or scanned PDFs (there is no OCR).
+  Text PDFs up to 5 MB and 50 pages are read; encrypted ones are refused.
 - It cannot make a small model right: it can only make it check its work and
   show its sources. Read the sources.
 - It cannot search or read without leaving traces: the search engine and the

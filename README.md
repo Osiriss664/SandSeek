@@ -5,7 +5,8 @@ local model, and returns an answer with numbered sources. The model runs on
 your Mac. Search and page fetching run inside a disposable Linux VM made by
 Apple's [`container`](https://github.com/apple/container) tool. The model has
 exactly two tools, `web_search` and `open_page`: no shell, no file access, no
-network tool.
+network tool. `open_page` reads web pages and text PDFs (up to 5 MB and 50
+pages, no OCR), parsed inside the VM.
 
 Status: pre-release, being moved out of a TUFF fork. The command-line tool,
 the core library and the Mac app (a window with the same research loop) are one

@@ -75,7 +75,8 @@ Webseiten sind nicht vertrauenswürdig. Manche enthalten Text, der dem Modell Be
 will. SandSeek schützt so:
 
 - Das Modell darf nur **suchen** und **Seiten lesen**. Es kann nichts ausführen und keine
-  Dateien öffnen.
+  Dateien öffnen. Auch PDFs aus dem Netz kann es lesen (bis 5 MB und 50 Seiten, kein
+  Scan, kein verschlüsseltes PDF); das passiert ebenfalls in der Wegwerf-Umgebung.
 - Das Lesen der Seiten passiert in einer **Wegwerf-Umgebung** (einem kleinen Linux-Rechner in
   deinem Mac), die deine Dateien nicht sieht und dein Heimnetz nicht erreicht.
 - Vor **jeder** Frage prüft die App, ob diese Umgebung richtig abgesichert ist. Steht bei

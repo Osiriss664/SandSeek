@@ -53,7 +53,7 @@ Apple `container` software, and the model weights you chose.
 
 | Boundary | What crosses it | What holds it |
 | --- | --- | --- |
-| Web → sandbox VM | page bytes | read-only VM, firewall (outbound and inbound), no root, extractor and fallback parser in time-limited child processes, address checks, one deadline per request |
+| Web → sandbox VM | page bytes | read-only VM, firewall (outbound and inbound), no root, extractor, fallback parser and PDF reader in time-limited child processes, address checks, one deadline per request |
 | Sandbox VM → Mac | cleaned page text and search results over 127.0.0.1:9100 | the VM cannot call the Mac (except DNS); the Mac calls the VM; text is cleaned again on the Mac |
 | Text → model | tool results | fenced as untrusted; the model has nothing dangerous to call |
 | Model → tools | `web_search`, `open_page` | only these two exist; unknown tool names are refused by the loop; addresses must have been shown to the model |
@@ -289,6 +289,32 @@ These hold as long as the design is intact and the VM boundary holds.
   service) follows no redirect and uses no proxy from the environment, but it
   is the one request that skips the public-address check; the firewall's single
   exception for its address and port is what limits it.
+- **PDFs are parsed in a bounded child process, never in the server.** A page
+  typed `application/pdf` (or typed `application/octet-stream`, or not typed at
+  all, with a body that starts with `%PDF-`) is read with `pypdf`, a pure-Python
+  library with no optional extras, in a separate process that is killed after
+  15 seconds, may not grow beyond 1 GiB of address space and can send back only
+  bytes (read as JSON, never unpickled). Limits: 5 MB of PDF (a larger one is
+  refused as `oversized`, never cut), the first 50 pages (the text then ends
+  with a note saying how many were left out) and 2 000 000 characters of text.
+  There is no OCR: images, scanned pages and text drawn as pictures are not
+  read, and a PDF with no text layer is an error. Encrypted PDFs are refused
+  (`pdf_encrypted`) without trying a password, and so are damaged ones or ones
+  that take too long (`pdf_unreadable`). The text is then cleaned exactly like
+  HTML text (invisible and control characters removed, whitespace collapsed,
+  the child's answer cleaned again), cached, ranked in passages mode and
+  fenced as untrusted by the Mac like any page. Text that a person cannot see
+  in a PDF (white text, tiny text, text behind a picture) is read like any
+  other, as hidden text in HTML is, so the injection defenses are what protect
+  against it. The title is the document's own title if it has one (cleaned and
+  capped at 300 characters like an HTML title), else the last part of the
+  address. `/v1/raw` does not parse PDFs. **Residual risk:** a bug in `pypdf`
+  or in the Python it runs on could be exploited by a crafted PDF. The child
+  has the server's privileges (no root, no capabilities, the VM's firewall),
+  so the damage is limited to that child and the VM (the signing secret is
+  taken out of the environment at start, so the child does not inherit it).
+  `pypdf` is pinned by hash in `Sandbox/requirements.txt`; update it when a
+  security fix is released.
 - **The text parsers can still be slow.** The extractor and the fallback HTML
   parser run in child processes that are killed after 15 and 10 seconds, and the
   DuckDuckGo results parser reads at most 500 000 characters in the server's own
@@ -362,9 +388,10 @@ does not control.
   resolver then sees which sites are looked up, your DNS filtering no longer
   applies to the sandbox, and on a network that blocks outside DNS every fetch
   fails. The self-test fails if any other port on the Mac answers.
-- **No JavaScript, no PDF.** Pages are fetched and turned into text without
+- **No JavaScript, no OCR.** Pages are fetched and turned into text without
   running scripts, so sites that build their content in the browser give little
-  text. PDFs and other non-text files are refused.
+  text. PDFs are read as text (see above) but never OCR'd; images and other
+  non-text files are refused.
 - **Search engine.** DuckDuckGo's HTML results can change shape or rate-limit.
   A SearXNG address (`SEARXNG_URL`) can replace it; the firewall then makes one
   exception for that address and port.
