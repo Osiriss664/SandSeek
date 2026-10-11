@@ -1,0 +1,19 @@
+name: Question
+description: Ask how something works or how to set it up.
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please check docs/INSTALL.md (English) or docs/ANLEITUNG.md (German) first. Questions in German are welcome.
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions (if it is about your setup)
+      placeholder: "sandseek 0.1.0, macOS 26.1, TUFF 8.3.1"

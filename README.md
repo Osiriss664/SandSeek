@@ -13,13 +13,47 @@ the core library and the Mac app (a window with the same research loop) are one
 Swift package. Built, tested and tried by hand on a Mac with macOS 27, TUFF
 8.3.1 and Qwen3.6 35B (11 October 2026).
 
+## How it works, in one minute
+
+1. You ask a question in the SandSeek app (or with the `sandseek` command).
+2. A model on your own Mac decides what to search for and which pages to read.
+3. A throwaway Linux VM does the searching and reading. It turns pages and
+   PDFs into plain text and hands back only that text. It cannot reach your
+   files, your network or the model.
+4. The model writes an answer with numbered sources. SandSeek saves it as a
+   report you can reopen later.
+
+Your question and the answer stay on your Mac; only search words and page
+addresses go to the internet. More in [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md)
+and, in German, [docs/SO_FUNKTIONIERT_ES.md](docs/SO_FUNKTIONIERT_ES.md).
+
+## Quick start
+
+1. Install [Apple `container`](https://github.com/apple/container) and start
+   TUFF (8.3.1 or newer) with its Background API on.
+2. Download `SandSeek-0.1.0.zip` from the release page, unzip it and move
+   SandSeek to Applications. It is not notarized: on first launch choose
+   System Settings → Privacy & Security → Open Anyway.
+3. Open SandSeek, press **Check** on the model server card and **Start
+   Sandbox**, then ask your first question.
+
+Step by step: [docs/INSTALL.md](docs/INSTALL.md), or in German
+[docs/ANLEITUNG.md](docs/ANLEITUNG.md).
+
+## Problems, ideas, help
+
+- Something broken or unclear: open an issue (bug report, question or idea).
+- A security problem: please report it privately, see [SECURITY.md](SECURITY.md).
+- Want to help: see [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## Documentation
 
 - [docs/INSTALL.md](docs/INSTALL.md): requirements, build and package the app,
   start TUFF or llama.cpp safely, first run, where reports live, uninstall.
 - [docs/ANLEITUNG.md](docs/ANLEITUNG.md): the same in plain German, for people
   who do not program.
-- [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md): the research method.
+- [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md): the research method; in short
+  German: [docs/SO_FUNKTIONIERT_ES.md](docs/SO_FUNKTIONIERT_ES.md).
 - [docs/SECURITY.md](docs/SECURITY.md): what the sandbox guarantees and what it
   does not, the threat model, the tests and how to run them, known limits.
 

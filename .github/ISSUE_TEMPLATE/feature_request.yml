@@ -1,0 +1,15 @@
+name: Idea
+description: Suggest something SandSeek could do better or in addition.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like SandSeek to do?
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why does it help you?
+      description: The situation where you missed it.
