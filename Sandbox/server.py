@@ -1334,8 +1334,11 @@ def main():
     # 0.0.0.0, not 127.0.0.1: `container run --publish` forwards the Mac's
     # 127.0.0.1:9100 to this VM's network address, not to its loopback, so a
     # loopback-only server would never be reached. The VM's input firewall
-    # (firewall.nft) accepts new connections on this port only, and the Mac
-    # side is published on 127.0.0.1 only.
+    # (firewall.nft) accepts new connections on this port only, and only from
+    # the VM's default gateway, which entrypoint.sh puts into the rule; the Mac
+    # side is published on 127.0.0.1 only. Anything that can send from the
+    # gateway address (processes on the Mac) can still connect, so the Host
+    # check stays.
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     server.daemon_threads = True
     stop_on_sigterm(server)

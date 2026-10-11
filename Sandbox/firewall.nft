@@ -9,12 +9,19 @@
 # configured nameservers.
 #
 # Inbound, the VM accepts new connections on one port only: 9100, the server's
-# port, which `container run --publish` reaches over the VM's network
-# interface (which is why the server binds 0.0.0.0). Everything else that is
-# new is dropped, so a program in the VM that listens elsewhere, or another VM
-# on the same bridge scanning for services, finds nothing. The order of the
-# two chains does not matter. Port 9100 is open to every address on the
-# network, not only the Mac (see docs/SECURITY.md).
+# port, and only from the VM's default gateway, the address that
+# `container run --publish` connects from (which is why the server binds
+# 0.0.0.0). Everything else that is new is dropped, so a program in the VM that
+# listens elsewhere, or another VM on the same bridge scanning for services,
+# finds nothing. The order of the two chains does not matter. Whatever can
+# send from the gateway address, such as processes on the Mac, can still
+# reach 9100 (see docs/SECURITY.md); the server's Host check covers that.
+#
+# $gateway is not defined here: entrypoint.sh reads the default gateway from
+# /proc/net/route, validates it as an IPv4 address and passes it with
+# `nft -D gateway=ADDRESS -f`. Loaded without it, nft fails on the unknown
+# variable, so the file never opens 9100 to everyone. IPv6: `ip saddr` matches
+# IPv4 packets only, so over IPv6 nothing but loopback is accepted inbound.
 
 table inet sandseek_sandbox
 delete table inet sandseek_sandbox
@@ -59,6 +66,6 @@ table inet sandseek_sandbox {
         ct state established,related accept
         # Keep in step with PORT in server.py and with --publish in
         # Scripts/research_sandbox.sh.
-        tcp dport 9100 accept
+        ip saddr $gateway tcp dport 9100 accept
     }
 }

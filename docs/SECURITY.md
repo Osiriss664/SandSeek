@@ -119,10 +119,15 @@ These hold as long as the design is intact and the VM boundary holds.
   public internet or to DNS on the Mac. The Mac itself, your local network,
   carrier-grade NAT, link-local and cloud metadata addresses are refused. The
   firewall is loaded before the server starts, and the sandbox refuses to
-  start without it. Inbound, the VM accepts new connections on port 9100 only
-  (plus replies and loopback); the server listens on 0.0.0.0 because the
-  published port reaches the VM's network address, not its loopback, and the
-  Mac side is published on 127.0.0.1 only. A client that connects and goes
+  start without it. Inbound, the VM accepts new connections on port 9100 only,
+  and only from its default gateway (plus replies and loopback). The entrypoint
+  reads the gateway from `/proc/net/route`, checks that it is a plain IPv4
+  address, puts it into the rule and prints it in the sandbox log; without a
+  usable gateway the sandbox refuses to start instead of opening the port to
+  everyone. Over IPv6 nothing but loopback is accepted inbound. The server
+  listens on 0.0.0.0 because the published port reaches the VM's network
+  address, not its loopback, and the Mac side is published on 127.0.0.1 only.
+  A client that connects and goes
   silent is dropped after 30 seconds (the same limit applies to writing the
   answer, so a reader slower than about 240 KB/s would be cut off on the
   largest `/v1/raw` answers). IPv6 neighbour discovery is dropped inbound as
@@ -212,12 +217,20 @@ These hold as long as the design is intact and the VM boundary holds.
 - **Any program on your Mac can call the sandbox** on 127.0.0.1:9100 and have
   public pages fetched through it. That is the same trust boundary as any local
   server. Browser pages cannot (Host check, JSON only).
-- **Other containers on the same Apple container network** can still reach
-  port 9100 of the VM directly: the inbound firewall allows that port from any
-  address because the source address of the published port is not known yet,
-  and a caller can send any `Host` header. Allowing only the gateway is the next
-  step once a Mac run (`/proc/net/tcp` in the VM during a request) shows which
-  address the publish connects from. Every other inbound port is closed. There are no other containers today.
+- **Anything that can send from the VM's gateway address can still reach port
+  9100 of the VM directly.** The inbound firewall accepts that port from the
+  default gateway only (a Mac test showed the published port connects from the
+  vmnet gateway, 192.168.64.1, for a VM at 192.168.64.58), so other VMs or
+  containers on the same network are refused. But processes on the Mac can
+  reach the VM network and send from the gateway address, and a caller can send
+  any `Host` header. That is why the server checks `Host` and accepts JSON
+  only, and why the Mac cleans the text it gets back again. Every other inbound port is closed. The sandbox log shows the
+  gateway that was allowed (`firewall: inbound port 9100 accepted from the
+  default gateway ...`). If a configuration publishes the port from a different
+  source address than the default gateway, the server would be unreachable
+  (`start` reports that it did not answer, with the log). The gateway as the
+  source was observed on one Mac setup; a run on another one confirms it. `selftest` reads the loaded rule and checks
+  that it names the gateway; it does not send packets from other addresses.
 - **The search path through SearXNG** (`SEARXNG_URL`, the operator's own
   service) follows no redirect and uses no proxy from the environment, but it
   is the one request that skips the public-address check; the firewall's single
@@ -319,7 +332,7 @@ Durations are estimates from earlier runs on a 16 GB MacBook Air.
 
 | Test | What it checks | How to run | Expect | Time |
 | --- | --- | --- | --- | --- |
-| Sandbox self-test | the sandbox refuses the Mac, loopback, private ranges, metadata addresses, odd ports and schemes; the firewall is loaded and drops inbound connections except to port 9100; the server runs as user 10001 with no capabilities; raw connections from inside the VM to the Mac, the router addresses and the metadata address fail; every TCP port on the Mac is tried (only DNS may answer); a foreign `Host` and a browser-style POST are refused; a public page loads | `Scripts/research_sandbox.sh selftest` (also the app's **Security check**) | `all sandbox checks passed` | about 1 min |
+| Sandbox self-test | the sandbox refuses the Mac, loopback, private ranges, metadata addresses, odd ports and schemes; the firewall is loaded and drops inbound connections except to port 9100 from the VM's gateway (rule text only); the server runs as user 10001 with no capabilities; raw connections from inside the VM to the Mac, the router addresses and the metadata address fail; every TCP port on the Mac is tried (only DNS may answer); a foreign `Host` and a browser-style POST are refused; a public page loads | `Scripts/research_sandbox.sh selftest` (also the app's **Security check**) | `all sandbox checks passed` | about 1 min |
 | Address check | 98 addresses (private, loopback, link-local, IPv6 forms, numeric spellings, `localhost`, names that resolve to private addresses, bad schemes and ports) are refused, sent straight to the sandbox with no model; a public page still loads | `python3 Scripts/research_address_check.py` | `RESULT: pass`, exit 0 | 1 to 3 min |
 | Sandbox unit tests | the address policy, fetching, redirects, extraction, cleaning, the HTTP API, and the address check's list against the real policy; no network | `python3 -m unittest Sandbox/test_server.py` | `OK` | seconds |
 | Swift tests | the research loop with fake services, the command, the app logic, streaming, the exposure check | `swift test` | all pass | minutes |

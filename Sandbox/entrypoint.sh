@@ -3,10 +3,29 @@
 # and every capability before it serves anything. Refuses to start without
 # the firewall.
 set -eu
-if ! nft -f /app/firewall.nft; then
+# Inbound port 9100 is accepted from the VM's default gateway only, the address
+# `container run --publish` connects from. Read it from the routing table
+# (the network may take a moment to come up), check it again here, and refuse
+# to start without it rather than open 9100 to every address.
+gateway=""
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  gateway="$(python3 /app/default_gateway.py 2>/dev/null)" && break
+  gateway=""
+  sleep 0.5
+done
+if [ -z "$gateway" ]; then
+  python3 /app/default_gateway.py >&2 || true
+  echo "no usable default gateway; cannot restrict port 9100 to it, refusing to start" >&2
+  exit 1
+fi
+case "$gateway" in
+  *[!0-9.]*|*..*|.*|*.) echo "default gateway '$gateway' is not an IPv4 address; refusing to start" >&2; exit 1 ;;
+esac
+if ! nft -D "gateway=$gateway" -f /app/firewall.nft; then
   echo "could not load the sandbox firewall; refusing to start" >&2
   exit 1
 fi
+echo "firewall: inbound port 9100 accepted from the default gateway $gateway only" >&2
 # The VM's DNS servers. By default that is the Mac, which forwards to the
 # same DNS the rest of the Mac uses; the firewall refuses the Mac, so its
 # address gets an exception for DNS (port 53) only. Public resolvers set

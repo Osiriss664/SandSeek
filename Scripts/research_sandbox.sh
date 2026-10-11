@@ -11,7 +11,10 @@
 # The sandbox is the only part of `sandseek` with internet access. It runs
 # in its own Linux VM with a read-only root and no Mac folders mounted. A
 # firewall inside the VM lets it reach public internet addresses, plus DNS on
-# the Mac when the Mac is its name server, and the
+# the Mac when the Mac is its name server, and accepts new inbound connections
+# on port 9100 only, from the VM's default gateway (the address the published
+# port connects from; anything that can send from that address, such as
+# processes on the Mac, can still reach 9100). The
 # server runs as a non-root user with no Linux capabilities. Its port is
 # published to the Mac's loopback address only. See docs/SECURITY.md.
 
@@ -114,14 +117,24 @@ case "${1:-}" in
       run_options+=(--env "SEARXNG_URL=$SEARXNG_URL")
     fi
     container run "${run_options[@]}" "$image" >/dev/null
+    # The entrypoint refuses to start when it finds no default gateway (see
+    # Sandbox/entrypoint.sh) or cannot load the firewall, and `--rm` deletes the
+    # container then, so keep the last log lines to show them below.
+    startup_log=""
     for _ in $(seq 1 50); do
       if health; then
         echo "web research sandbox ready at http://127.0.0.1:$port"
         exit 0
       fi
+      startup_log="$(container logs "$name" 2>&1 | tail -n 5 || true)"
       sleep 0.2
     done
+    if [[ -n "$startup_log" ]]; then
+      echo "sandbox log:" >&2
+      printf '%s\n' "$startup_log" >&2
+    fi
     echo "sandbox started but did not answer on 127.0.0.1:$port; see: container logs $name" >&2
+    echo "(port 9100 is open to the VM's default gateway only; the sandbox log names it. If the published port connects from another address, the server is unreachable; see docs/SECURITY.md)" >&2
     exit 1
     ;;
   stop)
@@ -153,14 +166,8 @@ case "${1:-}" in
     fail() { echo "  FAIL  $1" >&2; failures=$((failures + 1)); }
 
     echo "Fetches the sandbox must refuse:"
-    gateway="$(container exec "$name" python3 -c '
-import socket, struct
-for line in open("/proc/net/route").read().splitlines()[1:]:
-    fields = line.split()
-    if fields[1] == "00000000":
-        print(socket.inet_ntoa(struct.pack("<L", int(fields[2], 16))))
-        break
-')"
+    # The same helper the entrypoint uses for the inbound rule.
+    gateway="$(container exec "$name" python3 /app/default_gateway.py)"
     blocked_urls=(
       "http://$gateway/"
       "http://$gateway:8080/v1/models"
@@ -195,10 +202,14 @@ for line in open("/proc/net/route").read().splitlines()[1:]:
       fail "the firewall is not loaded"
     fi
     # -nn prints the port as a number (nft would otherwise print a service name).
+    # This reads the loaded rules; it does not send a packet from another
+    # address, so it shows that the rule names the gateway, not that other
+    # senders are refused.
     input_rules="$(container exec "$name" nft -nn list chain inet sandseek_sandbox input 2>/dev/null || true)"
     if grep -q 'hook input.*policy drop' <<<"$input_rules" \
-        && grep -q 'tcp dport 9100 accept' <<<"$input_rules"; then
-      pass "the firewall drops new inbound connections except to port 9100"
+        && grep -qF "ip saddr $gateway tcp dport 9100 accept" <<<"$input_rules" \
+        && [[ "$(grep -c 'dport 9100' <<<"$input_rules")" == 1 ]]; then
+      pass "the firewall drops new inbound connections except to port 9100 from the gateway $gateway"
     else
       fail "the firewall's input chain is missing or not as expected: ${input_rules:0:200}"
     fi

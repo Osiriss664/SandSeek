@@ -2173,9 +2173,33 @@ class FirewallFileTests(unittest.TestCase):
             "type filter hook input priority filter; policy drop;",
             'iifname "lo" accept',
             "ct state established,related accept",
-            "tcp dport 9100 accept",
+            "ip saddr $gateway tcp dport 9100 accept",
         ])
         self.assertEqual(server.PORT, 9100)
+
+    def test_port_9100_is_accepted_from_the_gateway_only_and_never_over_ipv6(self):
+        # The only rule naming the port has a source address; `ip saddr`
+        # matches IPv4 only, so IPv6 gets nothing but loopback and replies.
+        lines = [l for l in self.chain("input") if "9100" in l]
+        self.assertEqual(len(lines), 1)
+        self.assertIn("ip saddr $gateway", lines[0])
+        self.assertNotIn("ip6", "\n".join(self.chain("input")))
+        self.assertNotIn("define gateway", self.code)  # entrypoint.sh passes it
+
+    def test_the_file_loads_with_a_gateway_and_not_without(self):
+        import shutil
+        import subprocess
+        if shutil.which("nft") is None:
+            self.skipTest("nft is not installed")
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "firewall.nft")
+        ok = subprocess.run(["nft", "-c", "-D", "gateway=192.168.64.1", "-f", path],
+                            capture_output=True, text=True)
+        if "ermission" in ok.stderr or "not supported" in ok.stderr:
+            self.skipTest("nft cannot check rules here: " + ok.stderr.strip())
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        missing = subprocess.run(["nft", "-c", "-f", path], capture_output=True, text=True)
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertIn("gateway", missing.stderr)
 
     def test_each_hook_has_one_chain_and_9100_is_not_in_the_output_chain(self):
         self.assertEqual(self.code.count("hook input"), 1)
@@ -2185,6 +2209,149 @@ class FirewallFileTests(unittest.TestCase):
     def test_outbound_policy_is_still_drop(self):
         self.assertIn("type filter hook output priority filter; policy drop;",
                       self.chain("output"))
+
+
+SAMPLE_ROUTE = (
+    "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n"
+    "eth0\t00000000\t0140A8C0\t0003\t0\t0\t0\t00000000\t0\t0\t0\n"
+    "eth0\t0040A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0\n"
+)
+
+
+class DefaultGatewayTests(unittest.TestCase):
+    """default_gateway.py feeds the firewall rule, so it must be strict."""
+
+    def setUp(self):
+        import default_gateway
+        self.module = default_gateway
+
+    def route(self, *rows):
+        header = SAMPLE_ROUTE.splitlines()[0]
+        return header + "\n" + "\n".join(rows) + "\n"
+
+    def test_reads_the_gateway_from_a_real_looking_route_table(self):
+        self.assertEqual(self.module.default_gateway(SAMPLE_ROUTE), "192.168.64.1")
+
+    def test_picks_the_default_route_with_the_lowest_metric(self):
+        text = self.route(
+            "eth1\t00000000\t0101A8C0\t0003\t0\t0\t200\t00000000\t0\t0\t0",
+            "eth0\t00000000\t0140A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0")
+        self.assertEqual(self.module.default_gateway(text), "192.168.64.1")
+
+    def test_no_default_route_is_an_error(self):
+        for text in ("", SAMPLE_ROUTE.splitlines()[0] + "\n",
+                     self.route("eth0\t0040A8C0\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0")):
+            with self.assertRaises(self.module.GatewayError):
+                self.module.default_gateway(text)
+
+    def test_routes_that_are_not_usable_defaults_are_skipped(self):
+        for row in (
+            # on-link default (gateway 0), route down, no gateway flag, not a /0 mask
+            "eth0\t00000000\t00000000\t0001\t0\t0\t0\t00000000\t0\t0\t0",
+            "eth0\t00000000\t0140A8C0\t0002\t0\t0\t0\t00000000\t0\t0\t0",
+            "eth0\t00000000\t0140A8C0\t0001\t0\t0\t0\t00000000\t0\t0\t0",
+            "eth0\t00000000\t0140A8C0\t0003\t0\t0\t0\t000000FF\t0\t0\t0",
+            "eth0\t00000000\t0140A8C0",
+            "eth0\t00000000\tZZZZZZZZ\t0003\t0\t0\t0\t00000000\t0\t0\t0",
+        ):
+            with self.assertRaises(self.module.GatewayError, msg=row):
+                self.module.default_gateway(self.route(row))
+
+    def test_addresses_that_make_no_sense_as_a_gateway_are_refused(self):
+        for hex_gateway in ("0100007F", "000000E0", "FFFFFFFF", "000000F0"):
+            row = f"eth0\t00000000\t{hex_gateway}\t0003\t0\t0\t0\t00000000\t0\t0\t0"
+            with self.assertRaises(self.module.GatewayError, msg=hex_gateway):
+                self.module.default_gateway(self.route(row))
+
+    def test_validate_accepts_only_plain_dotted_quads(self):
+        self.assertEqual(self.module.validate("10.0.0.1"), "10.0.0.1")
+        for bad in ("", "1.2.3", "1.2.3.4.5", "01.2.3.4", "1.2.3.256", " 1.2.3.4",
+                    "1.2.3.4\n", "1.2.3.4; accept", "1.2.3.4/24", "::1", "1.2.3.4 ip saddr",
+                    "$(id)", "0x7f.0.0.1", "1.2.3.\u0664"):
+            with self.assertRaises(self.module.GatewayError, msg=repr(bad)):
+                self.module.validate(bad)
+
+    def test_command_line_prints_the_gateway_or_fails_with_a_message(self):
+        import subprocess
+        import tempfile
+        here = os.path.dirname(os.path.abspath(__file__))
+        script = os.path.join(here, "default_gateway.py")
+        with tempfile.TemporaryDirectory() as directory:
+            good, bad = (os.path.join(directory, n) for n in ("good", "bad"))
+            with open(good, "w") as handle:
+                handle.write(SAMPLE_ROUTE)
+            with open(bad, "w") as handle:
+                handle.write("Iface\tDestination\n")
+            ok = subprocess.run([sys.executable, script, good], capture_output=True, text=True)
+            self.assertEqual((ok.returncode, ok.stdout, ok.stderr), (0, "192.168.64.1\n", ""))
+            for path in (bad, os.path.join(directory, "missing")):
+                failed = subprocess.run([sys.executable, script, path], capture_output=True, text=True)
+                self.assertEqual(failed.returncode, 1)
+                self.assertEqual(failed.stdout, "")
+                self.assertTrue(failed.stderr.strip())
+
+
+class EntrypointTests(unittest.TestCase):
+    """Runs entrypoint.sh with stand-ins for nft, sleep and the helper."""
+
+    def run_entrypoint(self, helper_body, nft_exit=0):
+        import subprocess
+        import tempfile
+        here = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(here, "entrypoint.sh"), encoding="utf-8") as handle:
+            script = handle.read()
+        with tempfile.TemporaryDirectory() as directory:
+            def write(name, body):
+                path = os.path.join(directory, name)
+                with open(path, "w") as handle:
+                    handle.write(body)
+                os.chmod(path, 0o755)
+                return path
+            log = os.path.join(directory, "calls")
+            helper = write("helper", helper_body)
+            # The helper is run by name through python3 in the real script.
+            write("python3", f'#!/bin/sh\nif [ "$1" = "/app/default_gateway.py" ]; then shift; '
+                             f'exec {helper} "$@"; fi\necho "python3 $*" >> {log}\n')
+            write("nft", f'#!/bin/sh\necho "nft $*" >> {log}\nexit {nft_exit}\n')
+            write("sleep", "#!/bin/sh\nexit 0\n")
+            resolv = write("resolv.conf", "")
+            patched = script.replace("/etc/resolv.conf", resolv).replace(
+                "/app/firewall.nft", "FIREWALL")
+            entry = write("entrypoint.sh", patched)
+            env = {"PATH": directory + ":/usr/bin:/bin"}
+            result = subprocess.run(["/bin/sh", entry], env=env, capture_output=True, text=True)
+            calls = ""
+            if os.path.exists(log):
+                with open(log) as handle:
+                    calls = handle.read()
+            return result, calls
+
+    def test_passes_the_gateway_to_nft_and_logs_it(self):
+        result, calls = self.run_entrypoint("#!/bin/sh\necho 192.168.64.1\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("nft -D gateway=192.168.64.1 -f FIREWALL\n", calls)
+        self.assertIn("python3 /app/server.py", calls)
+        self.assertIn("192.168.64.1", result.stderr)
+
+    def test_without_a_gateway_it_refuses_to_start_before_touching_the_firewall(self):
+        result, calls = self.run_entrypoint("#!/bin/sh\necho 'no default gateway found' >&2\nexit 1\n")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("refusing to start", result.stderr)
+        self.assertIn("no default gateway found", result.stderr)
+        self.assertEqual(calls, "")
+
+    def test_a_gateway_that_does_not_look_like_ipv4_is_refused(self):
+        for output in ("1.2.3.4; accept", "$(id)", "1.2.3.4 ", "..", "::1", ".1.2.3"):
+            result, calls = self.run_entrypoint(f"#!/bin/sh\nprintf '%s\\n' '{output}'\n")
+            self.assertEqual(result.returncode, 1, output)
+            self.assertNotIn("nft", calls, output)
+            self.assertNotIn("server.py", calls, output)
+
+    def test_a_firewall_that_fails_to_load_stops_the_start(self):
+        result, calls = self.run_entrypoint("#!/bin/sh\necho 10.0.0.1\n", nft_exit=1)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("could not load the sandbox firewall", result.stderr)
+        self.assertNotIn("server.py", calls)
 
 
 class SigtermTests(unittest.TestCase):

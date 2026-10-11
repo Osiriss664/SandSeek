@@ -25,7 +25,7 @@ RUN apt-get update \
     && useradd --uid 10001 --no-create-home --home-dir /nonexistent \
        --shell /usr/sbin/nologin sandbox
 
-COPY server.py firewall.nft entrypoint.sh /app/
+COPY server.py firewall.nft entrypoint.sh default_gateway.py /app/
 
 # Starts as root only to load firewall.nft; server.py then switches to user
 # 10001 and drops every capability before it serves a request.
