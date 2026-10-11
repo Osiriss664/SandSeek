@@ -14,6 +14,11 @@ import Musl
 /// holds the port, and following it would send the client (and a 307's POST
 /// body, and the llama.cpp key) wherever that program says.
 
+// The real-socket tests run on macOS only. The refusal is a macOS guarantee:
+// on Linux, Foundation follows the redirects of completion-handler tasks
+// without asking the delegate (see `ResearchNoRedirectDelegate`).
+#if canImport(Darwin)
+
 /// A minimal HTTP server on 127.0.0.1 and a port the system chooses. It
 /// answers every request with one fixed reply, closes the connection, and
 /// counts the requests it got. It reads a whole request (head and the body
@@ -155,6 +160,8 @@ private final class LoopbackHTTPServer: @unchecked Sendable {
     }
 }
 
+#endif
+
 /// Answers every request with a fixed status and a body that would pass for a
 /// healthy sandbox or model server, as a program that took over a port might.
 private struct AlwaysRedirects: ResearchHTTPTransport {
@@ -235,6 +242,8 @@ private let redirectStatuses = [301, 302, 303, 307, 308]
     }
 }
 
+#if canImport(Darwin)
+
 /// The real transport against real servers on loopback: one answers with a
 /// redirect to the other, and the other must never hear from the client.
 @Suite struct ResearchNoRedirectTransportTests {
@@ -242,9 +251,10 @@ private let redirectStatuses = [301, 302, 303, 307, 308]
 
     private func servers(status: Int) throws -> (squatter: LoopbackHTTPServer, target: LoopbackHTTPServer) {
         let target = try #require(LoopbackHTTPServer(status: 200))
-        let squatter = try #require(LoopbackHTTPServer(
-            status: status, location: "http://127.0.0.1:\(target.port)/v1/chat/completions"))
-        return (squatter, target)
+        let squatter = LoopbackHTTPServer(
+            status: status, location: "http://127.0.0.1:\(target.port)/v1/chat/completions")
+        if squatter == nil { target.stop() }
+        return (try #require(squatter), target)
     }
 
     @Test(arguments: redirectStatuses)
@@ -336,3 +346,5 @@ private let redirectStatuses = [301, 302, 303, 307, 308]
         #expect(lines == ["{}"])
     }
 }
+
+#endif

@@ -211,10 +211,14 @@ public extension ResearchHTTPTransport {
 /// address checks the sandbox makes, and a 307 or 308 would send the POST body
 /// again, possibly with the `Authorization` header (the llama.cpp key).
 ///
-/// `URLSession` keeps its delegate (strongly) until the session is
-/// invalidated, so the transport's session owns it. The class has no state,
-/// which is why `@unchecked Sendable` is safe; `NSObject` is needed because
-/// `URLSessionTaskDelegate` is an Objective-C protocol.
+/// This is a guarantee on macOS. On Linux, Foundation follows the redirects of
+/// a task made with a completion handler (as `data(for:)` is there) without
+/// asking the delegate, so the same code does not protect there; SandSeek's
+/// app and sandbox run on macOS only.
+///
+/// The class has no state, which is why `@unchecked Sendable` is safe;
+/// `NSObject` is needed because `URLSessionTaskDelegate` is an Objective-C
+/// protocol.
 final class ResearchNoRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     func urlSession(_ session: URLSession,
                     task: URLSessionTask,
@@ -227,16 +231,23 @@ final class ResearchNoRedirectDelegate: NSObject, URLSessionTaskDelegate, @unche
     }
 }
 
-/// Holds the session of a transport and ends it with the last copy of the
-/// transport. A session that has a delegate keeps that delegate, and is itself
-/// kept alive by it, until it is invalidated; without this, every transport
-/// SandSeek makes would leave its session behind. Requests still under way
-/// finish first.
+/// Holds the session of a transport, and its delegate, and ends the session
+/// with the last copy of the transport. A session with a delegate keeps that
+/// delegate, and itself, alive until it is invalidated; without this, every
+/// transport SandSeek makes would leave its session behind. Requests still
+/// under way finish first.
 private final class ResearchSessionOwner: Sendable {
     let session: URLSession
+    /// Also handed to each request (`data(for:delegate:)`, `bytes(for:delegate:)`),
+    /// so that the redirect refusal does not depend on the session's own
+    /// delegate being asked for tasks made by the async methods.
+    let noRedirect: ResearchNoRedirectDelegate
 
-    init(_ session: URLSession) {
-        self.session = session
+    init(configuration: URLSessionConfiguration) {
+        let delegate = ResearchNoRedirectDelegate()
+        noRedirect = delegate
+        session = URLSession(configuration: configuration, delegate: delegate,
+                             delegateQueue: nil)
     }
 
     deinit {
@@ -264,9 +275,7 @@ public struct URLSessionResearchTransport: ResearchHTTPTransport {
         // Never follow a redirect (see `ResearchNoRedirectDelegate`). The
         // session retains the delegate. A nil delegate queue gives the
         // session its own serial queue.
-        owner = ResearchSessionOwner(URLSession(
-            configuration: configuration,
-            delegate: ResearchNoRedirectDelegate(), delegateQueue: nil))
+        owner = ResearchSessionOwner(configuration: configuration)
     }
 
     public func send(method: String, url: URL, body: Data?) async throws -> ResearchHTTPResponse {
@@ -307,7 +316,11 @@ public struct URLSessionResearchTransport: ResearchHTTPTransport {
                        authorization: String?) async throws -> ResearchHTTPResponse {
         let request = Self.makeRequest(method: method, url: url, body: body,
                                        accept: "application/json", authorization: authorization)
+        #if canImport(FoundationNetworking)
         let (data, response) = try await session.data(for: request)
+        #else
+        let (data, response) = try await session.data(for: request, delegate: owner.noRedirect)
+        #endif
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         return ResearchHTTPResponse(status: status, body: data)
     }
@@ -367,10 +380,11 @@ public struct URLSessionResearchTransport: ResearchHTTPTransport {
         let request = Self.makeRequest(method: method, url: url, body: body,
                                        accept: "text/event-stream", authorization: authorization)
         let session = self.session
+        let noRedirect = owner.noRedirect
         // Up to the headers, with the same task group as `send`. Cancelling
         // the group's task cancels `bytes(for:)`.
         let opened = try await Self.withinTimeLimit(timeout) {
-            let (bytes, response) = try await session.bytes(for: request)
+            let (bytes, response) = try await session.bytes(for: request, delegate: noRedirect)
             // Not `bytes.lines`: see `SSELineBuffer`.
             return OpenedLines(lines: SSELines(bytes),
                                status: (response as? HTTPURLResponse)?.statusCode ?? 0)

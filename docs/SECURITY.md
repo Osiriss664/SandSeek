@@ -143,7 +143,9 @@ These hold as long as the design is intact and the VM boundary holds.
   refuse a `--server` or `--sandbox` address that is not 127.0.0.1, localhost
   or ::1, and the app never sends a llama.cpp key to the sandbox's port.
   SandSeek's own HTTP client never follows a redirect from the sandbox or the
-  model server (both are on loopback and never redirect): a 3xx answer is an
+  model server (both are on loopback and never redirect; this holds on macOS,
+  where SandSeek runs, because Foundation on Linux follows redirects of
+  completion-handler tasks without asking the delegate): a 3xx answer is an
   error, so a program that took over the port cannot send SandSeek, a POST
   body or the llama.cpp key elsewhere. What remains: if the sandbox is not
   running, another program on 127.0.0.1:9100 could answer with made-up pages,

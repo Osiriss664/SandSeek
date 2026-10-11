@@ -78,13 +78,24 @@ private final class RedirectingServices: ResearchHTTPTransport, @unchecked Senda
         #expect(tuffLook == .changed)
     }
 
-    @Test func aSandboxPortThatRedirectsIsNotARunningSandbox() async {
+    @Test func aSandboxPortThatRedirectsIsNotARunningSandbox() async throws {
         let sandbox = ResearchSandboxController(
             runner: FakeProcessRunner(), transport: RedirectingServices(everything: true),
             defaults: MemorySettings(), environment: [:],
-            resources: SandboxResources(bundledRoot: nil, environment: [:], allowsOverride: false),
-            stateDirectory: temporaryDirectory())
+            resources: try testResources(), stateDirectory: temporaryDirectory())
         await sandbox.refresh()
         #expect(sandbox.state == .off)
+
+        // A start whose VM comes up but whose port answers with a redirect
+        // fails, and the message says what answered. Without the redirect
+        // handling it said only that the sandbox does not answer.
+        await sandbox.start()
+        guard case .failed(let message) = sandbox.state else {
+            Issue.record("expected a failure, got \(sandbox.state)")
+            return
+        }
+        #expect(message.contains("does not answer"))
+        #expect(message.contains("redirect (HTTP 307)"))
+        #expect(message.contains("SandSeek refuses"))
     }
 }
