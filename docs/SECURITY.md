@@ -302,12 +302,15 @@ These hold as long as the design is intact and the VM boundary holds.
   with a note saying how many were left out) and 2 000 000 characters of text.
   There is no OCR: images, scanned pages and text drawn as pictures are not
   read, and a PDF with no text layer is an error. Encrypted PDFs are refused
-  (`pdf_encrypted`) without trying a password, and so are damaged ones or ones
-  that take too long (`pdf_unreadable`). The text is then cleaned exactly like
+  (`pdf_encrypted`); `pypdf` only tries the empty password while opening one,
+  which is cheap. AES-256 PDFs, the usual kind today, need a crypto library
+  the sandbox does not have, so they are reported as `pdf_unreadable`, like
+  damaged ones or ones that take too long. The text is then cleaned exactly like
   HTML text (invisible and control characters removed, whitespace collapsed,
   the child's answer cleaned again), cached, ranked in passages mode and
   fenced as untrusted by the Mac like any page. Text that a person cannot see
-  in a PDF (white text, tiny text, text behind a picture) is read like any
+  in a PDF (white text, tiny text, text behind a picture, or letters whose
+  font maps them to other text) is read like any
   other, as hidden text in HTML is, so the injection defenses are what protect
   against it. The title is the document's own title if it has one (cleaned and
   capped at 300 characters like an HTML title), else the last part of the
