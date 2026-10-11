@@ -94,9 +94,10 @@ except ImportError:  # The extractor is optional so tests can run without it.
     trafilatura = None
 
 try:
+    import pypdf
     from pypdf import PdfReader
 except ImportError:  # Without pypdf a PDF is refused as before; /health says "pdf": false.
-    PdfReader = None
+    pypdf = PdfReader = None
 
 PORT = int(os.environ.get("PORT", "9100"))
 SEARXNG_URL = os.environ.get("SEARXNG_URL", "").rstrip("/")
@@ -127,12 +128,19 @@ MAX_DOWNLOAD_BYTES = int(os.environ.get("MAX_DOWNLOAD_BYTES", str(5 * 1024 * 102
 # PDFs are read by pypdf in a child process (see read_pdf_bounded). A PDF may
 # be as large as any download; one that is longer is refused, never cut. At
 # most MAX_PDF_PAGES pages are read, the child is killed after PDF_TIMEOUT
-# seconds, and it may not grow beyond PDF_MEMORY_LIMIT bytes of address space.
+# seconds, and it may not grow beyond PDF_MEMORY_LIMIT bytes of address space
+# (the VM has 1 GiB in all, so the limit must be well below that; a forkserver
+# child with the parsers loaded starts at about 80 MiB). One PDF is read at a
+# time; a request waits up to PDF_BUSY_WAIT seconds for its turn.
 # The text is capped at MAX_EXTRACT_CHARS like any page. No OCR.
 MAX_PDF_BYTES = MAX_DOWNLOAD_BYTES
 MAX_PDF_PAGES = 50
 PDF_TIMEOUT = float(os.environ.get("PDF_TIMEOUT", "15"))
-PDF_MEMORY_LIMIT = 1024 * 1024 * 1024
+PDF_MEMORY_LIMIT = 512 * 1024 * 1024
+PDF_BUSY_WAIT = 20.0
+# Per-stream limits for pypdf (its defaults allow 75 to 300 MB of work for one
+# stream). A stream over them is not decoded and its page counts as failed.
+PDF_STREAM_LIMIT = 20_000_000
 # application/pdf is read as a PDF whatever the body (a body that is not one is
 # "pdf_unreadable"). A response with a generic or missing type is read as a PDF
 # only when its body starts with the PDF magic; no other type is sniffed.
@@ -684,12 +692,19 @@ def _child_message(target, args: tuple, timeout: float, limit: int) -> bytes | N
     child.start()
     sender.close()
     message = None
+    # poll() returns once data starts to arrive, and recv_bytes() then waits
+    # for the rest of the message; a child that stalls half way is killed here
+    # (the read then ends with EOFError) instead of holding this thread.
+    watchdog = threading.Timer(timeout + 1, child.kill)
+    watchdog.daemon = True
+    watchdog.start()
     try:
         if receiver.poll(timeout):
             message = receiver.recv_bytes(limit)
     except (EOFError, OSError):
         pass
     finally:
+        watchdog.cancel()
         receiver.close()
         if child.is_alive():
             child.kill()
@@ -744,13 +759,25 @@ def read_pdf(data: bytes) -> dict:
     if PdfReader is None:
         raise PdfRefused("pdf_unreadable")
     logging.getLogger("pypdf").setLevel(logging.CRITICAL)
+    pypdf.overwrite_configuration(
+        maximum_declared_stream_length=PDF_STREAM_LIMIT,
+        array_based_stream_maximum_output_length=PDF_STREAM_LIMIT,
+        jbig2_maximum_output_length=PDF_STREAM_LIMIT,
+        lzw_maximum_output_length=PDF_STREAM_LIMIT,
+        run_length_maximum_output_length=PDF_STREAM_LIMIT,
+        zlib_maximum_output_length=PDF_STREAM_LIMIT,
+        brotli_maximum_output_length=PDF_STREAM_LIMIT,
+        image_maximum_buffer_size=PDF_STREAM_LIMIT,
+        stream_decoding_work_maximum_length=4 * PDF_STREAM_LIMIT,
+        jbig2dec_binary=None,  # never start an external program
+    )
     reader = PdfReader(io.BytesIO(data), strict=False)
     if reader.is_encrypted:
         raise PdfRefused("pdf_encrypted")
     total = len(reader.pages)
     title = ""
     try:
-        title = str(reader.metadata.title or "") if reader.metadata else ""
+        title = str(reader.metadata.title or "")[:1000] if reader.metadata else ""
     except Exception:
         pass
     parts: list[str] = []
@@ -793,17 +820,27 @@ def _pdf_in_child(sender, reader, data: bytes) -> None:
         sender.close()
 
 
+_PDF_SLOT = threading.BoundedSemaphore(1)
+
+
 def read_pdf_bounded(data: bytes, timeout: float | None = None,
                      reader: Callable[[bytes], dict] = read_pdf) -> dict:
     """`reader(data)` in a child process that is killed after `timeout`
     seconds. Returns {"title", "text", "pages", "pages_read", "pages_failed",
     "cut"} with text and title cleaned again here (the child is not trusted),
     or raises ToolError: pdf_encrypted, or pdf_unreadable for a PDF that is
-    malformed, has no text, or could not be read in time."""
+    malformed or could not be read in time, or pdf_busy (503) when another
+    PDF has been read for longer than PDF_BUSY_WAIT seconds."""
     limit = PDF_TIMEOUT if timeout is None else timeout
     unreadable = ToolError("the PDF could not be read: it is damaged, or reading it took longer "
                            f"than {limit:g} s", "pdf_unreadable")
-    message = _child_message(_pdf_in_child, (reader, data), limit, 4 * MAX_EXTRACT_CHARS + 65536)
+    # One PDF at a time: each child may use PDF_MEMORY_LIMIT, and the VM is small.
+    if not _PDF_SLOT.acquire(timeout=PDF_BUSY_WAIT):
+        raise ToolError("another PDF is being read; try again in a moment", "pdf_busy", 503)
+    try:
+        message = _child_message(_pdf_in_child, (reader, data), limit, 4 * MAX_EXTRACT_CHARS + 65536)
+    finally:
+        _PDF_SLOT.release()
     if message is None:
         raise unreadable
     if message.startswith(b"\x02"):
@@ -812,16 +849,17 @@ def read_pdf_bounded(data: bytes, timeout: float | None = None,
             raise ToolError("the PDF is encrypted; encrypted PDFs are not read", code)
         raise unreadable
     try:
+        # Any exception: a deeply nested answer raises RecursionError, not ValueError.
         result = json.loads(message[1:]) if message.startswith(b"\x01") else None
         title, text = result["title"], result["text"]
         counts = [result[key] for key in ("pages", "pages_read", "pages_failed")]
-        if (not isinstance(title, str) or not isinstance(text, str) or result["cut"] not in (True, False)
+        if (not isinstance(title, str) or not isinstance(text, str) or type(result["cut"]) is not bool
                 or not all(type(n) is int and n >= 0 for n in counts)):
             raise ValueError("unexpected types")
-    except (ValueError, KeyError, TypeError):
+    except Exception:
         raise unreadable from None
     result["title"] = clean_title(title)
-    result["text"] = collapse_whitespace(clean_text(text))
+    result["text"] = collapse_whitespace(clean_text(text[:MAX_EXTRACT_CHARS]))
     return result
 
 
@@ -844,6 +882,8 @@ def pdf_page(url: str, body: bytes) -> "Page":
         notes.append(f"the text was cut after {MAX_EXTRACT_CHARS} characters")
     text = result["text"]
     if not text:
+        if result["pages_failed"] and result["pages_failed"] >= result["pages_read"]:
+            raise ToolError("the PDF's pages could not be read", "pdf_unreadable")
         raise ToolError("the PDF has no text that can be read (scanned pages are not read; "
                         "there is no OCR)", "pdf_unreadable")
     if notes:
@@ -1036,7 +1076,7 @@ class WebTools:
             headers = {
                 "Host": target.host_header,
                 "User-Agent": USER_AGENT,
-                "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.1",
+                "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,application/pdf;q=0.8,*/*;q=0.1",
                 "Accept-Encoding": "gzip",
                 "Accept-Language": "en;q=0.9,*;q=0.5",
             }

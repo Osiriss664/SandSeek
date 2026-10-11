@@ -293,8 +293,11 @@ These hold as long as the design is intact and the VM boundary holds.
   typed `application/pdf` (or typed `application/octet-stream`, or not typed at
   all, with a body that starts with `%PDF-`) is read with `pypdf`, a pure-Python
   library with no optional extras, in a separate process that is killed after
-  15 seconds, may not grow beyond 1 GiB of address space and can send back only
-  bytes (read as JSON, never unpickled). Limits: 5 MB of PDF (a larger one is
+  15 seconds, may not grow beyond 512 MiB of address space (the VM has 1 GiB in
+  all, and the child starts at about 80 MiB), decodes no single stream beyond
+  20 MB, and can send back only bytes (read as JSON, never unpickled). One PDF
+  is read at a time; a second request waits up to 20 seconds and then gets
+  `pdf_busy` (HTTP 503). Limits: 5 MB of PDF (a larger one is
   refused as `oversized`, never cut), the first 50 pages (the text then ends
   with a note saying how many were left out) and 2 000 000 characters of text.
   There is no OCR: images, scanned pages and text drawn as pictures are not

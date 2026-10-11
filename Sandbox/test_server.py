@@ -18,6 +18,7 @@ import threading
 import time
 import unicodedata
 import unittest
+import zlib
 from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -91,6 +92,39 @@ def make_pdf(pages, title=None, encrypt=False, special=None, white=False):
     out.write(f"trailer\n<< /Size {size} /Root 1 0 R /Info 5 0 R{encryption} >>\n"
               f"startxref\n{start}\n%%EOF\n".encode())
     return out.getvalue()
+
+
+def flate_bomb_pdf(megabytes):
+    """A small PDF whose one page content stream inflates to `megabytes` MB of
+    zeros (a FlateDecode bomb). The stream is compressed in pieces, so building
+    it needs little memory."""
+    packer = zlib.compressobj(9)
+    piece = b"\x00" * 1_000_000
+    packed = b"".join(packer.compress(piece) for _ in range(megabytes)) + packer.flush()
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>",
+        b"<< /Length %d /Filter /FlateDecode >>\nstream\n" % len(packed) + packed + b"\nendstream",
+    ]
+    out = io.BytesIO(b"%PDF-1.4\n")
+    out.seek(0, io.SEEK_END)
+    offsets = []
+    for number, body in enumerate(objects, 1):
+        offsets.append(out.tell())
+        out.write(b"%d 0 obj\n" % number + body + b"\nendobj\n")
+    start = out.tell()
+    out.write(b"xref\n0 5\n0000000000 65535 f \n")
+    for offset in offsets:
+        out.write(b"%010d 00000 n \n" % offset)
+    out.write(b"trailer\n<< /Size 5 /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % start)
+    return out.getvalue()
+
+
+def address_space_pdf_reader(data):
+    import resource
+    return {"title": str(resource.getrlimit(resource.RLIMIT_AS)[0]), "text": "x", "pages": 1,
+            "pages_read": 1, "pages_failed": 0, "cut": False}
 
 
 def slow_pdf_reader(data):
@@ -767,6 +801,88 @@ class PdfTests(unittest.TestCase):
         result = tools.raw(self.URL)
         self.assertEqual(base64.b64decode(result["body_base64"]), pdf)
         self.assertEqual(result["content_type"], "application/pdf")
+
+
+    def test_a_real_flate_bomb_is_a_clean_error_within_the_time_limit(self):
+        bomb = flate_bomb_pdf(300)  # 300 MB of zeros, some 300 KB of PDF
+        self.assertLess(len(bomb), 1_000_000)
+        started = time.monotonic()
+        error = self.refused(bomb, "pdf_unreadable")
+        self.assertLess(time.monotonic() - started, server.PDF_TIMEOUT + 5)
+        self.assertEqual(error.status, 422)
+        self.assertLessEqual(server.PDF_STREAM_LIMIT, 20_000_000)
+
+    def test_the_child_runs_under_the_address_space_limit(self):
+        result = server.read_pdf_bounded(b"x", timeout=10, reader=address_space_pdf_reader)
+        self.assertEqual(result["title"], str(server.PDF_MEMORY_LIMIT))
+        # Below the VM's 1 GiB, with room for the 80 MiB a child starts with.
+        self.assertEqual(server.PDF_MEMORY_LIMIT, 512 * 1024 * 1024)
+
+    def test_the_parent_never_parses_the_pdf(self):
+        # The parent's PdfReader is replaced by one that fails when it is used;
+        # the child imports pypdf itself, so the fetch must still succeed.
+        class Exploding:
+            def __init__(self, *args, **kwargs):
+                raise AssertionError("the server process parsed a PDF")
+        with mock.patch.object(server, "PdfReader", Exploding):
+            self.assertEqual(self.fetch(make_pdf(["child text"]))[1]["text"], "child text")
+
+    def test_a_second_pdf_waits_for_its_turn_and_then_gets_pdf_busy(self):
+        with mock.patch.object(server, "PDF_BUSY_WAIT", 0.3):
+            self.assertTrue(server._PDF_SLOT.acquire(timeout=1))
+            try:
+                started = time.monotonic()
+                error = self.refused(make_pdf(["x"]), "pdf_busy")
+                self.assertEqual(error.status, 503)
+                self.assertGreaterEqual(time.monotonic() - started, 0.25)
+            finally:
+                server._PDF_SLOT.release()
+        # The slot is free again, also after an error inside the read.
+        with self.assertRaises(ToolError):
+            server.read_pdf_bounded(b"x", timeout=10, reader=crashing_pdf_reader)
+        self.assertEqual(self.fetch(make_pdf(["after"]))[1]["text"], "after")
+
+    def test_odd_answers_from_the_child_are_unreadable_not_crashes(self):
+        good = {"title": "t", "text": "x", "pages": 1, "pages_read": 1, "pages_failed": 0,
+                "cut": False}
+        for message in (b"\x01" + b"[" * 100_000 + b"]" * 100_000,  # RecursionError in json
+                        b"\x01" + json.dumps({**good, "cut": 1}).encode(),
+                        b"\x01" + json.dumps({**good, "pages": True}).encode(),
+                        b"\x01" + json.dumps([good]).encode(), b"\x01", b"\x07abc", b""):
+            with mock.patch.object(server, "_child_message", return_value=message):
+                with self.assertRaises(ToolError, msg=message[:20]) as caught:
+                    server.read_pdf_bounded(b"x")
+            self.assertEqual(caught.exception.code, "pdf_unreadable")
+        # The parent caps the text again, whatever the child sent.
+        message = b"\x01" + json.dumps({**good, "text": "a" * (server.MAX_EXTRACT_CHARS + 5)}).encode()
+        with mock.patch.object(server, "_child_message", return_value=message):
+            self.assertEqual(len(server.read_pdf_bounded(b"x")["text"]), server.MAX_EXTRACT_CHARS)
+
+    def test_a_long_title_is_cut_in_the_child(self):
+        pdf = make_pdf(["x"], title="t" * 5000)
+        self.assertEqual(len(server.read_pdf(pdf)["title"]), 1000)
+
+    def test_pages_that_all_fail_are_reported_as_unreadable_pages(self):
+        failed = {"title": "", "text": "", "pages": 3, "pages_read": 3, "pages_failed": 3, "cut": False}
+        with mock.patch.object(server, "read_pdf_bounded", return_value=failed):
+            with self.assertRaises(ToolError) as caught:
+                server.pdf_page(self.URL, b"x")
+        self.assertEqual(caught.exception.code, "pdf_unreadable")
+        self.assertIn("could not be read", caught.exception.message)
+        self.assertNotIn("OCR", caught.exception.message)
+
+    def test_the_child_is_killed_when_it_stalls_after_the_wait(self):
+        started = time.monotonic()
+        with self.assertRaises(ToolError):
+            server.read_pdf_bounded(b"x", timeout=1, reader=slow_pdf_reader)
+        self.assertLess(time.monotonic() - started, 8)
+
+    def test_pdfs_are_asked_for_in_the_accept_header(self):
+        tools = WebTools(resolver=self.resolve, transport=FakeTransport(
+            {self.URL: Response(200, {"content-type": "application/pdf"}, make_pdf(["x"]))}),
+            searxng_url="")
+        tools.fetch(self.URL)
+        self.assertIn("application/pdf;q=0.8", tools.transport.calls[0][2]["Accept"])
 
 
 class FakeClock:
