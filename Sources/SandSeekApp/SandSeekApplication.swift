@@ -20,7 +20,11 @@ private final class ForegroundAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        signal(SIGTERM, SIG_IGN)
+        // An empty handler, not SIG_IGN: an ignored signal stays ignored in
+        // every program the app starts (container, the sandbox script, the
+        // model server), and their timeouts end them with SIGTERM. A handler
+        // is reset to the default in the started program.
+        signal(SIGTERM) { _ in }
         let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
         source.setEventHandler {
             MainActor.assumeIsolated { NSApp.terminate(nil) }
