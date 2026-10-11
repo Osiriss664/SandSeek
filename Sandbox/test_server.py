@@ -13,6 +13,7 @@ import io
 import json
 import os
 import socket
+import struct
 import sys
 import threading
 import time
@@ -130,6 +131,12 @@ def address_space_pdf_reader(data):
 def slow_pdf_reader(data):
     time.sleep(30)
     return {}
+
+
+def stalling_target(sender):
+    # Announces a long message, sends four bytes of it and stops sending.
+    os.write(sender.fileno(), struct.pack("!i", 1_000_000) + b"\x01abc")
+    time.sleep(60)
 
 
 def crashing_pdf_reader(data):
@@ -876,6 +883,11 @@ class PdfTests(unittest.TestCase):
         with self.assertRaises(ToolError):
             server.read_pdf_bounded(b"x", timeout=1, reader=slow_pdf_reader)
         self.assertLess(time.monotonic() - started, 8)
+
+    def test_the_watchdog_kills_a_child_that_stalls_half_way_through_its_message(self):
+        started = time.monotonic()
+        self.assertIsNone(server._child_message(stalling_target, (), 1, 2_000_000))
+        self.assertLess(time.monotonic() - started, 6)
 
     def test_pdfs_are_asked_for_in_the_accept_header(self):
         tools = WebTools(resolver=self.resolve, transport=FakeTransport(
