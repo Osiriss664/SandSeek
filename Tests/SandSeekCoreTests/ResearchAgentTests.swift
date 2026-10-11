@@ -4174,6 +4174,23 @@ struct ResearchArgumentsTests {
         }
     }
 
+    @Test func versionNeedsNoQuestionAndIsListedInTheHelp() throws {
+        let parsed = try ResearchArguments.parse(["--version"])
+        #expect(parsed.showVersion)
+        #expect(!parsed.showHelp)
+        #expect(!(try ResearchArguments.parse(["q"])).showVersion)
+        // Like --help, it stops everything else, whatever else was given.
+        #expect(try ResearchArguments.parse(["q", "--max-steps", "3", "--version"]).showVersion)
+        #expect(try ResearchArguments.parse(["--version", "--replay-figures", "a.json", "--check-exposure"]).showVersion)
+        #expect(try ResearchArguments.parse(["--version", "--help"]).showHelp)
+        // A bad value still fails: --version does not hide a mistake before it.
+        #expect(throws: (any Error).self) { _ = try ResearchArguments.parse(["--max-steps", "0", "--version"]) }
+        #expect(ResearchArguments.usage.contains("--version"))
+        #expect(SandSeekVersion.text == "sandseek \(SandSeekVersion.current)")
+        #expect(SandSeekVersion.current.split(separator: ".").count == 3)
+        #expect(SandSeekVersion.current.allSatisfy { $0.isNumber || $0 == "." })
+    }
+
     @Test func badInputIsRefused() {
         for arguments in [[String](), ["--max-steps", "0", "q"], ["--thinking", "maybe", "q"],
                           ["--frobnicate", "q"], ["q", "--model"],

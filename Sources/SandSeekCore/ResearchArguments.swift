@@ -32,10 +32,13 @@ public struct ResearchArguments: Equatable, Sendable {
     /// Minutes one model step may take before it is retried without reasoning.
     public var stepTimeoutMinutes = ResearchOptions.defaultStepTimeoutMinutes
     public var showHelp = false
+    /// `--version`: print `SandSeekVersion.text` and stop; no question needed.
+    public var showVersion = false
     public var options = ResearchOptions()
 
     public static let usage = """
     usage: sandseek <question> [options]
+           sandseek --version
 
     Researches a question on the web with a local model. Web pages are
     fetched by the sandbox, a small server in an Apple container Linux VM
@@ -123,6 +126,7 @@ public struct ResearchArguments: Equatable, Sendable {
                                from --save-pages and print its section.
                                Needs no question, server or sandbox.
       --quiet                  Do not print progress to standard error.
+      --version                Print the version and exit.
       --check-exposure         Check whether the model server (the port of
                                --server) or the sandbox (the port of
                                --sandbox) can be reached from the network:
@@ -210,16 +214,18 @@ public struct ResearchArguments: Equatable, Sendable {
         while index < arguments.count {
             let argument = arguments[index]
             if argument.hasPrefix("-"), argument != "--", runOption == nil,
-               !["--help", "-h", "--replay-figures", "--quiet"].contains(argument) {
+               !["--help", "-h", "--version", "--replay-figures", "--quiet"].contains(argument) {
                 runOption = argument
             }
             if argument.hasPrefix("-"), argument != "--", exposureOption == nil,
-               !["--help", "-h", "--check-exposure", "--server", "--sandbox", "--quiet"].contains(argument) {
+               !["--help", "-h", "--version", "--check-exposure", "--server", "--sandbox", "--quiet"].contains(argument) {
                 exposureOption = argument
             }
             switch argument {
             case "--help", "-h":
                 parsed.showHelp = true
+            case "--version":
+                parsed.showVersion = true
             case "--model":
                 parsed.model = try value(argument)
             case "--server":
@@ -313,7 +319,7 @@ public struct ResearchArguments: Equatable, Sendable {
         parsed.question = words.joined(separator: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         // A replay reads one file; no run, question or output goes with it.
-        if parsed.replayFiguresPath != nil, !parsed.showHelp {
+        if parsed.replayFiguresPath != nil, !parsed.showHelp, !parsed.showVersion {
             if let runOption {
                 throw ResearchArgumentError("--replay-figures cannot be combined with \(runOption)")
             }
@@ -322,7 +328,7 @@ public struct ResearchArguments: Equatable, Sendable {
             }
         }
         // The exposure check looks at two ports; no run goes with it.
-        if parsed.checkExposure, !parsed.showHelp {
+        if parsed.checkExposure, !parsed.showHelp, !parsed.showVersion {
             if parsed.replayFiguresPath != nil {
                 throw ResearchArgumentError("--check-exposure cannot be combined with --replay-figures")
             }
@@ -338,10 +344,10 @@ public struct ResearchArguments: Equatable, Sendable {
                == URL(fileURLWithPath: saved).standardizedFileURL {
             throw ResearchArgumentError("--output and --save-pages must name different files")
         }
-        if parsed.serverType == .llamacpp, parsed.stream == true, !parsed.showHelp {
+        if parsed.serverType == .llamacpp, parsed.stream == true, !parsed.showHelp, !parsed.showVersion {
             throw ResearchArgumentError(ResearchServerConnection.streamingNeedsConnectorMessage)
         }
-        if !parsed.showHelp && parsed.replayFiguresPath == nil && !parsed.checkExposure
+        if !parsed.showHelp && !parsed.showVersion && parsed.replayFiguresPath == nil && !parsed.checkExposure
             && parsed.question.isEmpty {
             throw ResearchArgumentError("a question is required")
         }

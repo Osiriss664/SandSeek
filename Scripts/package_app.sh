@@ -24,7 +24,6 @@
 # Not done here: Sparkle updates and notarization.
 set -euo pipefail
 
-version="${SANDSEEK_VERSION:-0.1.0}"
 bundle_id="io.github.osiriss664.sandseek"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
@@ -34,6 +33,13 @@ fi
 
 script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 root="$(cd -- "$script_directory/.." && pwd)"
+# The default version is the one `sandseek --version` prints, from
+# Sources/SandSeekCore/SandSeekVersion.swift; SANDSEEK_VERSION overrides it.
+version="${SANDSEEK_VERSION:-$(sed -n 's/^ *public static let current = "\([^"]*\)".*/\1/p' "$root/Sources/SandSeekCore/SandSeekVersion.swift")}"
+if [[ -z "$version" ]]; then
+    echo "Could not read the version from Sources/SandSeekCore/SandSeekVersion.swift." >&2
+    exit 1
+fi
 build_directory="$root/build"
 # A relative output directory is relative to where the command was run.
 requested="${1:-$build_directory}"

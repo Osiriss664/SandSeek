@@ -32,6 +32,10 @@ if arguments.showHelp {
     print(ResearchArguments.usage)
     exit(0)
 }
+if arguments.showVersion {
+    print(SandSeekVersion.text)
+    exit(0)
+}
 
 // The replay needs no model, sandbox or question: it only reads one file.
 if let path = arguments.replayFiguresPath {
