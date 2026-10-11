@@ -375,9 +375,9 @@ does not control.
   hold the port on the network addresses beside a server on 127.0.0.1, so the
   answer may not come from the model server. A negative result is good evidence
   as long as every address was actually refused, which the output shows.
-  Whether macOS Local Network privacy covers connects to the Mac's own addresses
-  is still to be checked on a Mac; that is why a silent address is reported and
-  never counted as clear.
+  On a Mac with macOS 27, connections to the Mac's own addresses went through
+  without a Local Network prompt; a silent address is still reported and never
+  counted as clear.
 
 ## Known limits
 

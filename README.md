@@ -10,8 +10,8 @@ pages, no OCR), parsed inside the VM.
 
 Status: pre-release, being moved out of a TUFF fork. The command-line tool,
 the core library and the Mac app (a window with the same research loop) are one
-Swift package. The app has not been compiled yet by the person who wrote it
-(see "Left undone" below).
+Swift package. Built, tested and tried by hand on a Mac with macOS 27, TUFF
+8.3.1 and Qwen3.6 35B (11 October 2026).
 
 ## Documentation
 
@@ -156,20 +156,14 @@ To record real streams from a running server for test fixtures, use
 
 ## Left undone
 
-- Nothing in the app was compiled or run where it was written (no Swift
-  toolchain there). Expect a few compile fixes on the first `swift build` on
-  the Mac, and run `swift test` for `SandSeekAppLogicTests`.
 - llama.cpp: plain (non-streaming) requests. That llama-server has
   `--api-key-file`, enforces it, and answers `/props` and `/health` as assumed
   is confirmed by the probe on the Mac (step 2b). Ollama and LM Studio come
   later.
-- Whether the ten-second status poll resets TUFF's idle unload is checked on
-  the Mac.
 - Thorough preset values are a first guess; they will be adjusted after
   measuring.
 - The pre-question check does not yet verify mounts or that port 9100 is
   published by `sandseek-sandbox`.
-- The model transport follows HTTP redirects from the loopback server.
 - Model names in the picker are the ids the server lists; there is no table of
   display names.
 - The Quick answer / Thorough switch is labelled in English like the rest of
