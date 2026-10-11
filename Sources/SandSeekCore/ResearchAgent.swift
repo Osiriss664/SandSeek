@@ -1060,11 +1060,25 @@ public struct ResearchAgent: Sendable {
         // shortened any more, so the retry, the continuation and the rewrite
         // extend what the server cached (see `send`).
         if state.sealedFrom == nil { state.sealedFrom = state.messages.count - 1 }
+        dumpAnswerRequest(state)
         let first = try await answer(from: turn, state: &state)
         let whole = try await continuingCutOff(first, from: turn, state: &state)
         // A rewrite of a continued answer would be cut off again and dropped.
         if first.1 == .tokenLimit { return droppingUnreadCitations(whole, state: &state) }
         return droppingUnreadCitations(try await revise(whole, state: &state), state: &state)
+    }
+
+    /// Writes the messages that produced the final answer to the file named
+    /// by `dumpAnswerRequestPath`, if any, for measuring what
+    /// the model read. Best effort; the file is private to the user.
+    private func dumpAnswerRequest(_ state: State) {
+        guard let path = options.dumpAnswerRequestPath,
+              let data = try? ResearchJSON.array(state.messages).encoded(),
+              FileManager.default.createFile(
+                atPath: path, contents: nil, attributes: [.posixPermissions: 0o600]),
+              let handle = FileHandle(forWritingAtPath: path) else { return }
+        try? handle.write(contentsOf: data)
+        try? handle.close()
     }
 
     /// Takes the numbers of pages that were never read out of the answer's
@@ -1467,7 +1481,13 @@ public struct ResearchAgent: Sendable {
         // Only with a window the server named: a fixed or guessed budget is a
         // speed cap for shortening, not the size of the window.
         let windowKnown = options.contextBudgetCharacters == nil && state.contextTokens != nil
-        guard !windowKnown || needed <= continuationLimit(state) else {
+        // The reply is about as long as the answer; the rest of maxTokens is not needed.
+        let ratio = state.measuredCharactersPerToken ?? state.charactersPerToken
+        let reply = min(chat.maxTokens, Int(Double(answer.0.count) / ratio * 1.25) + 256)
+        let limit = windowKnown
+            ? contextCharacters(window: state.contextTokens ?? 0, state, reply: reply, ratio: ratio)
+            : 0
+        guard !windowKnown || needed <= limit else {
             onEvent(.rewriteNotKept("no room left in the context window"))
             return answer
         }
@@ -2037,15 +2057,6 @@ public struct ResearchAgent: Sendable {
             onEvent(.shortenedOlderResults)
         }
         var sent = state.size(overhead: toolCharacters)
-        if state.answering, !state.dumpedAnswerRequest,
-           let path = options.dumpAnswerRequestPath {
-            state.dumpedAnswerRequest = true
-            if let data = try? ResearchJSON.array(state.messages).encoded() {
-                // Best effort and private: the file holds the pages as the model read them.
-                FileManager.default.createFile(
-                    atPath: path, contents: data, attributes: [.posixPermissions: 0o600])
-            }
-        }
         // A turn with reasoning on gets the thinking limit; others only the
         // transport's own step timeout.
         let limit = (thinking ?? chat.enableThinking) == true
@@ -3274,8 +3285,6 @@ public struct ResearchAgent: Sendable {
         var droppedUnreadCitations: [Int] = []
         /// The markers around web text in this run.
         var markers = Markers.fixed
-        /// The first request for the answer was written to `dumpAnswerRequestPath`.
-        var dumpedAnswerRequest = false
 
         /// The server's tokens held fewer characters than estimated: the
         /// estimate and the measured ratio both shrink a quarter.

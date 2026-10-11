@@ -5615,25 +5615,27 @@ struct ResearchRoundDLoopTests {
     @Test func aRewriteThatWouldNotFitTheContextIsNotAsked() async throws {
         var options = ResearchOptions()
         options.nudges = false
+        // A long answer in a small window: the prompt, the answer and a reply
+        // as long as the answer cannot all be held.
+        let body = String(repeating: "Linux läuft in einer eigenen VM. ", count: 100)
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
-            FakeServices.answer("VMs [1], and Linux 6 [3]."),
+            FakeServices.answer("VMs [1]. " + body + "Linux 6 [3]."),
         ]) { path, body in
             if path == "/v1/models" {
-                // A window far smaller than the system prompt and the tools.
                 return FakeServices.json(200, .object(["object": .string("list"), "data": .array([
-                    .object(["id": .string("qwen3.6-35b-a3b"), "context_length": .integer(4_096)]),
+                    .object(["id": .string("qwen3.6-35b-a3b"), "context_length": .integer(2_048)]),
                 ])]))
             }
             return FakeServices.webPages(path, body)
         }
         let log = EventLog()
         let report = try await agent(services, options: options, events: log).run(question: "q")
-        // No third request: the answer plus the request would not fit the window.
+        // No third request.
         #expect(services.modelRequests.count == 2)
         #expect(log.events.contains(.rewriteNotKept("no room left in the context window")))
         #expect(!log.events.contains(.revisingUnreadCitations))
-        #expect(report.answer == "VMs [1], and Linux 6.")
+        #expect(report.answer == "VMs [1]. " + body + "Linux 6.")
         #expect(report.droppedUnreadCitations == [3])
     }
 
