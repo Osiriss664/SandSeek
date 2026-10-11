@@ -115,11 +115,12 @@ RAW_MAX_ACCEPT_CHARS = 512
 RAW_DEFAULT_TIMEOUT = 15
 RAW_MAX_TIMEOUT = 60
 RAW_MAX_MESSAGE_CHARS = 200
-# A success is refused when its final address or content type is longer than
-# this: the caller reserves a fixed room for them, and a site (or a redirect
-# chain) must not be able to make them longer.
+# A success is refused when its final address, content type or content
+# encoding is longer than this: the caller reserves a fixed room for them, and
+# a site (or a redirect chain) must not be able to make them longer.
 RAW_MAX_FINAL_URL_CHARS = 2048
 RAW_MAX_CONTENT_TYPE_CHARS = 256
+RAW_MAX_CONTENT_ENCODING_CHARS = 64
 # check_url and the transport name two errors differently from what /v1/raw
 # promises its caller. /v1/fetch and /v1/search keep the old names.
 RAW_CODES = {"blocked_address": "private_address", "fetch_timeout": "timed_out"}
@@ -825,13 +826,18 @@ class WebTools:
             if len(content_type) > RAW_MAX_CONTENT_TYPE_CHARS:
                 raise ToolError(f"the content type is longer than {RAW_MAX_CONTENT_TYPE_CHARS} "
                                 "characters", "fetch_failed", 502)
+            content_encoding = response.headers.get("content-encoding")
+            if (content_encoding is not None
+                    and len(content_encoding) > RAW_MAX_CONTENT_ENCODING_CHARS):
+                raise ToolError(f"the content encoding is longer than "
+                                f"{RAW_MAX_CONTENT_ENCODING_CHARS} characters", "fetch_failed", 502)
             result = {
                 "final_url": target.url,
                 "status": response.status,
                 "content_type": content_type,
                 "body_base64": base64.b64encode(response.body).decode("ascii"),
                 # null when the site sent no Content-Encoding.
-                "content_encoding": response.headers.get("content-encoding"),
+                "content_encoding": content_encoding,
             }
             return result
         raise ToolError("too many redirects", "too_many_redirects", 502)

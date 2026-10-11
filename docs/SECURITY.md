@@ -119,8 +119,9 @@ These hold as long as the design is intact and the VM boundary holds.
   GET only, no redirect from https to http, a body over the caller's limit is
   an error and never a shortened body (so is a body that ends before its
   Content-Length), no `Accept-Encoding` is sent, no cookies and no page cache,
-  and a success whose final address is over 2048 characters or whose content
-  type is over 256 is refused as `fetch_failed`.
+  and a success whose final address is over 2048 characters, whose content
+  type is over 256 or whose content encoding is over 64 is refused as
+  `fetch_failed`.
   One time limit, `timeout_seconds` (at most 60), covers the whole request
   including its redirects; a read can take about 1 second longer than that, so
   a client should wait `timeout_seconds` + 5 seconds for the answer. The Host

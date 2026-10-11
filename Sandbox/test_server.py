@@ -769,6 +769,18 @@ class RawTests(unittest.TestCase):
         self.assertEqual((error.code, error.status), ("fetch_failed", 502))
         self.assertLess(len(error.message), 200)
 
+    def test_content_encoding_may_be_64_characters_and_not_one_more(self):
+        at_limit = "x" * server.RAW_MAX_CONTENT_ENCODING_CHARS
+        self.assertEqual(len(at_limit), 64)
+        result = self.raw({"https://example.com/a": Response(
+            200, {"content-encoding": at_limit}, b"x")})
+        self.assertEqual(result["content_encoding"], at_limit)
+        tools = self.tools({"https://example.com/a": Response(
+            200, {"content-encoding": at_limit + "x"}, b"x")})
+        error = self.error(tools, "https://example.com/a")
+        self.assertEqual((error.code, error.status), ("fetch_failed", 502))
+        self.assertLess(len(error.message), 200)
+
     def test_a_redirect_chain_that_ends_on_a_too_long_url_is_refused(self):
         prefix = "https://other.example/"
         ok = prefix + "p" * (server.RAW_MAX_FINAL_URL_CHARS - len(prefix))
