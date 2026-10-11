@@ -62,6 +62,7 @@ import threading
 import time
 import unicodedata
 import urllib.parse
+import urllib.request
 import zlib
 from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
@@ -1062,12 +1063,11 @@ class WebTools:
         # SearXNG is the operator's own service, usually another container on a
         # private address, so it is the one destination exempt from the
         # public-address rule. Only its fixed search path is ever requested.
-        import urllib.request
         url = f"{self.searxng_url}/search?" + urllib.parse.urlencode(
             {"q": query, "format": "json"})
         request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
         try:
-            with urllib.request.urlopen(request, timeout=FETCH_TIMEOUT) as response:
+            with SEARXNG_OPENER.open(request, timeout=FETCH_TIMEOUT) as response:
                 payload = json.loads(response.read(MAX_DOWNLOAD_BYTES))
         except (OSError, ValueError) as error:
             raise ToolError(f"SearXNG search failed: {error}", "search_failed", 502)
@@ -1078,6 +1078,17 @@ class WebTools:
             for item in payload.get("results", [])
             if is_plain_web_url(str(item.get("url", "")))
         ]
+
+
+class _NoRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None  # a 3xx comes back as an error, never as a second request
+
+
+# SearXNG is the one destination the address rule does not cover, so its
+# request follows no redirect (which could lead anywhere the firewall allows)
+# and uses no proxy from the environment.
+SEARXNG_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirects())
 
 
 class _DuckDuckGoResults(HTMLParser):

@@ -1445,6 +1445,57 @@ class SearchTests(unittest.TestCase):
                 tools.search("bounded experts", 1)
             self.assertEqual(refused.calls, 1)
 
+    def test_searxng_follows_no_redirect_and_uses_no_proxy(self):
+        hits = []
+
+        class Other(BaseHTTPRequestHandler):
+            def do_GET(self):
+                hits.append(self.path)
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"results": []}')
+
+            def log_message(self, *args):
+                pass
+
+        other = ThreadingHTTPServer(("127.0.0.1", 0), Other)
+        other_port = other.server_address[1]
+
+        class Searx(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if "q=redirect" in self.path:
+                    self.send_response(302)
+                    self.send_header("Location", f"http://127.0.0.1:{other_port}/elsewhere")
+                    self.end_headers()
+                    return
+                body = json.dumps({"results": [
+                    {"title": "T", "url": "https://example.com/a", "content": "S"},
+                    {"title": "Bad", "url": "file:///etc/passwd", "content": "x"}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        searx = ThreadingHTTPServer(("127.0.0.1", 0), Searx)
+        for httpd in (other, searx):
+            threading.Thread(target=httpd.serve_forever, daemon=True).start()
+            self.addCleanup(httpd.server_close)
+            self.addCleanup(httpd.shutdown)
+        tools = WebTools(resolver=resolver({}), transport=FakeTransport({}),
+                         searxng_url=f"http://127.0.0.1:{searx.server_address[1]}")
+        # An unreachable proxy in the environment must not matter.
+        with mock.patch.dict(os.environ, {"http_proxy": "http://127.0.0.1:1",
+                                          "HTTP_PROXY": "http://127.0.0.1:1"}):
+            result = tools.search("fine", 5)
+            self.assertEqual([r["url"] for r in result["results"]], ["https://example.com/a"])
+            with self.assertRaises(ToolError) as caught:
+                tools.search("redirect", 5)
+        self.assertEqual(caught.exception.code, "search_failed")
+        self.assertEqual(hits, [])
+
     def test_query_bounds(self):
         tools = WebTools(resolver=resolver({}), transport=FakeTransport({}), searxng_url="")
         for query, count in [("", 5), ("x" * 401, 5), ("ok", 0), ("ok", 11), (None, 5)]:

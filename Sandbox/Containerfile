@@ -4,6 +4,11 @@
 # The base image is pinned by digest (python:3.12-slim) and every Python
 # package by hash, so a rebuild installs the same code. To update, change the
 # digest and regenerate requirements.txt as requirements.in describes.
+# nftables comes from Debian's repositories unpinned (the VM runs the firewall,
+# so the package matters); the build prints the installed versions of nftables
+# and Python so a build log records them. Check the Python patch level there
+# against CVE-2025-6069 (html.parser, quadratic) when the digest is updated; the
+# server also runs its HTML fallback parser in a killed-after-timeout child.
 FROM docker.io/library/python:3.12-slim@sha256:dddfd7e07f9d15aeeca61529320492139d21cac7f0070c00609243e51e4e0016
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -14,6 +19,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 COPY requirements.txt /app/requirements.txt
 RUN apt-get update \
     && apt-get install -y --no-install-recommends nftables \
+    && dpkg-query --show nftables && python --version \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --require-hashes --no-deps -r /app/requirements.txt \
     && useradd --uid 10001 --no-create-home --home-dir /nonexistent \

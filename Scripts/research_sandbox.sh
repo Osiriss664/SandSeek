@@ -35,6 +35,30 @@ dns_servers="${SANDSEEK_DNS:-}"
 script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 context="$script_directory/../Sandbox"
 
+# SANDSEEK_SANDBOX_PORT and SANDSEEK_DNS go into `container run` arguments;
+# a typo gives a confusing error from deep inside it, so check the form first.
+check_port() {
+  if ! [[ "$port" =~ ^[0-9]{2,5}$ ]] || (( 10#$port < 1 || 10#$port > 65535 )); then
+    echo "SANDSEEK_SANDBOX_PORT must be a port number from 10 to 65535, not: $port" >&2
+    exit 2
+  fi
+  port=$((10#$port))
+}
+
+check_dns() {
+  local server octet
+  for server in $dns_servers; do
+    if [[ "$server" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+      for octet in ${server//./ }; do
+        (( 10#$octet <= 255 )) || { echo "SANDSEEK_DNS: not an IPv4 address: $server" >&2; exit 2; }
+      done
+    elif ! [[ "$server" =~ ^[0-9a-fA-F:.]+$ && "$server" == *:*:* ]]; then
+      echo "SANDSEEK_DNS must list IPv4 or IPv6 addresses separated by spaces, not: $server" >&2
+      exit 2
+    fi
+  done
+}
+
 require_container() {
   if ! command -v container >/dev/null 2>&1; then
     echo "Apple container is not installed; see https://github.com/apple/container" >&2
@@ -66,6 +90,8 @@ case "${1:-}" in
     exit "$build_status"
     ;;
   start)
+    check_port
+    check_dns
     require_container
     container stop "$name" >/dev/null 2>&1 || true
     container delete "$name" >/dev/null 2>&1 || true
@@ -108,6 +134,7 @@ case "${1:-}" in
     echo "web research sandbox stopped"
     ;;
   status)
+    check_port
     if health; then
       echo "web research sandbox is answering at http://127.0.0.1:$port"
     else
@@ -116,6 +143,7 @@ case "${1:-}" in
     fi
     ;;
   selftest)
+    check_port
     require_container
     health || { echo "start the sandbox first: $0 start" >&2; exit 1; }
     failures=0
