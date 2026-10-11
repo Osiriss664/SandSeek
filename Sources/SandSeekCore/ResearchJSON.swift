@@ -72,7 +72,7 @@ public enum ResearchJSON: Codable, Equatable, Sendable {
         return nil
     }
 
-    static func decode(_ data: Data) throws -> ResearchJSON {
+    public static func decode(_ data: Data) throws -> ResearchJSON {
         try JSONDecoder().decode(ResearchJSON.self, from: data)
     }
 
