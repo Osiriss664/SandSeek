@@ -1116,7 +1116,9 @@ class PassageTests(unittest.TestCase):
         return WebTools(resolver=resolve, transport=transport, searxng_url="")
 
     def text(self):
-        return "\n".join(self.paragraphs())
+        # Already collapsed, as a text/plain page is when it is loaded, so the
+        # positions a test computes are the page's own.
+        return server.collapse_whitespace("\n".join(self.paragraphs()))
 
     def test_split_gives_exact_non_overlapping_slices_in_page_order(self):
         text = self.text()
@@ -1135,6 +1137,40 @@ class PassageTests(unittest.TestCase):
         self.assertGreater(len(spans), 1)
         for start, end in spans:
             self.assertTrue(text[start:end].endswith("."), text[start:end][-20:])
+
+    def test_a_line_of_millions_of_spaces_is_split_in_linear_time(self):
+        # The old pattern `[^\n]*\S[^\n]*` took hours on this input.
+        sentence = "Ein normaler Absatz mit genug Text, damit er eine eigene Passage bildet. "
+        for blank in (" ", "\t", "\u3000"):
+            text = "Anfang der Seite. " * 5 + "\n" + blank * 5_000_000 + "Ende\n" + sentence * 3
+            started = time.monotonic()
+            spans = server.split_passages(text)
+            self.assertLess(time.monotonic() - started, 2.0)
+            self.assertTrue(spans)
+            self.assertEqual(text[spans[-1][0]:spans[-1][1]], text[spans[-1][0]:].strip())
+            for start, end in spans:
+                self.assertEqual(text[start:end], text[start:end].strip())
+
+    def test_split_matches_the_documented_shape_with_blank_lines_and_edges(self):
+        text = "  \n\n   Kurz\n   \nZweite Zeile ist auch kurz\n" + "x" * 80 + "  \n \n"
+        spans = server.split_passages(text)
+        self.assertEqual([text[a:b] for a, b in spans],
+                         ["Kurz\n   \nZweite Zeile ist auch kurz\n" + "x" * 80])
+        self.assertEqual(server.split_passages(" \n\t\n"), [])
+        self.assertEqual(server.split_passages(""), [])
+
+    def test_a_plain_text_page_of_millions_of_spaces_is_collapsed_and_read_fast(self):
+        text = ("Vorspann der Seite. " * 5 + " " * 5_000_000 + "Die Waermepumpe kostet etwa "
+                "350 Euro pro Quadratmeter. " * 3 + "\n\n\n\n" + "Schluss. " * 12)
+        tools = self.tools(text)
+        started = time.monotonic()
+        result = tools.fetch("https://example.com/p", passages=True, query="Waermepumpe Euro")
+        self.assertLess(time.monotonic() - started, 2.0)
+        self.assertLess(result["total_chars"], 1000)
+        self.assertIn("Waermepumpe", result["text"])
+        plain = tools.fetch("https://example.com/p")
+        self.assertNotIn("  ", plain["text"])
+        self.assertNotIn("\n\n\n", plain["text"])
 
     def test_split_cuts_text_without_spaces_at_the_limit(self):
         spans = server.split_passages("x" * 1500)

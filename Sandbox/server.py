@@ -468,6 +468,14 @@ def clean_text(text: str) -> str:
     return CONTROL_CHARACTERS.sub("", text.translate(FORMAT_CHARACTERS))
 
 
+def collapse_whitespace(text: str) -> str:
+    """Runs of blanks inside a line become one space, lines are stripped and
+    three or more line breaks become two. Every pattern here is a plain run
+    (linear), so a line of millions of blanks costs one pass."""
+    lines = (re.sub(r"[ \t\r\f\v]+", " ", line).strip() for line in text.split("\n"))
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+
+
 # --- Extraction -------------------------------------------------------------
 
 class _FallbackText(HTMLParser):
@@ -499,9 +507,7 @@ class _FallbackText(HTMLParser):
             self.parts.append(data)
 
     def text(self) -> str:
-        joined = "".join(self.parts)
-        lines = (re.sub(r"[ \t\r\f\v]+", " ", line).strip() for line in joined.split("\n"))
-        return re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+        return collapse_whitespace("".join(self.parts))
 
 
 TITLE_OPEN = re.compile(r"<title(?:\s[^<>]{0,500})?>", re.I)
@@ -626,6 +632,9 @@ def query_terms(query: str) -> list[str]:
     return terms
 
 
+NON_BLANK = re.compile(r"\S")
+
+
 def split_passages(text: str) -> list[tuple[int, int]]:
     """Paragraphs of a page as (start, end) character positions in `text`.
 
@@ -635,26 +644,35 @@ def split_passages(text: str) -> list[tuple[int, int]]:
     space when no sentence ends in its first part. The pieces are exact slices
     of `text`, in page order, and do not overlap.
     """
-    lines = [(m.start(), m.end()) for m in re.finditer(r"[^\n]*\S[^\n]*", text)]
+    # Line by line, never with a pattern like `[^\n]*\S[^\n]*`: on a line of
+    # millions of blanks that pattern rescans the rest of the line at every
+    # position (quadratic, hours, and it holds the interpreter lock).
+    lines: list[tuple[int, int]] = []  # first and end of the text of a non-blank line
+    offset = 0
+    for line in text.split("\n"):
+        body = line.lstrip()
+        if body:
+            first = offset + len(line) - len(body)
+            lines.append((first, first + len(body.rstrip())))
+        offset += len(line) + 1
     paragraphs: list[tuple[int, int]] = []
     index = 0
     while index < len(lines):
         start, end = lines[index]
         index += 1
-        while index < len(lines) and len(text[start:end].strip()) < MIN_PASSAGE_CHARS:
+        while index < len(lines) and end - start < MIN_PASSAGE_CHARS:
             end = lines[index][1]
             index += 1
         paragraphs.append((start, end))
     pieces: list[tuple[int, int]] = []
     for start, end in paragraphs:
         while True:
-            # Trim blanks so a piece starts and ends on text.
-            while start < end and text[start].isspace():
-                start += 1
-            while end > start and text[end - 1].isspace():
-                end -= 1
-            if start >= end:
+            # A paragraph ends on text already; skip the blanks a cut leaves in
+            # front of the next piece (a C-level scan, not a Python loop).
+            first = NON_BLANK.search(text, start, end)
+            if first is None:
                 break
+            start = first.start()
             if end - start <= MAX_PASSAGE_CHARS:
                 pieces.append((start, end))
                 break
@@ -881,7 +899,9 @@ class WebTools:
         body = decode_body(response)
         raw = body.decode(page_charset(content_type, body), errors="replace")
         if content_type.startswith("text/plain"):
-            page = Page(final_url, "", clean_text(raw).strip())
+            # Runs of blanks are collapsed as in the fallback parser, so a page
+            # of millions of spaces is not kept (or searched) as such.
+            page = Page(final_url, "", collapse_whitespace(clean_text(raw)))
         else:
             page = Page(final_url, extract_title(raw), extract_text_bounded(raw, final_url))
         with self.lock:
