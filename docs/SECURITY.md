@@ -394,27 +394,40 @@ does and does not do:
 - Before each start it follows symbolic links and checks the program: a regular
   file you can run, owned by you or root, not writable by group or others, and
   no folder from `/` down to it owned by another user or writable by others
-  (sticky `/tmp` and root's `admin` group in `/Applications` are accepted). A
-  program marked as downloaded (quarantine) is refused. The check cannot close
-  the gap between looking and starting; it keeps other users and wrong
-  permissions out, not a program you run as yourself (see *Who is trusted*).
+  (a sticky folder such as `/tmp`, and folders that the `admin` group may write,
+  such as `/Applications` and Homebrew's, are accepted). A program that macOS
+  marked as downloaded and that nobody has approved yet is refused. **The check
+  reads only the Unix owner and permission bits.** It does not read ACLs (extra
+  access given in Finder's Get Info panel), and it cannot tell on an external or
+  network volume, or one mounted with "Ignore ownership", whether other accounts
+  can write: keep the program (and, for the same reason, the model) in your home
+  folder or in a folder only you can write. It cannot close the gap between
+  looking and starting, and it does not check the libraries beside `llama-server`.
+  It is meant to keep out other users and wrong permissions, not a program you
+  run as yourself (see *Who is trusted*). The model file and the TUFF models
+  folder are not checked; they are trusted as you chose them.
 - llama-server is started only with a key file that is a regular file of yours
   with mode 0600 and holds the key; otherwise SandSeek refuses. Right before a
   start the port is tried again, and the start is refused when anything answers
   or the answer is unclear.
-- The server gets an environment of three variables (`PATH`, `HOME`, `TMPDIR`)
-  made from scratch, so `LLAMA_ARG_*`, `DYLD_*` and `TUFF_*` settings in your
-  environment do not reach it. Its output goes to a log file readable only by
-  you, replaced at every start.
+- The server gets an environment of three variables, not a copy of SandSeek's:
+  `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`), `HOME` (your home folder from the
+  account database) and `TMPDIR` (the temporary folder from `confstr`). So
+  `LLAMA_ARG_*`, `DYLD_*` and `TUFF_*` settings in your environment do not reach
+  it. Its output goes to a log file readable only by you, replaced at every
+  start.
 - After the server answers, the network check runs; if the server turns out to be
   reachable from the network, SandSeek stops it.
 - SandSeek stops a server it started (SIGTERM, then SIGKILL after 5 seconds) on
-  **Stop server** and when you quit it normally. It never stops a server it did
-  not start. **A crash, Force Quit, `kill -9`, Xcode's Stop button or a plain
-  SIGTERM to SandSeek leave the server running**, because macOS has no way to end
-  a child when its parent dies. The next launch finds it again if the process id,
-  start time and program match, and offers Stop; it never stops it by itself. TUFF
-  has no `Host` header check (above), so quit the server when you are not using it.
+  **Stop server** and when you quit it normally (a plain SIGTERM to SandSeek is
+  turned into a normal quit). It does not stop a server it did not start, with
+  one exception: if you run SandSeek twice, the second one takes the first one's
+  server over as a leftover, and stops it when it quits. **A crash, Force Quit,
+  `kill -9` or Xcode's Stop button leave the server running**, because macOS has
+  no way to end a child when its parent dies. The next launch finds it again if
+  the process id, start time and program match, and offers Stop; it never stops
+  it by itself. TUFF has no `Host` header check (above), so quit the server when
+  you are not using it.
 
 ## Known limits
 
