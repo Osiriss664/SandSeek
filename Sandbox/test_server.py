@@ -1556,6 +1556,42 @@ class PinnedTransportTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "fetch_timeout")
         self.assertLess(time.monotonic() - started, 3)
 
+    def test_a_tls_handshake_that_never_answers_hits_the_deadline(self):
+        # A server that accepts the TCP connection and never says a word, as a
+        # hostile site can do in the middle of the TLS handshake. The timer must
+        # cut the handshake, not wait for the socket timeout (FETCH_TIMEOUT).
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(5)
+        held = []
+        stop = threading.Event()
+
+        def accept():
+            listener.settimeout(0.2)
+            while not stop.is_set():
+                try:
+                    held.append(listener.accept()[0])
+                except OSError:
+                    pass
+
+        threading.Thread(target=accept, daemon=True).start()
+
+        def cleanup():
+            stop.set()
+            listener.close()
+            for connection in held:
+                connection.close()
+
+        self.addCleanup(cleanup)
+        target = server.Target("https", "pinned.invalid", listener.getsockname()[1], "/",
+                               "127.0.0.1")
+        with mock.patch.object(server, "FETCH_TIMEOUT", 30):
+            started = time.monotonic()
+            with self.assertRaises(ToolError) as caught:
+                server.pinned_transport("GET", target, {}, None, deadline=1)
+        self.assertEqual(caught.exception.code, "fetch_timeout")
+        self.assertLess(time.monotonic() - started, 1.8)
+
 
 class InjectionFixtureTests(unittest.TestCase):
     """The injection fixtures only test the model if extraction keeps the

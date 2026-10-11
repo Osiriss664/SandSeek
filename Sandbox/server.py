@@ -299,6 +299,9 @@ class _SendOnlyGivenHeaders:
     Accept-Encoding header. The transport sends the headers it is given and
     nothing else."""
 
+    # The event pinned_transport's deadline timer sets; connect() looks at it.
+    expired: threading.Event | None = None
+
     def putrequest(self, method, url, skip_host=False, skip_accept_encoding=False):
         return super().putrequest(method, url, skip_host, True)
 
@@ -320,9 +323,19 @@ class _PinnedHTTPSConnection(_SendOnlyGivenHeaders, http.client.HTTPSConnection)
 
     def connect(self):
         sock = socket.create_connection((self._address, self.port), self.timeout)
-        # The handshake is bounded by the socket timeout (the deadline plus one
-        # second), not by the timer: wrap_socket detaches `sock` first.
-        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+        # The socket is stored before the handshake, so the deadline timer can
+        # shut it down while the handshake waits (wrap_socket would detach
+        # `sock` and keep it out of the timer's reach until it returned).
+        secure = self._context.wrap_socket(sock, server_hostname=self.host,
+                                           do_handshake_on_connect=False)
+        self.sock = secure
+        if self.expired is not None and self.expired.is_set():
+            raise OSError("the deadline passed before the handshake")
+        try:
+            secure.do_handshake()
+        except AttributeError:
+            # The timer's shutdown() ran between the check and the handshake.
+            raise OSError("the deadline passed during the handshake") from None
 
 
 def declared_length(headers: dict[str, str]) -> int | None:
@@ -345,6 +358,7 @@ def pinned_transport(method: str, target: Target, headers: dict[str, str],
     # lets the timer win the race and report a timeout, not a failed connect.
     connection = cls(target, min(FETCH_TIMEOUT, limit + 1))
     expired = threading.Event()
+    connection.expired = expired
 
     def expire():
         # Shutting the socket down wakes a read blocked in another thread.
