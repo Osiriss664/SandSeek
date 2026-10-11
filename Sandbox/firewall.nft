@@ -1,4 +1,4 @@
-# Outbound rules for the web research VM, loaded by entrypoint.sh as root
+# Firewall for the web research VM, loaded by entrypoint.sh as root
 # before the server drops its privileges. server.py already refuses these
 # addresses; this table holds even if code in the VM were taken over.
 #
@@ -10,11 +10,11 @@
 #
 # Inbound, the VM accepts new connections on one port only: 9100, the server's
 # port, which `container run --publish` reaches over the VM's network
-# interface (not over loopback, which is why the server binds 0.0.0.0).
-# Everything else that is new is dropped, so a program in the VM that listens
-# elsewhere, or another VM on the same bridge scanning for services, finds
-# nothing. The input chain comes after the output chain on purpose: the app
-# checks the output chain's rules from the first closing brace on.
+# interface (which is why the server binds 0.0.0.0). Everything else that is
+# new is dropped, so a program in the VM that listens elsewhere, or another VM
+# on the same bridge scanning for services, finds nothing. The order of the
+# two chains does not matter. Port 9100 is open to every address on the
+# network, not only the Mac (see docs/SECURITY.md).
 
 table inet sandseek_sandbox
 delete table inet sandseek_sandbox

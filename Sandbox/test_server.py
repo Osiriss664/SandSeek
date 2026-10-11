@@ -2111,10 +2111,7 @@ class FirewallFileTests(unittest.TestCase):
         ])
         self.assertEqual(server.PORT, 9100)
 
-    def test_the_input_chain_follows_the_output_chain(self):
-        # The app reads the output chain's rules up to the first closing brace
-        # after it; the input chain must not come first and must not hide in it.
-        self.assertLess(self.code.index("chain output"), self.code.index("chain input"))
+    def test_each_hook_has_one_chain_and_9100_is_not_in_the_output_chain(self):
         self.assertEqual(self.code.count("hook input"), 1)
         self.assertEqual(self.code.count("hook output"), 1)
         self.assertNotIn("dport 9100", "\n".join(self.chain("output")))

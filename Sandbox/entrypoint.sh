@@ -1,5 +1,5 @@
 #!/bin/sh
-# Loads the VM's outbound firewall, then starts the server, which drops root
+# Loads the VM's firewall (outbound and inbound), then starts the server, which drops root
 # and every capability before it serves anything. Refuses to start without
 # the firewall.
 set -eu

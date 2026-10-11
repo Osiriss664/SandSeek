@@ -75,13 +75,16 @@ These hold as long as the design is intact and the VM boundary holds.
   the markers inside a page are removed repeatedly, so a page cannot close the
   block early, even by splitting a marker around another copy. `<<<` and `>>>`
   (and their full-width forms) are made harmless in page text in every marker
-  mode, not only with a per-run code, so a page cannot write a marker with extra
-  blanks. Two things from a page stand in the loop's own lines before a block:
+  mode, not only with a per-run code, and the words UNTRUSTED WEB CONTENT are
+  removed from page text in any case and spacing, so a page can neither write a
+  marker with extra blanks nor leave a bracket lookalike of one. Two things from a page stand in the loop's own lines before a block:
   its title and its final address. They are cut (120 and 300 characters), put
   on one line, stripped of control and invisible characters and of anything
   that looks like a marker, and so are addresses echoed in a tool error or the
-  redirect refusal (400 characters). They are still text from the page, so a
-  short instruction there can reach the model; the model has nothing but
+  redirect refusal (400 characters). The title is shown in quotes and followed
+  by "(title as the page gives it)", and the system prompt says that the
+  Source, Page and URL lines are web text too. They are still text from the
+  page, so a short instruction there can reach the model; the model has nothing but
   search and read to act with. The markers are advice to the model, not a
   guarantee. The guarantee is that the model has no tool that could do harm.
 - **Web text cannot drive your terminal or hide from you.** Control characters
@@ -126,8 +129,9 @@ These hold as long as the design is intact and the VM boundary holds.
   shared, multicast, reserved, and IPv6 forms that carry an IPv4 address such
   as NAT64, 6to4 and Teredo), connects to the address it checked, and checks
   every redirect again. Only http on port 80 and https on port 443; at most
-  5 MB; 45 seconds per hop and 90 seconds for a whole request with its
-  redirects and name lookups; only HTML and plain text. Runs of blanks in a
+  5 MB; 45 seconds per hop (name lookup excepted, see the whole-request
+  limit) and 90 seconds for a whole request with its redirects, name lookups,
+  connections and TLS handshakes (a second or two more at most); only HTML and plain text. Runs of blanks in a
   plain-text page are collapsed, and a page is split into passages line by
   line, so a page made of millions of spaces costs one pass, not hours.
 - **`POST /v1/raw` returns the site's bytes, not cleaned text.** It is for a
@@ -205,9 +209,11 @@ These hold as long as the design is intact and the VM boundary holds.
   public pages fetched through it. That is the same trust boundary as any local
   server. Browser pages cannot (Host check, JSON only).
 - **Other containers on the same Apple container network** can still reach
-  port 9100 of the VM directly: the inbound firewall allows that port because
-  the published port needs it, and a caller can send any `Host` header. Every
-  other inbound port is closed. There are no other containers today.
+  port 9100 of the VM directly: the inbound firewall allows that port from any
+  address because the source address of the published port is not known yet,
+  and a caller can send any `Host` header. Allowing only the gateway is the next
+  step once a Mac run (`/proc/net/tcp` in the VM during a request) shows which
+  address the publish connects from. Every other inbound port is closed. There are no other containers today.
 - **The search path through SearXNG** (`SEARXNG_URL`, the operator's own
   service) follows no redirect and uses no proxy from the environment, but it
   is the one request that skips the public-address check; the firewall's single

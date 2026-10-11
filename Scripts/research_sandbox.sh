@@ -16,6 +16,8 @@
 # published to the Mac's loopback address only. See docs/SECURITY.md.
 
 set -euo pipefail
+# No file name expansion: $dns_servers is split into words below, not matched.
+set -f
 
 # The old TUFF_RESEARCH_ names are ignored now; say so instead of silently
 # using the defaults. This does not stop the script.
@@ -38,7 +40,7 @@ context="$script_directory/../Sandbox"
 # SANDSEEK_SANDBOX_PORT and SANDSEEK_DNS go into `container run` arguments;
 # a typo gives a confusing error from deep inside it, so check the form first.
 check_port() {
-  if ! [[ "$port" =~ ^[0-9]{2,5}$ ]] || (( 10#$port < 1 || 10#$port > 65535 )); then
+  if ! [[ "$port" =~ ^[1-9][0-9]{1,4}$ ]] || (( 10#$port < 1 || 10#$port > 65535 )); then
     echo "SANDSEEK_SANDBOX_PORT must be a port number from 10 to 65535, not: $port" >&2
     exit 2
   fi
@@ -52,7 +54,7 @@ check_dns() {
       for octet in ${server//./ }; do
         (( 10#$octet <= 255 )) || { echo "SANDSEEK_DNS: not an IPv4 address: $server" >&2; exit 2; }
       done
-    elif ! [[ "$server" =~ ^[0-9a-fA-F:.]+$ && "$server" == *:*:* ]]; then
+    elif ! [[ "$server" =~ ^[0-9a-fA-F:]{2,39}$ && "$server" == *:*:* && "$server" != *:::* ]]; then
       echo "SANDSEEK_DNS must list IPv4 or IPv6 addresses separated by spaces, not: $server" >&2
       exit 2
     fi
