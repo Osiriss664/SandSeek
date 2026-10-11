@@ -744,6 +744,51 @@ class RawTests(unittest.TestCase):
         self.assertIn("content_encoding", self.raw({"https://example.com/a": page("x")}))
         self.assertIsNone(self.raw({"https://example.com/a": page("x")})["content_encoding"])
 
+    # --- the length of the metadata -------------------------------------------------
+
+    def test_final_url_may_be_2048_characters_and_not_one_more(self):
+        prefix = "https://example.com/"
+        at_limit = prefix + "p" * (server.RAW_MAX_FINAL_URL_CHARS - len(prefix))
+        self.assertEqual(len(at_limit), 2048)
+        result = self.raw({at_limit: page("x")}, url=at_limit)
+        self.assertEqual(result["final_url"], at_limit)
+        too_long = at_limit + "p"
+        tools = self.tools({too_long: page("x")})
+        error = self.error(tools, too_long)
+        self.assertEqual((error.code, error.status), ("fetch_failed", 502))
+        self.assertLess(len(error.message), 200)
+
+    def test_content_type_may_be_256_characters_and_not_one_more(self):
+        start = "text/html; x="
+        at_limit = start + "c" * (server.RAW_MAX_CONTENT_TYPE_CHARS - len(start))
+        self.assertEqual(len(at_limit), 256)
+        result = self.raw({"https://example.com/a": page("x", content_type=at_limit)})
+        self.assertEqual(result["content_type"], at_limit)
+        tools = self.tools({"https://example.com/a": page("x", content_type=at_limit + "c")})
+        error = self.error(tools, "https://example.com/a")
+        self.assertEqual((error.code, error.status), ("fetch_failed", 502))
+        self.assertLess(len(error.message), 200)
+
+    def test_a_redirect_chain_that_ends_on_a_too_long_url_is_refused(self):
+        prefix = "https://other.example/"
+        ok = prefix + "p" * (server.RAW_MAX_FINAL_URL_CHARS - len(prefix))
+        too_long = ok + "p"
+        # Only the last Location makes the address too long; the start is short.
+        routes = {"https://example.com/a": redirect("/b"),
+                  "https://example.com/b": redirect(too_long),
+                  too_long: page("never shown")}
+        error = self.error(self.tools(routes), "https://example.com/a")
+        self.assertEqual((error.code, error.status), ("fetch_failed", 502))
+        # One character less arrives.
+        routes = {"https://example.com/a": redirect("/b"),
+                  "https://example.com/b": redirect(ok), ok: page("arrived")}
+        self.assertEqual(self.raw(routes, url="https://example.com/a")["final_url"], ok)
+
+    def test_a_long_header_on_a_redirect_hop_is_not_a_success_and_not_checked(self):
+        routes = {"https://example.com/a": redirect("/b", **{"content-type": "t" * 1000}),
+                  "https://example.com/b": page("arrived")}
+        self.assertEqual(self.raw(routes, url="https://example.com/a")["status"], 200)
+
     # --- the deadline ---------------------------------------------------------------
 
     def test_one_deadline_covers_every_redirect(self):

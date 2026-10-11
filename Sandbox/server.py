@@ -115,6 +115,11 @@ RAW_MAX_ACCEPT_CHARS = 512
 RAW_DEFAULT_TIMEOUT = 15
 RAW_MAX_TIMEOUT = 60
 RAW_MAX_MESSAGE_CHARS = 200
+# A success is refused when its final address or content type is longer than
+# this: the caller reserves a fixed room for them, and a site (or a redirect
+# chain) must not be able to make them longer.
+RAW_MAX_FINAL_URL_CHARS = 2048
+RAW_MAX_CONTENT_TYPE_CHARS = 256
 # check_url and the transport name two errors differently from what /v1/raw
 # promises its caller. /v1/fetch and /v1/search keep the old names.
 RAW_CODES = {"blocked_address": "private_address", "fetch_timeout": "timed_out"}
@@ -813,10 +818,17 @@ class WebTools:
             if (response.truncated or len(response.body) > max_bytes
                     or (announced is not None and announced > max_bytes)):
                 raise ToolError(f"the body is larger than {max_bytes} bytes", "oversized", 502)
+            content_type = response.headers.get("content-type", "")
+            if len(target.url) > RAW_MAX_FINAL_URL_CHARS:
+                raise ToolError(f"the final address is longer than {RAW_MAX_FINAL_URL_CHARS} "
+                                "characters", "fetch_failed", 502)
+            if len(content_type) > RAW_MAX_CONTENT_TYPE_CHARS:
+                raise ToolError(f"the content type is longer than {RAW_MAX_CONTENT_TYPE_CHARS} "
+                                "characters", "fetch_failed", 502)
             result = {
                 "final_url": target.url,
                 "status": response.status,
-                "content_type": response.headers.get("content-type", ""),
+                "content_type": content_type,
                 "body_base64": base64.b64encode(response.body).decode("ascii"),
                 # null when the site sent no Content-Encoding.
                 "content_encoding": response.headers.get("content-encoding"),
