@@ -1,0 +1,12 @@
+data: {"object":"chat.completion.chunk","id":"chatcmpl-e3918f0745d24caeb43a87696849e275","model":"qwen3.6-35b-a3b","created":1791720257,"choices":[{"index":0,"finish_reason":null,"delta":{"role":"assistant"}}]}
+
+: ping
+
+data: {"model":"qwen3.6-35b-a3b","object":"chat.completion.chunk","id":"chatcmpl-e3918f0745d24caeb43a87696849e275","created":1791720257,"choices":[{"index":0,"finish_reason":null,"delta":{"tool_calls":[{"id":"call_748d39ac042b6d5a36d8ed8b","index":0,"function":{"arguments":"{\"query\":\"current federal subsidy for heat pumps in Germany 2024 2025\"}","name":"web_search"},"type":"function"}]}}]}
+
+data: {"object":"chat.completion.chunk","id":"chatcmpl-e3918f0745d24caeb43a87696849e275","model":"qwen3.6-35b-a3b","tuff_timings_seconds":{"cache_lookup_and_bridge":0.0001015,"preparation":0.006031125,"queue_and_model_load":4.5333000000000001e-05,"generation_to_first_event":7.8056185410000003,"decode":3.630168080329895,"prompt_render_and_tokenization":0.0060276669999999996,"body_and_validation":0.001019542,"prefill":4.2642639875411987,"cache_restore":0,"cache_capture":0.003421875,"cache_plan":0.00358575,"time_to_first_event":7.8128172500000002,"stream_setup":0.000102709},"created":1791720257,"choices":[{"finish_reason":"tool_calls","delta":{},"index":0}]}
+
+data: {"usage":{"completion_tokens":43,"total_tokens":463,"prompt_tokens_details":{"cached_tokens":0},"prompt_tokens":420},"id":"chatcmpl-e3918f0745d24caeb43a87696849e275","object":"chat.completion.chunk","choices":[],"created":1791720257,"model":"qwen3.6-35b-a3b"}
+
+data: [DONE]
+
