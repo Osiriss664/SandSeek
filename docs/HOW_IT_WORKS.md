@@ -163,8 +163,8 @@ shortened; a second failure ends the question (the pages read are kept).
 **Stop.** **Stop** (or Control-C in the terminal) closes the connection to the
 model server. TUFF's replies are read as a stream, so the server notices that
 nobody is listening and stops generating; a TUFF that is loading its model
-notices only after it has loaded. llama.cpp stops without streaming. The Mac
-stays awake while a question runs.
+notices only after it has loaded. llama.cpp, and TUFF from 8.3.11 on, also
+stop without streaming. The Mac stays awake while a question runs.
 
 **Ended early.** A question that ends with an error or is stopped after it
 searched or read a page still keeps what it gathered: the report has no answer,
