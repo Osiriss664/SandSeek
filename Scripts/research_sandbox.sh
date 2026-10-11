@@ -164,6 +164,14 @@ for line in open("/proc/net/route").read().splitlines()[1:]:
     else
       fail "the firewall is not loaded"
     fi
+    # -nn prints the port as a number (nft would otherwise print a service name).
+    input_rules="$(container exec "$name" nft -nn list chain inet sandseek_sandbox input 2>/dev/null || true)"
+    if grep -q 'hook input.*policy drop' <<<"$input_rules" \
+        && grep -q 'tcp dport 9100 accept' <<<"$input_rules"; then
+      pass "the firewall drops new inbound connections except to port 9100"
+    else
+      fail "the firewall's input chain is missing or not as expected: ${input_rules:0:200}"
+    fi
     privileges="$(container exec "$name" python3 -c '
 import glob
 for path in glob.glob("/proc/[0-9]*/cmdline"):

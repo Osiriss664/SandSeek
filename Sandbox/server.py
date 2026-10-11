@@ -102,6 +102,8 @@ MAX_FALLBACK_CHARS = 500_000
 MAX_DOWNLOAD_BYTES = int(os.environ.get("MAX_DOWNLOAD_BYTES", str(5 * 1024 * 1024)))
 MAX_REDIRECTS = 5
 MAX_REQUEST_BYTES = 64 * 1024
+# Seconds a client may stay silent on an open connection (see Handler.timeout).
+REQUEST_TIMEOUT = 30
 DEFAULT_SLICE_CHARS = 6000
 MAX_SLICE_CHARS = 20000
 MAX_SEARCH_RESULTS = 10
@@ -1151,6 +1153,11 @@ def host_allowed(header: str | None) -> bool:
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "SandSeekSandbox/1.0"
+    # A client that connects and then says nothing (or stops in the middle of
+    # a request) holds a thread; after this many seconds without data the
+    # connection is closed. It limits waits on the client's socket only, not
+    # the fetch a request runs.
+    timeout = REQUEST_TIMEOUT
     tools: WebTools = WebTools()
 
     def log_message(self, fmt, *args):
@@ -1189,7 +1196,14 @@ class Handler(BaseHTTPRequestHandler):
             if not 0 < length <= MAX_REQUEST_BYTES:
                 raise ToolError("request body is missing or too large", "invalid_request", 413)
             try:
-                request = json.loads(self.rfile.read(length))
+                data = self.rfile.read(length)
+            except TimeoutError:
+                # The client announced a body and stopped sending (Handler.timeout).
+                self.close_connection = True
+                raise ToolError("timed out waiting for the request body",
+                                "request_timeout", 408)
+            try:
+                request = json.loads(data)
             except ValueError:
                 raise ToolError("request body is not JSON", "invalid_request", 400)
             if not isinstance(request, dict):
@@ -1255,6 +1269,11 @@ def stop_on_sigterm(server) -> None:
 
 def main():
     drop_privileges()
+    # 0.0.0.0, not 127.0.0.1: `container run --publish` forwards the Mac's
+    # 127.0.0.1:9100 to this VM's network address, not to its loopback, so a
+    # loopback-only server would never be reached. The VM's input firewall
+    # (firewall.nft) accepts new connections on this port only, and the Mac
+    # side is published on 127.0.0.1 only.
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     server.daemon_threads = True
     stop_on_sigterm(server)

@@ -7,6 +7,14 @@
 # metadata addresses. Replies on connections the Mac opened to the published
 # port are allowed. entrypoint.sh adds DNS (port 53 only) to the VM's
 # configured nameservers.
+#
+# Inbound, the VM accepts new connections on one port only: 9100, the server's
+# port, which `container run --publish` reaches over the VM's network
+# interface (not over loopback, which is why the server binds 0.0.0.0).
+# Everything else that is new is dropped, so a program in the VM that listens
+# elsewhere, or another VM on the same bridge scanning for services, finds
+# nothing. The input chain comes after the output chain on purpose: the app
+# checks the output chain's rules from the first closing brace on.
 
 table inet sandseek_sandbox
 delete table inet sandseek_sandbox
@@ -43,5 +51,14 @@ table inet sandseek_sandbox {
         meta nfproto ipv6 ip6 daddr 2000::/3 accept
         meta l4proto tcp reject with tcp reset
         reject
+    }
+
+    chain input {
+        type filter hook input priority filter; policy drop;
+        iifname "lo" accept
+        ct state established,related accept
+        # Keep in step with PORT in server.py and with --publish in
+        # Scripts/research_sandbox.sh.
+        tcp dport 9100 accept
     }
 }

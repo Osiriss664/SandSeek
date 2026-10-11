@@ -1596,6 +1596,33 @@ class HTTPAPITests(unittest.TestCase):
         connection.close()
         return response.status, payload
 
+    def test_a_silent_client_is_dropped_after_the_request_timeout(self):
+        self.assertEqual(server.Handler.timeout, server.REQUEST_TIMEOUT)
+        self.assertTrue(0 < server.REQUEST_TIMEOUT <= 60)
+
+        class QuickHandler(server.Handler):
+            timeout = 0.5
+
+            def log_message(self, *args):
+                pass
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), QuickHandler)
+        self.addCleanup(httpd.server_close)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.shutdown)
+        port = httpd.server_address[1]
+        for sent in (b"", b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n",
+                     b"POST /v1/fetch HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                     b"Content-Type: application/json\r\nContent-Length: 50\r\n\r\n{"):
+            with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
+                started = time.monotonic()
+                client.sendall(sent)
+                # The server gives the connection up; it does not wait for the rest.
+                answer = client.recv(1024)
+                # Nothing for an unfinished head; 408 for a body that stops short.
+                self.assertTrue(answer == b"" or answer.startswith(b"HTTP/1.0 408"), answer)
+                self.assertLess(time.monotonic() - started, 4)
+
     def test_health(self):
         self.assertEqual(self.call("GET", "/health"),
                          (200, {"status": "ok", "passages": True, "raw": True}))
@@ -1970,6 +1997,44 @@ class InjectionCheckScriptTests(unittest.TestCase):
         self.assertIn("1/3 runs resisted the injections", text)
         self.assertIn("2 of 3 runs did not finish; this is not a pass", text)
         self.assertNotIn("3/3 runs resisted", text)
+
+
+class FirewallFileTests(unittest.TestCase):
+    """nft cannot run here; these read firewall.nft as text."""
+
+    def setUp(self):
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "firewall.nft")
+        with open(path, encoding="utf-8") as handle:
+            self.text = handle.read()
+        code = "\n".join(line.split("#", 1)[0].rstrip() for line in self.text.splitlines())
+        self.code = code
+
+    def chain(self, name):
+        start = self.code.index(f"chain {name} {{")
+        end = self.code.index("\n    }", start)
+        return [line.strip() for line in self.code[start:end].splitlines()[1:] if line.strip()]
+
+    def test_inbound_drops_everything_new_except_the_servers_port(self):
+        rules = self.chain("input")
+        self.assertEqual(rules, [
+            "type filter hook input priority filter; policy drop;",
+            'iifname "lo" accept',
+            "ct state established,related accept",
+            "tcp dport 9100 accept",
+        ])
+        self.assertEqual(server.PORT, 9100)
+
+    def test_the_input_chain_follows_the_output_chain(self):
+        # The app reads the output chain's rules up to the first closing brace
+        # after it; the input chain must not come first and must not hide in it.
+        self.assertLess(self.code.index("chain output"), self.code.index("chain input"))
+        self.assertEqual(self.code.count("hook input"), 1)
+        self.assertEqual(self.code.count("hook output"), 1)
+        self.assertNotIn("dport 9100", "\n".join(self.chain("output")))
+
+    def test_outbound_policy_is_still_drop(self):
+        self.assertIn("type filter hook output priority filter; policy drop;",
+                      self.chain("output"))
 
 
 class SigtermTests(unittest.TestCase):
