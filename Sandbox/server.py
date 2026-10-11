@@ -86,6 +86,10 @@ FETCH_TIMEOUT = float(os.environ.get("FETCH_TIMEOUT", "30"))
 # The whole request, so a server that drips one byte at a time cannot hold a
 # fetch open; FETCH_TIMEOUT alone only limits each wait.
 FETCH_DEADLINE = float(os.environ.get("FETCH_DEADLINE", "45"))
+# One /v1/fetch (or search) in all: the name lookups, connections and reads of
+# every redirect hop together. FETCH_DEADLINE alone is per hop, and with five
+# redirects a hostile site could hold a request six times as long.
+FETCH_TOTAL_DEADLINE = float(os.environ.get("FETCH_TOTAL_DEADLINE", "90"))
 # Extraction runs in a separate process with its own limit, because a
 # hostile page can keep the extractor busy for a long time and Python threads
 # cannot be stopped. Only the first MAX_EXTRACT_CHARS of a page are read.
@@ -760,10 +764,18 @@ class WebTools:
 
     def request(self, method: str, url: str, body: bytes | None = None,
                 content_type: str | None = None) -> tuple[str, Response]:
-        """Follows up to MAX_REDIRECTS redirects, checking every hop."""
+        """Follows up to MAX_REDIRECTS redirects, checking every hop. One
+        deadline, FETCH_TOTAL_DEADLINE, covers all hops; each hop also keeps
+        the shorter FETCH_DEADLINE."""
+        expires = self.clock() + FETCH_TOTAL_DEADLINE
+        too_slow = ToolError(f"the request took longer than {FETCH_TOTAL_DEADLINE:g} s",
+                             "fetch_timeout", 504)
         current = url
         for _ in range(MAX_REDIRECTS + 1):
-            target = check_url(current, self.resolver)
+            target = self._checked_target(current, expires - self.clock(), too_slow, check_url)
+            remaining = expires - self.clock()
+            if remaining <= 0:
+                raise too_slow
             headers = {
                 "Host": target.host_header,
                 "User-Agent": USER_AGENT,
@@ -773,7 +785,8 @@ class WebTools:
             }
             if content_type:
                 headers["Content-Type"] = content_type
-            response = self.transport(method, target, headers, body)
+            response = self.transport(method, target, headers, body,
+                                      deadline=min(FETCH_DEADLINE, remaining))
             if response.status in (301, 302, 303, 307, 308):
                 location = response.headers.get("location")
                 if not location:
@@ -860,22 +873,23 @@ class WebTools:
             return result
         raise ToolError("too many redirects", "too_many_redirects", 502)
 
-    def _checked_target(self, url, remaining: float, too_slow: ToolError) -> Target:
-        """check_url, but given up on when the name lookup outlasts the
-        deadline. The lookup cannot be stopped; its thread ends when the resolver
-        gives up (some 10 to 30 s), and counts against the VM's process limit
-        until then."""
+    def _checked_target(self, url, remaining: float, too_slow: ToolError,
+                        check: Callable[..., Target] = check_raw_url) -> Target:
+        """`check` (check_raw_url for /v1/raw, check_url for /v1/fetch), but
+        given up on when the name lookup outlasts the deadline. The lookup
+        cannot be stopped; its thread ends when the resolver gives up (some 10
+        to 30 s), and counts against the VM's process limit until then."""
         if remaining <= 0:
             raise too_slow
         outcome: dict = {}
 
-        def check():
+        def run():
             try:
-                outcome["target"] = check_raw_url(url, self.resolver)
+                outcome["target"] = check(url, self.resolver)
             except BaseException as error:
                 outcome["error"] = error
 
-        worker = threading.Thread(target=check, daemon=True)
+        worker = threading.Thread(target=run, daemon=True)
         worker.start()
         worker.join(remaining)
         if worker.is_alive():

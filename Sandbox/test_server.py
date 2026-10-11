@@ -429,6 +429,55 @@ def redirect(location, status=302, **headers):
     return Response(status, {"location": location, **headers}, b"")
 
 
+class FetchDeadlineTests(unittest.TestCase):
+    """/v1/fetch: one deadline for the whole request, not one per redirect hop."""
+
+    def setUp(self):
+        self.resolve = resolver({"example.com": ["93.184.216.34"]})
+        patches = [mock.patch.object(server, "FETCH_DEADLINE", 45.0),
+                   mock.patch.object(server, "FETCH_TOTAL_DEADLINE", 90.0)]
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def test_a_chain_of_slow_hops_stops_at_the_whole_request_deadline(self):
+        clock = FakeClock()
+        transport = ClockedTransport({
+            f"https://example.com/{n}": redirect(f"/{n + 1}") for n in range(5)}, clock, 40)
+        tools = WebTools(resolver=self.resolve, transport=transport, searxng_url="", clock=clock)
+        with self.assertRaises(ToolError) as caught:
+            tools.fetch("https://example.com/0")
+        self.assertEqual(caught.exception.code, "fetch_timeout")
+        self.assertEqual(caught.exception.status, 504)
+        # The third hop gets the 10 s that are left; there is no fourth request.
+        self.assertEqual(transport.deadlines, [45, 45, 10])
+
+    def test_a_fast_chain_is_not_cut(self):
+        clock = FakeClock()
+        transport = ClockedTransport({
+            "https://example.com/0": redirect("/1"),
+            "https://example.com/1": page(ARTICLE)}, clock, 2)
+        tools = WebTools(resolver=self.resolve, transport=transport, searxng_url="", clock=clock)
+        self.assertEqual(tools.fetch("https://example.com/0")["url"], "https://example.com/1")
+        self.assertEqual(transport.deadlines, [45, 45])
+
+    def test_a_name_lookup_that_never_ends_is_given_up_on(self):
+        release = threading.Event()
+        self.addCleanup(release.set)
+
+        def hanging(host, port):
+            release.wait(30)
+            return ["93.184.216.34"]
+
+        with mock.patch.object(server, "FETCH_TOTAL_DEADLINE", 0.3):
+            tools = WebTools(resolver=hanging, transport=FakeTransport({}), searxng_url="")
+            started = time.monotonic()
+            with self.assertRaises(ToolError) as caught:
+                tools.fetch("https://example.com/a")
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual(caught.exception.code, "fetch_timeout")
+
+
 class RawTests(unittest.TestCase):
     """WebTools.raw, the code behind POST /v1/raw."""
 
@@ -882,12 +931,13 @@ class RawTests(unittest.TestCase):
             "https://example.com/a": redirect("http://other.example/b"),
             "http://other.example/b": page(ARTICLE)})
         # /v1/fetch still follows a redirect from https to http, still asks for
-        # gzip, still sends a language, still caches, and sets no deadline or limit.
+        # gzip, still sends a language, still caches, and sets no byte limit. Its
+        # deadline is the per-hop one, capped by the whole-request one.
         self.assertEqual(tools.fetch("https://example.com/a")["url"], "http://other.example/b")
         headers = self.transport.calls[0][2]
         self.assertEqual(headers["Accept-Encoding"], "gzip")
         self.assertIn("Accept-Language", headers)
-        self.assertEqual(self.transport.deadlines, [None, None])
+        self.assertEqual(self.transport.deadlines, [server.FETCH_DEADLINE] * 2)
         self.assertEqual(self.transport.limits, [None, None])
         tools.fetch("https://example.com/a")
         self.assertEqual(len(self.transport.calls), 2)
@@ -1351,7 +1401,7 @@ class SearchTests(unittest.TestCase):
             def __init__(self, failures, code="fetch_failed"):
                 self.failures, self.code, self.calls = failures, code, 0
 
-            def __call__(self, method, target, headers, body):
+            def __call__(self, method, target, headers, body, **options):
                 self.calls += 1
                 if self.calls <= self.failures:
                     raise ToolError("request to html.duckduckgo.com failed: "
@@ -1846,7 +1896,7 @@ class AddressCheckScriptTests(unittest.TestCase):
             return ["93.184.216.34"]
 
         class Everything:
-            def __call__(self, method, target, headers, body):
+            def __call__(self, method, target, headers, body, **options):
                 return page(ARTICLE)
 
         code, text = self.run_script(resolver, Everything(), "--only", "names")
