@@ -20,10 +20,11 @@ on your Mac.
 - The app checks that the model server is not reachable from the network and
   runs a sandbox security check on request.
 - The model server card can start and stop `TUFFServer` or `llama-server`
-  (Start server / Stop server; not yet tested on a Mac): no shell, 127.0.0.1
-  only, llama.cpp only with its key file. Stop server, or quitting normally,
-  stops only a server the app started. After a crash or Force Quit the server
-  can keep running; the next launch finds it and offers Stop. The program check
+  (Start server / Stop server): no shell, 127.0.0.1 only, llama.cpp only with
+  its key file. Stop server, or quitting normally, stops only a server the app
+  started. In the Mac test a Force Quit from the Dock ended the server together
+  with the app; after a crash or `kill -9` it can keep running, and the next
+  launch finds it and offers Stop. The program check
   reads Unix owner and permission bits only (no ACLs, no external-volume check),
   and a second SandSeek would take over the first one's server. TUFF has no
   Host-header check, so quit the server when you do not use it. The flag names
@@ -31,7 +32,9 @@ on your Mac.
 - Reports are saved as JSON and Markdown and can be reopened in the app.
 
 Tested on an Apple silicon Mac with 16 GB, macOS 27.0.1, Apple `container`
-1.5.0, TUFF 8.3.1 and Qwen3.6 35B-A3B.
+1.5.0, TUFF 8.3.1 and Qwen3.6 35B-A3B. Start server / Stop server was tested
+by hand with TUFF 8.3.11 and llama.cpp; stopping a server while its model is
+still loading was not tested.
 
 Known limits:
 

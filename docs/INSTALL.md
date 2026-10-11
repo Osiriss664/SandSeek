@@ -72,9 +72,10 @@ only. You can start the server yourself, or click **Start server** on the model
 server card: SandSeek then runs the program you chose (`TUFFServer` or
 `llama-server`) without a shell, on 127.0.0.1 and the port of the card's
 address, and **Stop server** (or quitting SandSeek normally) stops it again. It
-stops only a server it started. After a crash or Force Quit a server SandSeek
-started can keep running (macOS cannot end it for us): the next launch finds it
-and offers **Stop server**, or quit it in Activity Monitor. Run only one SandSeek
+stops only a server it started. After a crash or `kill -9` a server SandSeek
+started can keep running (in our test a Force Quit from the Dock ended it with
+the app): the next launch finds it and offers **Stop server**, or quit it in
+Activity Monitor. Run only one SandSeek
 at a time: a second one would take over the first one's server as a leftover and
 stop it when it quits.
 

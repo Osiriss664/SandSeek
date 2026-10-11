@@ -1,4 +1,8 @@
-# SandSeek
+<p align="center">
+  <img src="docs/assets/sandseek-logo.svg" alt="SandSeek logo: a magnifying glass over sand dunes" width="150">
+</p>
+
+<h1 align="center">SandSeek</h1>
 
 SandSeek answers a question by searching the web and reading pages with a
 local model, and returns an answer with numbered sources. The model runs on
@@ -11,7 +15,8 @@ pages, no OCR), parsed inside the VM.
 Status: 0.1.0, the first release. SandSeek began in a fork of TUFF. The command-line tool,
 the core library and the Mac app (a window with the same research loop) are one
 Swift package. Built, tested and tried by hand on a Mac with macOS 27, TUFF
-8.3.1 and Qwen3.6 35B (11 October 2026).
+8.3.1 and Qwen3.6 35B (11 October 2026); Start server was tried with TUFF 8.3.11
+and llama.cpp.
 
 ## How it works, in one minute
 
@@ -23,18 +28,22 @@ Swift package. Built, tested and tried by hand on a Mac with macOS 27, TUFF
 4. The model writes an answer with numbered sources. SandSeek saves it as a
    report you can reopen later.
 
+![How SandSeek works: the app and the model run on your Mac, a throwaway VM does the web searching and page reading](docs/assets/how-it-works.svg)
+
 Your question and the answer stay on your Mac; only search words and page
 addresses go to the internet. More in [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md).
 
 ## Quick start
 
-1. Install [Apple `container`](https://github.com/apple/container) and start
-   TUFF (8.3.1 or newer) with its Background API on.
+1. Install [Apple `container`](https://github.com/apple/container) and TUFF
+   (8.3.1 or newer). Either turn on TUFF's Background API, or let SandSeek
+   start TUFF's server for you (**Start server**, step 3).
 2. Download `SandSeek-0.1.0.zip` from the release page, unzip it and move
    SandSeek to Applications. It is not notarized: on first launch choose
    System Settings → Privacy & Security → Open Anyway.
-3. Open SandSeek, press **Check** on the model server card and **Start
-   Sandbox**, then ask your first question.
+3. Open SandSeek. On the model server card press **Check** (or choose the
+   server program once and press **Start server**), then **Start Sandbox**,
+   and ask your first question.
 
 Step by step: [docs/INSTALL.md](docs/INSTALL.md).
 

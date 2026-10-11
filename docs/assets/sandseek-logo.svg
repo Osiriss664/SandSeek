@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="t">
+  <title id="t">SandSeek logo: a magnifying glass over sand dunes</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1F3A5F"/>
+      <stop offset="1" stop-color="#0F2236"/>
+    </linearGradient>
+    <linearGradient id="dune1" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#F2C879"/>
+      <stop offset="1" stop-color="#D99A3E"/>
+    </linearGradient>
+    <linearGradient id="dune2" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#E3A954"/>
+      <stop offset="1" stop-color="#B9772A"/>
+    </linearGradient>
+    <clipPath id="lens"><circle cx="112" cy="112" r="62"/></clipPath>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#bg)"/>
+  <!-- view through the lens -->
+  <g clip-path="url(#lens)">
+    <rect x="40" y="40" width="150" height="150" fill="#9CC9E8"/>
+    <circle cx="140" cy="86" r="14" fill="#FFF3C4"/>
+    <path d="M40 140 C 70 112, 100 112, 128 132 C 150 148, 170 128, 190 118 L190 190 L40 190 Z" fill="url(#dune1)"/>
+    <path d="M40 160 C 72 146, 104 150, 132 166 C 154 178, 172 170, 190 160 L190 190 L40 190 Z" fill="url(#dune2)"/>
+  </g>
+  <!-- lens rim and handle -->
+  <circle cx="112" cy="112" r="62" fill="none" stroke="#F5F7FA" stroke-width="14"/>
+  <path d="M158 158 L204 204" stroke="#F5F7FA" stroke-width="22" stroke-linecap="round"/>
+</svg>

@@ -422,17 +422,18 @@ does and does not do:
   **Stop server** and when you quit it normally (a plain SIGTERM to SandSeek is
   turned into a normal quit). It does not stop a server it did not start, with
   one exception: if you run SandSeek twice, the second one takes the first one's
-  server over as a leftover, and stops it when it quits. **A crash, Force Quit,
-  `kill -9` or Xcode's Stop button leave the server running**, because macOS has
-  no way to end a child when its parent dies. The next launch finds it again if
+  server over as a leftover, and stops it when it quits. **A crash, `kill -9` or
+  Xcode's Stop button can leave the server running**, because SandSeek gets no
+  chance to stop it. (In the Mac test a Force Quit from the Dock ended the server
+  together with the app; do not rely on that.) The next launch finds it again if
   the process id, start time and program match, and offers Stop; it never stops
   it by itself. TUFF has no `Host` header check (above), so quit the server when
   you are not using it.
 
 ## Known limits
 
-- **A started model server can outlive SandSeek.** After a crash or Force Quit
-  it keeps running with the model in memory until the next launch of SandSeek
+- **A started model server can outlive SandSeek.** After a crash or `kill -9`
+  it can keep running with the model in memory until the next launch of SandSeek
   (which offers to stop it) or until you quit it in Activity Monitor.
 - **Public egress.** The VM's firewall lets it reach any public address on any
   port and protocol. Only the sandbox server itself is limited to http on port
