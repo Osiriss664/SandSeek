@@ -43,9 +43,19 @@ addresses go to the internet. More in [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.m
    - **llama.cpp** (`llama-server`), experimental in 0.1.0.
 
    Ollama and LM Studio are planned; other servers are not supported yet.
-2. Download `SandSeek-0.1.0.zip` from the release page, unzip it and move
-   SandSeek to Applications. It is not notarized: on first launch choose
-   System Settings → Privacy & Security → Open Anyway.
+2. Get the app, in one of two ways:
+   - **Download:** `SandSeek-0.1.0.zip` from the release page, unzip it and
+     move SandSeek to Applications. It is not notarized: on first launch
+     choose System Settings → Privacy & Security → Open Anyway.
+   - **Build it yourself:** with Xcode 26 or its command line tools (Swift
+     6.2 or newer; 0.1.0 was built on macOS 27):
+
+         git clone https://github.com/Osiriss664/SandSeek.git
+         cd SandSeek
+         Scripts/package_app.sh
+
+     The app is then `build/SandSeek.app`; move it to Applications. An app
+     you built yourself opens without "Open Anyway".
 3. Open SandSeek and choose your server on the model server card. Either
    start the server yourself and press **Check**, or choose its program once
    and press **Start server** (TUFF and llama.cpp). Then press **Start
