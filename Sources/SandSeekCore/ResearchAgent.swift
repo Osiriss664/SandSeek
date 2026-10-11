@@ -2425,6 +2425,17 @@ public struct ResearchAgent: Sendable {
 
     private func openPage(url: String, offset: Int, state: inout State,
                           maxCharacters: Int? = nil) async -> String {
+        if let site = State.siteName(of: url),
+           state.siteFailures[site, default: 0] >= State.failuresBeforeSkippingSite {
+            // A site that refused or failed three times (zeit.de answered 403
+            // 36 times in the Berlin run) would only use up more steps.
+            state.refusedRepeats += 1
+            onEvent(.toolFailed("open_page: \(site) failed \(State.failuresBeforeSkippingSite) "
+                + "times, not tried again"))
+            return "Not opened: \(Self.sanitized(site, markers: state.markers)) failed "
+                + "\(State.failuresBeforeSkippingSite) times (access refused or an error). "
+                + "Open pages from other sites."
+        }
         do {
             onEvent(.reading(url))
             let readCharacters = maxCharacters ?? options.readCharacters
@@ -2486,6 +2497,7 @@ public struct ResearchAgent: Sendable {
                                    requested: state.requested, pagesRead: state.sources.count,
                                    markers: state.markers)
         } catch let failure as ResearchToolFailure {
+            if let site = State.siteName(of: url) { state.siteFailures[site, default: 0] += 1 }
             onEvent(.toolFailed(failure.message))
             return "Tool error: \(Self.sanitized(failure.message, markers: state.markers))"
         } catch {
@@ -3285,6 +3297,15 @@ public struct ResearchAgent: Sendable {
         var droppedUnreadCitations: [Int] = []
         /// The markers around web text in this run.
         var markers = Markers.fixed
+        /// How often reading a page failed, per site (host without `www.`).
+        var siteFailures: [String: Int] = [:]
+        static let failuresBeforeSkippingSite = 3
+
+        /// The site of an address, for counting failures; nil when it has none.
+        static func siteName(of url: String) -> String? {
+            guard let host = URL(string: url)?.host?.lowercased(), !host.isEmpty else { return nil }
+            return host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+        }
 
         /// The server's tokens held fewer characters than estimated: the
         /// estimate and the measured ratio both shrink a quarter.
@@ -3390,20 +3411,31 @@ public struct ResearchAgent: Sendable {
                     .map { $0 + 1 } ?? messages.count
             let stems = keywordStems()
             var changed = false
-            for level in 0...3 {
+            // Page text goes last: searches, errors and drafts are cut first, then
+            // pages to their best passages, and a page is cut to one line only
+            // in an emergency. Without that, a run that keeps searching after its
+            // last page read shortened every page away, and the model answered
+            // from titles (Berlin on 1730d4f and 574ad72).
+            for level in 0...4 {
                 for index in candidates where size(overhead: overhead) > target
-                    && (level == 3 || index < currentTurn) {
+                    && (level == 4 || index < currentTurn) {
                     guard case .object(var message) = messages[index],
                           let content = message["content"]?.stringValue else { continue }
+                    let isPage = Self.isPageResult(content, markers: markers)
                     let shorter: String?
                     switch level {
                     case 0: shorter = repeatedRead(at: index) ? Self.firstLineOnly(
                         content, note: "(Shortened: the same text appears again below.)") : nil
-                    case 1, 2: shorter = Self.shortened(
+                    case 1: shorter = isPage ? nil : Self.shortened(
                         message, content: content,
-                        passageLimit: Self.keptPassageCharacters[level - 1], stems: stems,
+                        passageLimit: Self.keptPassageCharacters[0], stems: stems,
                         markers: markers)
-                    default: shorter = Self.lastResort(message, content: content, markers: markers)
+                    case 2, 3: shorter = isPage || level == 3 ? Self.shortened(
+                        message, content: content,
+                        passageLimit: Self.keptPassageCharacters[level - 2], stems: stems,
+                        markers: markers) : nil
+                    default: shorter = isPage && !emergency ? nil
+                        : Self.lastResort(message, content: content, markers: markers)
                     }
                     guard let shorter, shorter.count < content.count else { continue }
                     message["content"] = .string(shorter)
@@ -3429,6 +3461,12 @@ public struct ResearchAgent: Sendable {
                 removed = true
             }
             return removed
+        }
+
+        /// A tool result or auto-opened pages that carries page text: it has an
+        /// untrusted block and is no list of search results.
+        static func isPageResult(_ content: String, markers: Markers) -> Bool {
+            content.contains(markers.open) && !content.hasPrefix("Search results for ")
         }
 
         /// Whether a later message holds the same page text, read again.

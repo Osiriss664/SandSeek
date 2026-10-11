@@ -3335,6 +3335,58 @@ struct ResearchAgentTests {
         #expect(codes[0] != codes[1])
     }
 
+    @Test func compactionKeepsPassagesOfPagesAndCutsSearchesAndErrorsFirst() {
+        var state = ResearchAgent.State(question: "Berlin Zeitung")
+        let search = ResearchAgent.formatSearch(query: "berlin zeitung", results: (1...5).map {
+            ResearchSearchResult(title: "Result \($0)", url: "https://r\($0).example/",
+                                 snippet: String(repeating: "snippet text ", count: 30))
+        })
+        state.messages = [
+            .object(["role": .string("system"), "content": .string("s")]),
+            .object(["role": .string("user"), "content": .string(state.question)]),
+            Self.toolMessage("a", Self.pageResult(1, url: "https://a.example/")),
+            Self.toolMessage("s", search),
+            Self.toolMessage("b", Self.pageResult(2, url: "https://b.example/")),
+        ]
+        // Far under what fits: the search goes to one line, the page keeps its
+        // best passage, and only an emergency cuts it to one line.
+        state.compact(toFit: 200)
+        let page = state.messages[2]["content"]?.stringValue ?? ""
+        #expect(page.contains(ResearchAgent.untrustedOpen))
+        #expect(page.contains("Zeitung"))
+        #expect(state.messages[3]["content"]?.stringValue?.contains("snippet text") == false)
+        #expect(state.messages[4]["content"] == .string(Self.pageResult(2, url: "https://b.example/")))
+        state.compact(toFit: 200, emergency: true)
+        #expect(state.messages[2]["content"]
+            == .string("Source [1]: Page 1\n(Earlier result shortened to save context.)"))
+    }
+
+    @Test func aSiteThatFailedThreeTimesIsNotTriedAgain() async throws {
+        let failing = "https://blocked.example/"
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "open_page", #"{"url":"\#(failing)a"}"#),
+                                ("b", "open_page", #"{"url":"\#(failing)b"}"#),
+                                ("c", "open_page", #"{"url":"\#(failing)c"}"#)]),
+            FakeServices.calls([("d", "open_page", #"{"url":"\#(failing)d"}"#)]),
+            FakeServices.answer("Nichts gelesen."),
+            FakeServices.answer("Nichts gelesen."),
+        ]) { path, body in
+            if path == "/v1/fetch" {
+                return FakeServices.json(403, .object(["error": .string("access denied")]))
+            }
+            return FakeServices.webPages(path, body)
+        }
+        var options = ResearchOptions()
+        options.nudges = false
+        options.onlySeenURLs = false
+        _ = try? await agent(services, options: options).run(question: "q")
+        // Three fetches failed; the fourth address of the same site is not tried.
+        #expect(services.requests.filter { $0.url.path == "/v1/fetch" }.count == 3)
+        let refused = messages(services.modelRequests[2]).last?["content"]?.stringValue ?? ""
+        #expect(refused.hasPrefix("Not opened: blocked.example failed 3 times"))
+        #expect(ResearchAgent.State.siteName(of: "https://www.Zeit.de/a/b") == "zeit.de")
+    }
+
     @Test func compactionFallsBackToOneLinePerResult() {
         var state = ResearchAgent.State(question: "Berlin Zeitung")
         state.messages = [
@@ -3344,7 +3396,7 @@ struct ResearchAgentTests {
             Self.toolMessage("b", Self.pageResult(2, url: "https://b.example/")),
             Self.toolMessage("c", Self.pageResult(3, url: "https://c.example/")),
         ]
-        state.compact(toFit: 200)
+        state.compact(toFit: 200, emergency: true)
         #expect(state.messages[2]["content"]
             == .string("Source [1]: Page 1\n(Earlier result shortened to save context.)"))
         #expect(state.messages[3]["content"]
