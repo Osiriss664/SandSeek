@@ -53,7 +53,7 @@ Apple `container` software, and the model weights you chose.
 
 | Boundary | What crosses it | What holds it |
 | --- | --- | --- |
-| Web → sandbox VM | page bytes | read-only VM, firewall, no root, parser in a time-limited child process, address checks |
+| Web → sandbox VM | page bytes | read-only VM, firewall (outbound and inbound), no root, extractor and fallback parser in time-limited child processes, address checks, one deadline per request |
 | Sandbox VM → Mac | cleaned page text and search results over 127.0.0.1:9100 | the VM cannot call the Mac (except DNS); the Mac calls the VM; text is cleaned again on the Mac |
 | Text → model | tool results | fenced as untrusted; the model has nothing dangerous to call |
 | Model → tools | `web_search`, `open_page` | only these two exist; unknown tool names are refused by the loop; addresses must have been shown to the model |
@@ -73,9 +73,17 @@ These hold as long as the design is intact and the VM boundary holds.
 - **Tool results are marked untrusted.** Every page is wrapped in markers that
   the system prompt tells the model to treat as information only. Copies of
   the markers inside a page are removed repeatedly, so a page cannot close the
-  block early, even by splitting a marker around another copy. The markers are
-  advice to the model, not a guarantee. The guarantee is that the model has no
-  tool that could do harm.
+  block early, even by splitting a marker around another copy. `<<<` and `>>>`
+  (and their full-width forms) are made harmless in page text in every marker
+  mode, not only with a per-run code, so a page cannot write a marker with extra
+  blanks. Two things from a page stand in the loop's own lines before a block:
+  its title and its final address. They are cut (120 and 300 characters), put
+  on one line, stripped of control and invisible characters and of anything
+  that looks like a marker, and so are addresses echoed in a tool error or the
+  redirect refusal (400 characters). They are still text from the page, so a
+  short instruction there can reach the model; the model has nothing but
+  search and read to act with. The markers are advice to the model, not a
+  guarantee. The guarantee is that the model has no tool that could do harm.
 - **Web text cannot drive your terminal or hide from you.** Control characters
   (such as escape sequences that clear the screen or change the window title)
   and every Unicode format character, plus fillers, most variation selectors
@@ -104,13 +112,20 @@ These hold as long as the design is intact and the VM boundary holds.
   public internet or to DNS on the Mac. The Mac itself, your local network,
   carrier-grade NAT, link-local and cloud metadata addresses are refused. The
   firewall is loaded before the server starts, and the sandbox refuses to
-  start without it.
+  start without it. Inbound, the VM accepts new connections on port 9100 only
+  (plus replies and loopback); the server listens on 0.0.0.0 because the
+  published port reaches the VM's network address, not its loopback, and the
+  Mac side is published on 127.0.0.1 only. A client that connects and goes
+  silent is dropped after 30 seconds.
 - **The sandbox fetches public addresses only.** It resolves each name, refuses
   the request if any answer is not public (loopback, private, link-local,
   shared, multicast, reserved, and IPv6 forms that carry an IPv4 address such
   as NAT64, 6to4 and Teredo), connects to the address it checked, and checks
   every redirect again. Only http on port 80 and https on port 443; at most
-  5 MB and 45 seconds per request; only HTML and plain text.
+  5 MB; 45 seconds per hop and 90 seconds for a whole request with its
+  redirects and name lookups; only HTML and plain text. Runs of blanks in a
+  plain-text page are collapsed, and a page is split into passages line by
+  line, so a page made of millions of spaces costs one pass, not hours.
 - **`POST /v1/raw` returns the site's bytes, not cleaned text.** It is for a
   program that reads pages itself, such as TUFF's page reader when that option
   is turned on; SandSeek's own research loop never calls it. It makes the same
@@ -136,6 +151,9 @@ These hold as long as the design is intact and the VM boundary holds.
   origins).
 - **Reports load nothing.** Markdown images become plain links, `<` is
   escaped, and links to anything but http and https are reduced to text. The
+  client refuses a page address from the sandbox that is not http or https,
+  search results with such an address are dropped, and the report's list of
+  sources prints one as text, never as a link. The
   app shows web text as plain text, never loads images, and opens a source in
   your browser only after you confirm its full address.
 - **The app checks before every question.** It reads the firewall rules and the
@@ -182,9 +200,20 @@ These hold as long as the design is intact and the VM boundary holds.
 - **Any program on your Mac can call the sandbox** on 127.0.0.1:9100 and have
   public pages fetched through it. That is the same trust boundary as any local
   server. Browser pages cannot (Host check, JSON only).
-- **Other containers on the same Apple container network** can reach the VM's
-  port directly, because only outbound traffic is filtered. There are none
-  today.
+- **Other containers on the same Apple container network** can still reach
+  port 9100 of the VM directly: the inbound firewall allows that port because
+  the published port needs it, and a caller can send any `Host` header. Every
+  other inbound port is closed. There are no other containers today.
+- **The search path through SearXNG** (`SEARXNG_URL`, the operator's own
+  service) follows no redirect and uses no proxy from the environment, but it
+  is the one request that skips the public-address check; the firewall's single
+  exception for its address and port is what limits it.
+- **The text parsers can still be slow.** The extractor and the fallback HTML
+  parser run in child processes that are killed after 15 and 10 seconds, and the
+  DuckDuckGo results parser reads at most 500 000 characters in the server's own
+  process. A page that makes them slow costs the read, not the server. The
+  Python in the base image may predate the fix for CVE-2025-6069 (html.parser);
+  the build log prints the version to check.
 
 ## Model servers: host check and exposure
 
@@ -276,7 +305,7 @@ Durations are estimates from earlier runs on a 16 GB MacBook Air.
 
 | Test | What it checks | How to run | Expect | Time |
 | --- | --- | --- | --- | --- |
-| Sandbox self-test | the sandbox refuses the Mac, loopback, private ranges, metadata addresses, odd ports and schemes; the firewall is loaded; the server runs as user 10001 with no capabilities; raw connections from inside the VM to the Mac, the router addresses and the metadata address fail; every TCP port on the Mac is tried (only DNS may answer); a foreign `Host` and a browser-style POST are refused; a public page loads | `Scripts/research_sandbox.sh selftest` (also the app's **Security check**) | `all sandbox checks passed` | about 1 min |
+| Sandbox self-test | the sandbox refuses the Mac, loopback, private ranges, metadata addresses, odd ports and schemes; the firewall is loaded and drops inbound connections except to port 9100; the server runs as user 10001 with no capabilities; raw connections from inside the VM to the Mac, the router addresses and the metadata address fail; every TCP port on the Mac is tried (only DNS may answer); a foreign `Host` and a browser-style POST are refused; a public page loads | `Scripts/research_sandbox.sh selftest` (also the app's **Security check**) | `all sandbox checks passed` | about 1 min |
 | Address check | 98 addresses (private, loopback, link-local, IPv6 forms, numeric spellings, `localhost`, names that resolve to private addresses, bad schemes and ports) are refused, sent straight to the sandbox with no model; a public page still loads | `python3 Scripts/research_address_check.py` | `RESULT: pass`, exit 0 | 1 to 3 min |
 | Sandbox unit tests | the address policy, fetching, redirects, extraction, cleaning, the HTTP API, and the address check's list against the real policy; no network | `python3 -m unittest Sandbox/test_server.py` | `OK` | seconds |
 | Swift tests | the research loop with fake services, the command, the app logic, streaming, the exposure check | `swift test` | all pass | minutes |
@@ -377,7 +406,12 @@ came from.
   and re-checked: terminal escape codes in page titles, a pattern a crafted page
   could use to freeze the title search, a VM that could have reached the Mac and
   the local network, unseen addresses opened by the loop, and the invisible
-  Unicode characters that were not removed.
+  Unicode characters that were not removed. A later read-only review of the
+  sandbox and the loop found a quadratic pattern in the passage splitter, page
+  titles and addresses outside the markers, and a few smaller points; those are
+  fixed as described above. The inbound firewall rule needs a Mac to be
+  checked: the self-test's new line and `/health` from the Mac show that the
+  published port still works.
 - **On a real Mac** (MacBook Air M5, 16 GB, macOS 26): the sandbox tests, the
   self-test and the injection pages passed with Qwen3.6 35B-A3B on TUFF. The
   original set was resisted in every run so far (5/5 in the latest). Gemma 4
