@@ -3232,10 +3232,12 @@ public struct ResearchAgent: Sendable {
         /// The share of the measured characters per token that is kept, so the
         /// estimate holds a tenth in hand.
         static let calibrationMargin = 0.9
+        /// (0.6 was tried and cut old pages down to one line too early: the Berlin
+        /// run on 1730d4f lost its page text and invented figures.)
         /// Shortening goes down to this share of the budget, so that the next
         /// turns fit without shortening again: each shortening makes the
         /// server read the prompt again, about a minute on a local model.
-        static let compactionTargetShare = 0.6
+        static let compactionTargetShare = 0.75
         /// The last ratio the server measured, before the margin and the range.
         var measuredCharactersPerToken: Double?
         /// Source numbers taken out of the final answer because no page was
