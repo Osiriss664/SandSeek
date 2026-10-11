@@ -21,9 +21,11 @@ Linux VM (Apple container)
   web sandbox         searches, downloads pages, turns them into plain text
 ```
 
-- **The model server** is a program you start yourself: TUFF (8.3.1 or newer) or
-  llama.cpp's `llama-server`. SandSeek connects to it and never starts or stops
-  it. SandSeek talks to it only on 127.0.0.1. Start it so that it listens on
+- **The model server** is TUFF (8.3.1 or newer) or llama.cpp's `llama-server`.
+  You can start it yourself, or let SandSeek start it with **Start server**
+  (only `TUFFServer` or `llama-server`, on 127.0.0.1, without a shell). SandSeek
+  stops a server it started when you quit it normally, and never stops one you
+  started. SandSeek talks to it only on 127.0.0.1. Start it so that it listens on
   127.0.0.1 only (see [INSTALL.md](INSTALL.md)); SandSeek's **Check** warns if it
   is reachable from the network.
 - **SandSeek** is the loop. It asks the model for the next step, does what the

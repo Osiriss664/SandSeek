@@ -62,7 +62,9 @@ Step by step: [docs/INSTALL.md](docs/INSTALL.md).
   `--server-type llamacpp` with plain requests (no streaming), the app's
   Thinking switch has no effect on it yet, and it was probed but not measured
   with a research run. The app connects to a
-  server that already runs; it never starts one.
+  server that runs on 127.0.0.1, and can also start `TUFFServer` or
+  `llama-server` itself (**Start server** on the model server card). It stops
+  only a server it started, when you quit it normally.
 - A Swift 6.2 toolchain to build
 
 ## Build

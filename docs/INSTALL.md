@@ -67,16 +67,36 @@ such a debug build at your checkout.
 
 ## Start a model server safely
 
-SandSeek never starts a model server. It connects to one that already runs, on
-this Mac's loopback address (127.0.0.1) only. **Start the server so that it
-listens on 127.0.0.1 only**, never on all addresses: a server that listens on
-the network can be used by every machine on it. SandSeek checks this for you
-(see below), but the safe start is the better protection.
+SandSeek connects to a model server on this Mac's loopback address (127.0.0.1)
+only. You can start the server yourself, or click **Start server** on the model
+server card: SandSeek then runs the program you chose (`TUFFServer` or
+`llama-server`) without a shell, on 127.0.0.1 and the port of the card's
+address, and **Stop server** (or quitting SandSeek normally) stops it again. It
+stops only a server it started. After a crash or Force Quit a server SandSeek
+started can keep running (macOS cannot end it for us): the next launch finds it
+and offers **Stop server**, or quit it in Activity Monitor.
+
+**The server must listen on 127.0.0.1 only**, never on all addresses: a server
+that listens on the network can be used by every machine on it. Started from
+the card it does. If you start it yourself, SandSeek checks this for you (see
+below), but the safe start is the better protection.
 
 ### TUFF
 
-Start TUFF's **Background API** on its Server screen, or run `tuff serve`.
-TUFF listens on 127.0.0.1:8080 and nowhere else; do not change that. Check it:
+Either click **Start server** in SandSeek, or start TUFF's **Background API** on
+its Server screen, or run `tuff serve`. TUFF listens on 127.0.0.1:8080 unless
+you change the port, and nowhere else.
+
+To use the button, choose the program once. SandSeek always starts `TUFFServer`
+itself, because stopping `tuff` would leave the `TUFFServer` it started running
+with the model loaded. So choose `TUFFServer` (in a clone:
+`.build/release/TUFFServer`), or `tuff` or `TUFF.app`, and SandSeek uses the
+`TUFFServer` beside it; the card shows the path that will run. SandSeek passes
+only `--port` (from the card's address) and, if you chose a models folder,
+`--models-root`. Without a folder TUFFServer uses the installed TUFF's models
+folder; a TUFF built from a clone keeps its models in `<clone>/scratch`, so
+choose that folder. `TUFF_*` settings in your environment do not apply to a
+server SandSeek starts. Check it:
 
 ```sh
 curl -s http://127.0.0.1:8080/tuff/v1/status
@@ -84,7 +104,9 @@ curl -s http://127.0.0.1:8080/tuff/v1/status
 
 An answer with a version number means it runs. TUFF 8.3.1 has no check of the
 `Host` header, so quit the server when you are not using it (see
-[SECURITY.md](SECURITY.md)).
+[SECURITY.md](SECURITY.md)). If you start it with the button, it is easy to
+leave it running for hours with the window open: click **Stop server** when you
+are done.
 
 ### llama.cpp
 
@@ -107,7 +129,10 @@ using the server.
    chmod 600 ~/Library/Application\ Support/SandSeek/State/llamacpp-api-key
    ```
 
-2. Run the command in Terminal. It looks like this:
+2. Click **Start server** after choosing `llama-server` and a `.gguf` model on
+   the card. SandSeek starts it only when the key file exists, belongs to you,
+   has mode 0600 and holds the key; it never starts llama-server without the
+   key. Or run the command in Terminal. It looks like this:
 
    ```sh
    llama-server -m <model.gguf> --alias <name> --host 127.0.0.1 --port 8081 \
@@ -119,7 +144,20 @@ using the server.
    context, `--jinja` turns on tool calls, and `--api-key-file` makes the server
    ask for the key. Do not use `--api-key <key>`: it would show the key in the
    process list and your shell history. The `sandseek` command takes the same
-   file: `--api-key-file <path>`.
+   file: `--api-key-file <path>`. The button runs the same arguments (with
+   `--alias` set from the model's file name), and `LLAMA_ARG_*` settings in your
+   environment do not apply to it.
+
+### If macOS asks for permission or blocks the program
+
+A server SandSeek starts counts as SandSeek for macOS privacy. A model in
+Downloads, Documents, Desktop, iCloud Drive or on an external disk makes macOS
+ask whether SandSeek may access it, and the answer is asked again after you
+rebuild the app. If you say no, the server ends with "failed to open", which the
+card shows. A program that you downloaded in a browser carries a "downloaded"
+mark and is refused: open it once from Terminal so macOS can check it. The
+server's output goes to `~/Library/Application Support/SandSeek/Logs/model-server.log`
+(readable only by you, replaced on every start, never sent to the model).
 
 ### Check that nothing else can reach the server
 
@@ -181,6 +219,8 @@ rounds the model may take (default 8). `sandseek --help` lists all options.
 | --- | --- |
 | Finished reports (Markdown and JSON) | `~/Library/Application Support/SandSeek/Reports` |
 | The llama.cpp key file | `~/Library/Application Support/SandSeek/State/llamacpp-api-key` |
+| A note that SandSeek started a model server (so a later launch can find it) | `~/Library/Application Support/SandSeek/State/model-server-started-by-app.json` |
+| The log of the model server SandSeek started | `~/Library/Application Support/SandSeek/Logs/model-server.log` |
 | The app's settings (server choice, addresses, presets, last question) | the app's preferences file in `~/Library/Preferences` (its name contains `sandseek`) |
 | The sandbox image and VM | Apple `container`: image `sandseek-sandbox:latest`, VM `sandseek-sandbox` |
 | The built app and command | `build/SandSeek.app`, `.build/release/sandseek` in your checkout |
@@ -203,7 +243,9 @@ parts you do not want, by hand. **Move things to the Trash instead of deleting
 them with a command**, so you can still get them back.
 
 1. Quit SandSeek. Stop the sandbox with **Stop Sandbox** or
-   `Scripts/research_sandbox.sh stop`, and the model server in its own window.
+   `Scripts/research_sandbox.sh stop`, and the model server (**Stop server**, or
+   its own window). Check that no `TUFFServer` or `llama-server` is left in
+   Activity Monitor.
 2. Remove the sandbox image. List the images with `container image list`, then
    remove `sandseek-sandbox:latest` with `container image delete
    sandseek-sandbox:latest` (see `container image --help` if your version names
@@ -215,8 +257,8 @@ them with a command**, so you can still get them back.
 4. **Your reports are in `~/Library/Application Support/SandSeek/Reports`.** If
    you want to keep them, copy that folder somewhere else first. Then, in
    Finder, choose Go > Go to Folder, open `~/Library/Application Support` and
-   move the `SandSeek` folder to the Trash. It holds the reports and the key
-   file; move that folder only when you no longer need either. A llama.cpp
+   move the `SandSeek` folder to the Trash. It holds the reports, the key
+   file and the model server's log; move that folder only when you no longer need either. A llama.cpp
    server started with that key file will not start again without it.
 5. In `~/Library/Preferences`, move the preferences file whose name contains
    `sandseek` to the Trash.

@@ -330,7 +330,9 @@ These hold as long as the design is intact and the VM boundary holds.
 
 ## Model servers: host check and exposure
 
-SandSeek connects to a model server that already runs. It never starts one.
+SandSeek connects to a model server on 127.0.0.1. It can start one itself
+(**Start server**, see below) and then stops it again when you quit it normally;
+a server you started yourself is never stopped by SandSeek.
 
 **TUFF 8.3.1 and llama.cpp have no check of the `Host` header.** A web page in
 your normal browser can use DNS rebinding (its own name resolves to 127.0.0.1)
@@ -346,7 +348,9 @@ does not control.
   key makes rebinding useless (the page does not have it). The app makes the
   key itself, keeps it in a file only you can read (mode 0600 in a folder with
   mode 0700) and offers a start command that names the file. The key is never
-  on a command line, in the clipboard text or in a log.
+  on a command line or in the clipboard text. A llama-server build may print the
+  last characters of the key in its own log; SandSeek leaves such lines out of
+  what it shows on the card.
 - **Network exposure.** A server that listens beyond loopback (for example
   llama-server with `--host 0.0.0.0`) is reachable from every machine on your
   network. TUFF binds to 127.0.0.1 only by itself and has no `--host` option, so
@@ -379,8 +383,44 @@ does not control.
   without a Local Network prompt; a silent address is still reported and never
   counted as clear.
 
+**Start server.** The model server card can start and stop the server. What it
+does and does not do:
+
+- It starts only a program called `TUFFServer` (a pick of `tuff` or `TUFF.app`
+  becomes the `TUFFServer` beside it) or `llama-server`, which you choose by its
+  full path. There is no shell: the arguments are a fixed list, a path with a
+  newline or control character is refused, and `--host` is always 127.0.0.1
+  (TUFFServer has no host option and always binds loopback).
+- Before each start it follows symbolic links and checks the program: a regular
+  file you can run, owned by you or root, not writable by group or others, and
+  no folder from `/` down to it owned by another user or writable by others
+  (sticky `/tmp` and root's `admin` group in `/Applications` are accepted). A
+  program marked as downloaded (quarantine) is refused. The check cannot close
+  the gap between looking and starting; it keeps other users and wrong
+  permissions out, not a program you run as yourself (see *Who is trusted*).
+- llama-server is started only with a key file that is a regular file of yours
+  with mode 0600 and holds the key; otherwise SandSeek refuses. Right before a
+  start the port is tried again, and the start is refused when anything answers
+  or the answer is unclear.
+- The server gets an environment of three variables (`PATH`, `HOME`, `TMPDIR`)
+  made from scratch, so `LLAMA_ARG_*`, `DYLD_*` and `TUFF_*` settings in your
+  environment do not reach it. Its output goes to a log file readable only by
+  you, replaced at every start.
+- After the server answers, the network check runs; if the server turns out to be
+  reachable from the network, SandSeek stops it.
+- SandSeek stops a server it started (SIGTERM, then SIGKILL after 5 seconds) on
+  **Stop server** and when you quit it normally. It never stops a server it did
+  not start. **A crash, Force Quit, `kill -9`, Xcode's Stop button or a plain
+  SIGTERM to SandSeek leave the server running**, because macOS has no way to end
+  a child when its parent dies. The next launch finds it again if the process id,
+  start time and program match, and offers Stop; it never stops it by itself. TUFF
+  has no `Host` header check (above), so quit the server when you are not using it.
+
 ## Known limits
 
+- **A started model server can outlive SandSeek.** After a crash or Force Quit
+  it keeps running with the model in memory until the next launch of SandSeek
+  (which offers to stop it) or until you quit it in Activity Monitor.
 - **Public egress.** The VM's firewall lets it reach any public address on any
   port and protocol. Only the sandbox server itself is limited to http on port
   80 and https on port 443, and that is a check in the server's code, not in the
