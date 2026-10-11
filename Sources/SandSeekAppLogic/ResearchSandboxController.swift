@@ -422,12 +422,27 @@ public final class ResearchSandboxController {
     """
 
     private func isHealthy() async -> Bool {
+        await healthProblem() == nil
+    }
+
+    /// Why the sandbox does not count as running: nil when it answers `/health`
+    /// with 200. A redirect is never followed and counts as not running.
+    private func healthProblem() async -> ResearchError? {
         do {
             try await ResearchSandboxClient(baseURL: baseURL, transport: transport).checkHealth()
-            return true
+            return nil
+        } catch let error as ResearchError {
+            return error
         } catch {
-            return false
+            return .sandboxUnavailable(error.localizedDescription)
         }
+    }
+
+    /// What a failed start adds when something else answers on the port.
+    private static func portNote(_ problem: ResearchError) -> String {
+        guard case .redirectRefused = problem else { return "" }
+        let text = problem.description
+        return " " + text.prefix(1).uppercased() + text.dropFirst()
     }
 
     /// Builds the image when it is missing or the sandbox's files changed
@@ -456,8 +471,9 @@ public final class ResearchSandboxController {
         startedByApp = true
         adoptedFromLastRun = false
         freshStarts += 1
-        guard await isHealthy() else {
-            state = .failed("The sandbox started but does not answer on \(baseURL.absoluteString).")
+        if let problem = await healthProblem() {
+            state = .failed("The sandbox started but does not answer on \(baseURL.absoluteString)."
+                + Self.portNote(problem))
             return
         }
         state = .ready
@@ -504,8 +520,9 @@ public final class ResearchSandboxController {
         }
         adoptedFromLastRun = false
         freshStarts += 1
-        guard await isHealthy() else {
-            state = .failed("The sandbox restarted but does not answer on \(baseURL.absoluteString).")
+        if let problem = await healthProblem() {
+            state = .failed("The sandbox restarted but does not answer on \(baseURL.absoluteString)."
+                + Self.portNote(problem))
             return false
         }
         state = .ready

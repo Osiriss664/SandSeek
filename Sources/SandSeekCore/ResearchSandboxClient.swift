@@ -70,6 +70,9 @@ public struct ResearchSandboxClient: Sendable {
         } catch {
             throw ResearchError.sandboxUnavailable(error.localizedDescription)
         }
+        // A 3xx is never followed (see `ResearchNoRedirectDelegate`) and is an
+        // error here, as every other answer but 200.
+        if response.isRedirect { throw ResearchError.redirectRefused(status: response.status) }
         guard response.status == 200 else {
             throw ResearchError.sandboxUnavailable("health check answered HTTP \(response.status)")
         }
@@ -150,6 +153,9 @@ public struct ResearchSandboxClient: Sendable {
         } catch {
             throw ResearchError.sandboxUnavailable(error.localizedDescription)
         }
+        // The body of a redirect is not read: nothing that answers with a 3xx
+        // is the sandbox, so nothing in it is passed on to the model.
+        if response.isRedirect { throw ResearchError.redirectRefused(status: response.status) }
         let reply = try? ResearchJSON.decode(response.body)
         guard response.status == 200, let reply else {
             let message = reply?["error"]?["message"]?.stringValue

@@ -137,6 +137,10 @@ public struct ResearchServerConnection: Equatable, Sendable {
                     kind: .tuff, version: version, streaming: stream ?? true)
             case .unreachable(let message):
                 throw ResearchError.modelUnavailable(message)
+            case .other(let status) where (300..<400).contains(status):
+                // Not "continue as TUFF": the port is answered by something
+                // that redirects, which TUFF never does.
+                throw ResearchError.redirectRefused(status: status)
             case .other(let status):
                 return ResearchServerConnection(
                     kind: .tuff, version: nil, streaming: stream ?? true,
@@ -151,6 +155,8 @@ public struct ResearchServerConnection: Equatable, Sendable {
                     kind: .tuff, version: version, streaming: stream ?? true)
             case .unreachable(let message):
                 throw ResearchError.modelUnavailable(message)
+            case .other(let status) where (300..<400).contains(status):
+                throw ResearchError.redirectRefused(status: status)
             case .other(let status):
                 throw ResearchError.invalidEndpoint(notTUFFMessage(serverURL: serverURL, status: status))
             }

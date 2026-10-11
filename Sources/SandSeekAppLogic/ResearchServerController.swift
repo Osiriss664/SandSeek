@@ -587,7 +587,8 @@ public final class ResearchServerController {
             do {
                 let response = try await transport.send(
                     method: "GET", url: health, body: nil, timeout: requestTimeout)
-                // A key refusal is found by the full look, not here.
+                // A key refusal is found by the full look, not here; so is a
+                // redirect, which is never followed.
                 return [200, 401, 403].contains(response.status) ? .alive : .changed
             } catch {
                 return .gone(describe(error))
@@ -600,6 +601,8 @@ public final class ResearchServerController {
         /// Looks like llama.cpp; `n_ctx` when it is there.
         case llamacpp(contextTokens: Int?)
         case keyRefused(Int)
+        /// A 3xx answer, which is never followed.
+        case redirected(Int)
         case notLlamaCpp(String)
         case off(String)
     }
@@ -627,6 +630,8 @@ public final class ResearchServerController {
             break
         case 401, 403:
             return .keyRefused(response.status)
+        case 300..<400:
+            return .redirected(response.status)
         default:
             return .notLlamaCpp("HTTP \(response.status) from /props")
         }
@@ -637,6 +642,13 @@ public final class ResearchServerController {
         }
         let window = settings["n_ctx"]?.intValue
         return .llamacpp(contextTokens: window.flatMap { $0 > 0 ? $0 : nil })
+    }
+
+    /// The rest of a sentence that begins "A server answers at <address>, but".
+    nonisolated static func redirectNote(_ status: Int) -> String {
+        "it answered with a redirect (HTTP \(status)), which SandSeek refuses. It never follows "
+            + "redirects from the model server, and neither TUFF nor llama.cpp redirects, so "
+            + "another program may be using this port."
     }
 
     nonisolated static func keyRefusedMessage(_ status: Int) -> String {
@@ -659,6 +671,8 @@ public final class ResearchServerController {
         switch (kind, probe) {
         case (_, .unreachable(let reason)):
             return .off(reason)
+        case (_, .other(let status)) where (300..<400).contains(status):
+            return .problem("A server answers at \(url.absoluteString), but \(redirectNote(status))")
         case (.tuff, .other(let status)):
             return .problem("A server answers at \(url.absoluteString), but not as TUFF "
                 + "(HTTP \(status) from /tuff/v1/status). TUFF older than 8.3.1 has no status "
@@ -677,6 +691,9 @@ public final class ResearchServerController {
                 contextTokens = window
             case .keyRefused(let status):
                 return .problem(keyRefusedMessage(status))
+            case .redirected(let status):
+                return .problem("A server answers at \(url.absoluteString), but "
+                    + redirectNote(status))
             case .notLlamaCpp(let detail):
                 return .problem("A server answers at \(url.absoluteString), but it does not "
                     + "look like llama.cpp (\(detail)). If it is TUFF, choose TUFF. Ollama and "
@@ -701,6 +718,9 @@ public final class ResearchServerController {
             break
         case 401, 403:
             return .problem(keyRefusedMessage(response.status))
+        case 300..<400:
+            return .problem("A server answers at \(url.absoluteString), but "
+                + redirectNote(response.status))
         default:
             return .problem("The server answered /v1/models with HTTP \(response.status).")
         }

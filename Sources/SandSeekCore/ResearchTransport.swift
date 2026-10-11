@@ -11,6 +11,11 @@ public struct ResearchHTTPResponse: Equatable, Sendable {
         self.status = status
         self.body = body
     }
+
+    /// A 3xx answer. `URLSessionResearchTransport` never follows a redirect,
+    /// so the 3xx itself comes back; every caller treats it as an error
+    /// (`ResearchError.redirectRefused`).
+    public var isRedirect: Bool { (300..<400).contains(status) }
 }
 
 /// The start of a streamed reply: the HTTP status, known as soon as the
@@ -31,6 +36,9 @@ public struct ResearchHTTPLineResponse: Sendable {
         self.status = status
         self.lines = lines
     }
+
+    /// A 3xx answer; see `ResearchHTTPResponse.isRedirect`.
+    public var isRedirect: Bool { (300..<400).contains(status) }
 
     /// A reply that is already complete, such as a test fixture or the body
     /// of a transport that cannot stream: its bytes split into lines by the
@@ -195,8 +203,53 @@ public extension ResearchHTTPTransport {
     }
 }
 
+/// Refuses every redirect, so that the 3xx answer itself is the response.
+///
+/// Both services SandSeek talks to (the sandbox and the model server) are on
+/// loopback and never redirect. A program that took over their port could
+/// answer with a 3xx and send the client to another address, with none of the
+/// address checks the sandbox makes, and a 307 or 308 would send the POST body
+/// again, possibly with the `Authorization` header (the llama.cpp key).
+///
+/// `URLSession` keeps its delegate (strongly) until the session is
+/// invalidated, so the transport's session owns it. The class has no state,
+/// which is why `@unchecked Sendable` is safe; `NSObject` is needed because
+/// `URLSessionTaskDelegate` is an Objective-C protocol.
+final class ResearchNoRedirectDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    func urlSession(_ session: URLSession,
+                    task: URLSessionTask,
+                    willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest,
+                    completionHandler: @escaping @Sendable (URLRequest?) -> Void) {
+        // nil: do not follow. The redirect response is delivered as the
+        // task's response, with its status and body.
+        completionHandler(nil)
+    }
+}
+
+/// Holds the session of a transport and ends it with the last copy of the
+/// transport. A session that has a delegate keeps that delegate, and is itself
+/// kept alive by it, until it is invalidated; without this, every transport
+/// SandSeek makes would leave its session behind. Requests still under way
+/// finish first.
+private final class ResearchSessionOwner: Sendable {
+    let session: URLSession
+
+    init(_ session: URLSession) {
+        self.session = session
+    }
+
+    deinit {
+        session.finishTasksAndInvalidate()
+    }
+}
+
 public struct URLSessionResearchTransport: ResearchHTTPTransport {
-    private let session: URLSession
+    /// The one session of this transport. `send` (`data(for:)`) and
+    /// `sendStreaming` (`bytes(for:)`) both use it, and nothing else in
+    /// SandSeek creates a URLSession, so its delegate covers every request.
+    private let owner: ResearchSessionOwner
+    private var session: URLSession { owner.session }
 
     /// Model turns can take minutes on large streamed models: Qwen3.6 35B
     /// on a 16 GB Mac needed 858 s for one turn that reasoned for its whole
@@ -208,7 +261,12 @@ public struct URLSessionResearchTransport: ResearchHTTPTransport {
         configuration.timeoutIntervalForResource = timeout
         // Both services are on loopback. A system proxy must never see them.
         configuration.connectionProxyDictionary = [:]
-        session = URLSession(configuration: configuration)
+        // Never follow a redirect (see `ResearchNoRedirectDelegate`). The
+        // session retains the delegate. A nil delegate queue gives the
+        // session its own serial queue.
+        owner = ResearchSessionOwner(URLSession(
+            configuration: configuration,
+            delegate: ResearchNoRedirectDelegate(), delegateQueue: nil))
     }
 
     public func send(method: String, url: URL, body: Data?) async throws -> ResearchHTTPResponse {
@@ -398,6 +456,9 @@ public enum ResearchError: Error, Equatable, CustomStringConvertible {
     case sandboxCannotRankPassages
     /// The model ended a turn with neither an answer nor a tool call, twice.
     case noAnswer(tokenLimit: Bool)
+    /// The sandbox or the model server answered with a 3xx. SandSeek's client
+    /// never follows redirects, and neither service redirects legitimately.
+    case redirectRefused(status: Int)
 
     public var description: String {
         switch self {
@@ -423,6 +484,10 @@ public enum ResearchError: Error, Equatable, CustomStringConvertible {
                 + "thinking. Try a larger --max-tokens, or --thinking off."
         case .noAnswer(tokenLimit: false):
             "the model ended without writing an answer. Try again, or try another model."
+        case .redirectRefused(let status):
+            "something on that port answered with a redirect (HTTP \(status)), which SandSeek "
+                + "refuses. It never follows redirects from the sandbox or the model server, "
+                + "and neither of them redirects, so another program may be using the port."
         }
     }
 }

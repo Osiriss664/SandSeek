@@ -164,6 +164,9 @@ public struct ResearchChatClient: Sendable {
         } catch {
             throw ResearchError.modelUnavailable(error.localizedDescription)
         }
+        // A 3xx is not followed and not read: nothing that answers with one is
+        // the model server.
+        if response.isRedirect { throw ResearchError.redirectRefused(status: response.status) }
         let reply = try? ResearchJSON.decode(response.body)
         guard (200..<300).contains(response.status) else {
             throw Self.requestFailure(status: response.status, body: response.body, reply: reply)
@@ -219,6 +222,9 @@ public struct ResearchChatClient: Sendable {
             if Task.isCancelled || error is CancellationError { throw CancellationError() }
             throw ResearchError.modelUnavailable(error.localizedDescription)
         }
+        // Not followed and not read, as for a plain request. Dropping the
+        // stream cancels the request and closes the connection.
+        if response.isRedirect { throw ResearchError.redirectRefused(status: response.status) }
         guard (200..<300).contains(response.status) else {
             // Refused before the stream began: the rest is an ordinary error
             // body, handled as it is without streaming.

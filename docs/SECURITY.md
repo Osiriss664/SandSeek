@@ -141,6 +141,13 @@ These hold as long as the design is intact and the VM boundary holds.
 - **Services stay on loopback from SandSeek's side.** The command and the app
   refuse a `--server` or `--sandbox` address that is not 127.0.0.1, localhost
   or ::1, and the app never sends a llama.cpp key to the sandbox's port.
+  SandSeek's own HTTP client never follows a redirect from the sandbox or the
+  model server (both are on loopback and never redirect): a 3xx answer is an
+  error, so a program that took over the port cannot send SandSeek, a POST
+  body or the llama.cpp key elsewhere. What remains: if the sandbox is not
+  running, another program on 127.0.0.1:9100 could answer with made-up pages,
+  because the loopback channel has no authentication yet. A token shared by
+  SandSeek and the sandbox is a possible later step; there is none today.
 
 ## What it does not guarantee
 
