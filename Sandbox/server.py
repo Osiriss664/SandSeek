@@ -287,6 +287,12 @@ def check_url(url: str, resolver: Callable[[str, int], list[str]]) -> Target:
             host = host.encode("idna").decode("ascii")
         except UnicodeError:
             raise ToolError("URL has an invalid internationalised host name", "invalid_url")
+        # The ideographic, fullwidth and halfwidth full stops (U+3002, U+FF0E,
+        # U+FF61) became ASCII dots in the step above, so the trailing one is
+        # dropped here, before the number check and the lookup see the host.
+        host = host.rstrip(".")
+        if not host:
+            raise ToolError("URL has no host", "invalid_url")
     try:
         port = parts.port or ALLOWED_PORTS[scheme]
     except ValueError:
