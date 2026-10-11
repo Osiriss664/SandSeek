@@ -27,9 +27,10 @@ class GatewayError(Exception):
 def default_gateway(text):
     """The gateway of the default route with the lowest metric, as a string.
 
-    /proc/net/route columns: Iface Destination Gateway Flags RefCnt Use Metric
-    Mask MTU Window IRTT; addresses are the kernel's 32-bit
-    values in host byte order, printed as hex (so "=L" below, not "<L"). A default route has
+    /proc/net/route columns: Iface Destination Gateway Flags RefCnt Use
+    Metric Mask MTU Window IRTT. The address bytes are in network order; the
+    kernel prints them as one native-endian u32 in hex, so "=L" below (not
+    "<L") turns that number back into the bytes. A default route has
     destination and mask 0, is up, and has a gateway (an on-link default route
     has gateway 0 and is skipped). Raises GatewayError when there is none or
     the address is not an ordinary unicast IPv4 address.

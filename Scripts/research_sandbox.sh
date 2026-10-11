@@ -120,9 +120,11 @@ case "${1:-}" in
     # The entrypoint refuses to start when it finds no default gateway (see
     # Sandbox/entrypoint.sh) or cannot load the firewall, and `--rm` deletes the
     # container then, so keep the last non-empty log (a later "not found" error
-    # must not replace it) to show below.
+    # must not replace it) to show below. The two flags are set from the whole
+    # log, since the last five lines shown may not contain those lines.
     startup_log=""
-    polls_after_firewall=0
+    refused=0 firewall_loaded=0 listening=0 gone=0 firewall_line=""
+    polls_after_listening=0
     for _ in $(seq 1 50); do
       if health; then
         echo "web research sandbox ready at http://127.0.0.1:$port"
@@ -130,20 +132,26 @@ case "${1:-}" in
       fi
       if out="$(container logs "$name" 2>/dev/null)" && [[ -n "$out" ]]; then
         startup_log="$(tail -n 5 <<<"$out")"
+        [[ "$out" == *"refusing to start"* ]] && refused=1
+        if [[ "$out" == *"firewall: inbound port 9100 accepted"* ]]; then
+          firewall_loaded=1
+          firewall_line="$(grep -m1 'firewall: inbound port 9100 accepted' <<<"$out")"
+        fi
+        [[ "$out" == *"SandSeek sandbox listening on"* ]] && listening=1
       fi
       # Stop early when the entrypoint refused to start or the container is gone.
-      if [[ "$startup_log" == *"refusing to start"* ]]; then
-        break
-      fi
+      (( refused )) && break
       if remaining="$(container list --all --quiet 2>/dev/null)" \
-          && ! grep -qx "$name" <<<"$remaining"; then
+          && ! grep -qxF "$name" <<<"$remaining"; then
+        gone=1
         break
       fi
-      # The server is up (the firewall is loaded) but nothing reached it: each
-      # poll can wait 2 s, so give it a few more tries, not the whole 50.
-      if [[ "$startup_log" == *"firewall: inbound port 9100 accepted"* ]]; then
-        polls_after_firewall=$((polls_after_firewall + 1))
-        (( polls_after_firewall < 10 )) || break
+      # The server listens but nothing reached it: each poll can wait 2 s, so
+      # give it a few more tries, not the whole 50. (Before the server listens,
+      # a slow start is normal: the firewall, DNS rules and imports come first.)
+      if (( listening )); then
+        polls_after_listening=$((polls_after_listening + 1))
+        (( polls_after_listening < 10 )) || break
       fi
       sleep 0.2
     done
@@ -151,9 +159,24 @@ case "${1:-}" in
       echo "sandbox log:" >&2
       printf '%s\n' "$startup_log" >&2
     fi
-    echo "sandbox started but did not answer on 127.0.0.1:$port; see: container logs $name" >&2
-    if [[ "$startup_log" == *"firewall: inbound port 9100 accepted"* ]]; then
-      echo "(port 9100 is open to the VM's default gateway only, named in the log above. If the published port connects from another address, the server is unreachable; see docs/SECURITY.md)" >&2
+    if (( refused || gone )); then
+      # `--rm` has deleted the container, so `container logs` has nothing.
+      debug_command="container run"
+      for option in "${run_options[@]}"; do
+        case "$option" in
+          --rm|--detach) ;;
+          *) debug_command+=" $(printf '%q' "$option")" ;;
+        esac
+      done
+      debug_command+=" $image"
+      echo "the sandbox container exited and was removed (it runs with --rm)." >&2
+      echo "To see why, run it once in the foreground without --rm: $debug_command" >&2
+    else
+      echo "sandbox started but did not answer on 127.0.0.1:$port; see: container logs $name" >&2
+      if (( firewall_loaded && listening )); then
+        echo "the server is listening, and the log said: $firewall_line" >&2
+        echo "(if the published port connects from another address than that gateway, the server is unreachable; see docs/SECURITY.md)" >&2
+      fi
     fi
     exit 1
     ;;
