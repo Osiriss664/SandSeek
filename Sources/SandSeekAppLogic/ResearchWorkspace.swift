@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import SandSeekCore
 
 /// Everything the Research screen works with: the model server connection,
 /// the sandbox, the run in progress, the saved reports and the presets.
