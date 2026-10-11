@@ -6473,3 +6473,64 @@ struct ResearchRangeAndDatePhraseTests {
         #expect(name.map(\.figure) == ["Marie Curie"])
     }
 }
+
+/// Answers every request with status 200 and one fixed body, as the sandbox
+/// would, or as a program that took over its port might.
+private struct CannedSandboxReply: ResearchHTTPTransport {
+    let reply: String
+
+    func send(method: String, url: URL, body: Data?) async throws -> ResearchHTTPResponse {
+        ResearchHTTPResponse(status: 200, body: Data(reply.utf8))
+    }
+}
+
+@Suite("Web research addresses from the sandbox")
+struct ResearchSandboxAddressTests {
+    private let sandbox = URL(string: "http://127.0.0.1:9100")!
+
+    @Test func aPageAddressThatIsNotHttpOrHttpsIsRefused() async throws {
+        for address in ["javascript:alert(1)", "file:///etc/passwd", "data:text/html,x",
+                        "ftp://example.com/a", " https://example.com/a", "//example.com/a"] {
+            let client = ResearchSandboxClient(baseURL: sandbox, transport: CannedSandboxReply(
+                reply: #"{"url":"\#(address)","text":"hi","title":"T","offset":0,"total_chars":2}"#))
+            await #expect(throws: ResearchToolFailure.self) {
+                _ = try await client.fetch(url: "https://example.com/", offset: 0, maxCharacters: 100)
+            }
+        }
+        let good = ResearchSandboxClient(baseURL: sandbox, transport: CannedSandboxReply(
+            reply: #"{"url":"HTTPS://example.com/a","text":"hi","title":"T","offset":0,"total_chars":2}"#))
+        let slice = try await good.fetch(url: "https://example.com/", offset: 0, maxCharacters: 100)
+        #expect(slice.url == "HTTPS://example.com/a")
+    }
+
+    @Test func searchResultsWithoutAWebAddressAreDropped() async throws {
+        let client = ResearchSandboxClient(baseURL: sandbox, transport: CannedSandboxReply(reply: """
+            {"results":[
+              {"title":"a","url":"javascript:alert(1)","snippet":"x"},
+              {"title":"b","url":"https://b.example/","snippet":"s"},
+              {"title":"c","url":"file:///etc/passwd","snippet":"x"},
+              {"title":"d","url":"http://d.example/p","snippet":"s"}]}
+            """))
+        let results = try await client.search(query: "q", maxResults: 5)
+        #expect(results.map(\.url) == ["https://b.example/", "http://d.example/p"])
+    }
+
+    @Test func theSourcesListLinksOnlyWebAddresses() {
+        let report = ResearchReport(
+            question: "q", answer: "A [1][2][3][4].",
+            sources: [
+                ResearchSource(number: 1, title: "Good", url: "https://example.com/a"),
+                ResearchSource(number: 2, title: "Script", url: "javascript:alert(1)"),
+                ResearchSource(number: 3, title: "", url: "file:///etc/passwd"),
+                ResearchSource(number: 4, title: "Plain", url: "http://example.org/b"),
+            ],
+            modelTurns: 1, budgetExhausted: false)
+        let markdown = report.markdown
+        #expect(markdown.contains("1. [Good](https://example.com/a)\n"))
+        #expect(markdown.contains("4. [Plain](http://example.org/b)\n"))
+        #expect(markdown.contains("2. Script (address removed: not http or https)\n"))
+        #expect(markdown.contains("3. (no web address) (address removed: not http or https)\n"))
+        #expect(!markdown.contains("javascript:"))
+        #expect(!markdown.contains("file:"))
+    }
+}

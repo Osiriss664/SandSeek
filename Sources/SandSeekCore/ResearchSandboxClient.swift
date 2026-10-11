@@ -103,7 +103,10 @@ public struct ResearchSandboxClient: Sendable {
             "max_results": .integer(maxResults),
         ])
         return (reply["results"]?.arrayValue ?? []).compactMap { item in
-            guard let url = item["url"]?.stringValue else { return nil }
+            // The sandbox only ever returns http and https addresses; anything
+            // else came from something that is not the sandbox, and a result
+            // with it is dropped.
+            guard let url = item["url"]?.stringValue, ResearchText.isWebURL(url) else { return nil }
             return ResearchSearchResult(
                 title: item["title"]?.stringValue ?? "",
                 url: url,
@@ -130,6 +133,13 @@ public struct ResearchSandboxClient: Sendable {
         guard let finalURL = reply["url"]?.stringValue,
               let text = reply["text"]?.stringValue else {
             throw ResearchToolFailure(message: "the sandbox returned an unreadable page")
+        }
+        // The address becomes a source in the report. The sandbox only ever
+        // reads http and https pages; a `javascript:` or `file:` address
+        // would be a link in the saved report.
+        guard ResearchText.isWebURL(finalURL) else {
+            throw ResearchToolFailure(
+                message: "the sandbox returned a page address that is not http or https")
         }
         var slice = ResearchPageSlice(
             url: finalURL,

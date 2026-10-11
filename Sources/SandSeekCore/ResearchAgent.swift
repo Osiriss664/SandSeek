@@ -191,6 +191,15 @@ public struct ResearchReport: Equatable, Sendable {
         if !sources.isEmpty {
             text += "\n## Sources\n\n"
             for source in sources {
+                // Only an http or https address becomes a link; anything else
+                // (`javascript:`, `file:`) is dropped and the title stays as text.
+                guard ResearchText.isWebURL(source.url) else {
+                    let label = source.title.isEmpty ? "(no web address)"
+                        : ResearchText.inertMarkdown(
+                            ResearchText.oneLine(source.title, limit: 300))
+                    text += "\(source.number). \(label) (address removed: not http or https)\n"
+                    continue
+                }
                 let url = ResearchText.markdownURL(source.url)
                 let title = source.title.isEmpty ? url : ResearchText.inertMarkdown(
                     source.title.replacingOccurrences(of: "[", with: "(")
