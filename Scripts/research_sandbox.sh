@@ -112,9 +112,11 @@ new_secret() {
     echo "could not make a random secret" >&2
     return 1
   fi
+  # No `--` after the mode below: macOS chmod reads it as a file name. The
+  # path is absolute ($HOME), so it cannot be taken for an option.
   temporary="$(umask 077 && mktemp -- "$folder/.web-sandbox.secret.XXXXXX")" || return 1
   if ! { printf '%s' "$secret" >"$temporary" \
-         && chmod 600 -- "$temporary" \
+         && chmod 600 "$temporary" \
          && mv -f -- "$temporary" "$secret_file"; }; then
     rm -f -- "$temporary"
     echo "could not write $secret_file" >&2
