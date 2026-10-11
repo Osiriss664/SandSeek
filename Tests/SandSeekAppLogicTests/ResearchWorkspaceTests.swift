@@ -92,6 +92,69 @@ private final class BusyRunServices: ResearchHTTPTransport, @unchecked Sendable 
         #expect(!setup.serverServices.paths.isEmpty)
     }
 
+    @Test func quittingStopsTheModelServerBeforeTheSandboxAndOnlyAnOwnedOne() async throws {
+        // The sandbox's stop script notes whether the server had been told to
+        // end before the script ran.
+        let marks = temporaryDirectory("SandSeekQuit")
+        try FileManager.default.createDirectory(at: marks, withIntermediateDirectories: true)
+        let bundle = try fakeSandboxBundle()
+        let script = """
+        #!/bin/bash
+        if [ "$1" = stop ]; then
+          if [ -e '\(marks.path)/server-term' ]; then echo ordered > '\(marks.path)/result'
+          else echo wrong > '\(marks.path)/result'; fi
+        fi
+        """
+        try Data(script.utf8).write(
+            to: bundle.appendingPathComponent("Scripts/research_sandbox.sh"))
+
+        let services = FakeResearchServices(listedModels: ["m"])
+        services.setDown(true)
+        let launcher = FakeServerLauncher()
+        launcher.onSignal = { signal in
+            if signal == "TERM" {
+                try? Data().write(to: marks.appendingPathComponent("server-term"))
+            }
+        }
+        let settings = MemorySettings()
+        settings.save("/opt/TUFF/TUFFServer", forKey: "ResearchServerProgram-tuff")
+        let launch = testLaunchController(
+            settings: settings,
+            launcher: HookedLauncher(inner: launcher, after: { services.setDown(false) }),
+            transport: services,
+            timing: .init(poll: .milliseconds(5), stopGrace: .milliseconds(200),
+                          killGrace: .milliseconds(200)))
+        let server = ResearchServerController(
+            defaults: MemorySettings(), keyStore: MemoryKeyStore(key: "test-key"),
+            transport: services, tuffStreaming: false)
+        let reports = ResearchReportStore(directory: temporaryDirectory())
+        let sandbox = ResearchSandboxController(
+            runner: FakeProcessRunner(), transport: FakeResearchServices(),
+            defaults: MemorySettings(), environment: [:],
+            resources: try testResources(bundle: bundle), stateDirectory: temporaryDirectory())
+        await sandbox.start()
+        let workspace = ResearchWorkspace(
+            sandbox: sandbox, server: server, reports: reports,
+            run: ResearchRunController(store: reports, transport: FakeResearchServices()),
+            presets: ResearchPresetStore(defaults: MemorySettings()), launch: launch)
+
+        // No server of ours: nothing is signalled.
+        workspace.shutdown()
+        #expect(launcher.servers.isEmpty)
+        #expect(!FileManager.default.fileExists(
+            atPath: marks.appendingPathComponent("server-term").path))
+        try? FileManager.default.removeItem(at: marks.appendingPathComponent("result"))
+
+        await launch.start(using: server)
+        #expect(launch.state == .running)
+        workspace.shutdown()
+        let result = try? String(
+            contentsOf: marks.appendingPathComponent("result"), encoding: .utf8)
+        #expect(result?.trimmingCharacters(in: .whitespacesAndNewlines) == "ordered")
+        #expect(launcher.servers.first?.signals == ["TERM"])
+        #expect(launch.owned == nil)
+    }
+
     @Test func refreshLeavesTheModelServerAloneWhileAQuestionRuns() async throws {
         let setup = try await setup(busyRun: true)
         #expect(setup.workspace.servicesReady)

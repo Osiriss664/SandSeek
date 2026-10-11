@@ -134,7 +134,7 @@ struct ServerStartSection: View {
             Text(label).font(.caption).foregroundStyle(.secondary)
             Text(path ?? placeholder)
                 .font(.caption.monospaced())
-                .foregroundStyle(path == nil ? .secondary : .primary)
+                .foregroundStyle(path == nil ? Color.secondary : Color.primary)
                 .lineLimit(2)
                 .truncationMode(.middle)
                 .textSelection(.enabled)
@@ -151,7 +151,7 @@ struct ServerStartSection: View {
         let message = type == .tuff
             ? "Choose TUFFServer, tuff or TUFF.app. SandSeek starts the TUFFServer beside it."
             : "Choose llama-server."
-        guard let path = pick(files: true, message: message) else { return }
+        guard let path = pick(files: true, hidden: true, message: message) else { return }
         launch.chooseProgram(path, for: type)
     }
 
@@ -177,7 +177,7 @@ struct ServerStartSection: View {
     /// An open panel for one file or one folder. A TUFF.app is a package,
     /// which the panel offers as a file.
     private func pick(files: Bool, types: [UTType]? = nil, start: URL? = nil,
-                      message: String) -> String? {
+                      hidden: Bool = false, message: String) -> String? {
         let panel = NSOpenPanel()
         panel.message = message
         panel.canChooseFiles = files
@@ -185,6 +185,8 @@ struct ServerStartSection: View {
         panel.allowsMultipleSelection = false
         if let types { panel.allowedContentTypes = types }
         if let start { panel.directoryURL = start }
+        // A TUFF built from a clone is in `.build`, which the panel hides.
+        panel.showsHiddenFiles = hidden
         guard panel.runModal() == .OK, let url = panel.url else { return nil }
         return url.path
     }

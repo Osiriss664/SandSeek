@@ -328,11 +328,14 @@ final class FakeLaunchedServer: ResearchLaunchedServer, @unchecked Sendable {
     let identity: ResearchProcessIdentity?
     private let lock = NSLock()
     private let ignoresTerm: Bool
+    private let onSignal: (@Sendable (String) -> Void)?
     private var ended: ResearchServerExit?
     private var handler: (@Sendable (ResearchServerExit) -> Void)?
     private var received: [String] = []
 
-    init(pid: Int32, path: String, ignoresTerm: Bool = false) {
+    init(pid: Int32, path: String, ignoresTerm: Bool = false,
+         onSignal: (@Sendable (String) -> Void)? = nil) {
+        self.onSignal = onSignal
         self.pid = pid
         identity = ResearchProcessIdentity(startSeconds: 1_000, startMicroseconds: UInt64(pid), path: path)
         self.ignoresTerm = ignoresTerm
@@ -344,11 +347,13 @@ final class FakeLaunchedServer: ResearchLaunchedServer, @unchecked Sendable {
 
     func terminate() {
         lock.withLock { received.append("TERM") }
+        onSignal?("TERM")
         if !ignoresTerm { end(ResearchServerExit(code: 15, bySignal: true)) }
     }
 
     func forceKill() {
         lock.withLock { received.append("KILL") }
+        onSignal?("KILL")
         end(ResearchServerExit(code: 9, bySignal: true))
     }
 
@@ -381,6 +386,8 @@ final class FakeServerLauncher: ResearchServerLaunching, @unchecked Sendable {
     /// The server ends at once with this result, as one that cannot bind.
     var endsAtOnce: ResearchServerExit?
     var ignoresTerm = false
+    /// Called with "TERM" or "KILL" when a server gets that signal.
+    var onSignal: (@Sendable (String) -> Void)?
     var failure: (any Error)?
 
     var plans: [ResearchServerLaunchPlan] { lock.withLock { madePlans } }
@@ -394,7 +401,7 @@ final class FakeServerLauncher: ResearchServerLaunching, @unchecked Sendable {
         let server = lock.withLock { () -> FakeLaunchedServer in
             let made = FakeLaunchedServer(
                 pid: Int32(41_000 + madeServers.count), path: plan.executable,
-                ignoresTerm: ignoresTerm)
+                ignoresTerm: ignoresTerm, onSignal: onSignal)
             madePlans.append(plan)
             madeServers.append(made)
             return made

@@ -403,7 +403,7 @@ public final class ResearchServerController {
         switch serverType {
         case .tuff:
             "Choose TUFFServer below and click Start server, or start TUFF's Background API "
-                + "in its Server screen, or run `tuff serve`. "
+                + "in its Server screen, or (with the `tuff` command installed) run `tuff serve`. "
                 + "TUFF listens on 127.0.0.1:8080 unless you changed it."
         case .llamacpp:
             "Choose llama-server and a model below and click Start server, or start llama.cpp "

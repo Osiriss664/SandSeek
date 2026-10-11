@@ -100,6 +100,19 @@ import Testing
         #expect(Set((plan?.environment ?? [:]).keys) == ["PATH", "HOME", "TMPDIR"])
     }
 
+    @Test func homeAndTemporaryFolderComeFromTheSystem() {
+        let environment = ResearchServerLaunchPlan.environment()
+        let account = getpwuid(getuid()).flatMap { $0.pointee.pw_dir }.map { String(cString: $0) }
+        #expect(environment["HOME"] == account)
+        #expect(environment["HOME"]?.hasPrefix("/") == true)
+        #expect(environment["TMPDIR"]?.hasPrefix("/") == true)
+    }
+
+    @Test func aLaunchProblemReadsAsItsMessage() {
+        let problem: any Error = ResearchLaunchProblem("The server log could not be created.")
+        #expect(problem.localizedDescription == "The server log could not be created.")
+    }
+
     @Test func aTuffPickBecomesTheTUFFServerBesideIt() throws {
         let exists: (String) -> Bool = { _ in true }
         func server(_ pick: String) throws -> String {
@@ -200,17 +213,38 @@ import Testing
         // /Applications is root:admin 775 on every Mac.
         let applications = folder("/Applications", uid: 0, gid: 80, mode: 0o775)
         #expect(problem(file: file(uid: 0, gid: 80), ancestors: [folder("/"), applications]) == nil)
-        // The same mode for another group, or in a folder of mine, is refused.
+        // Homebrew's folders are mine, group admin, mode 775.
+        let homebrew = [folder("/"), folder("/opt"),
+                        folder("/opt/homebrew", uid: 501, gid: 80, mode: 0o775),
+                        folder("/opt/homebrew/Cellar", uid: 501, gid: 80, mode: 0o775)]
+        #expect(problem(file: file(), ancestors: homebrew) == nil)
+        // The same mode for another group is refused.
         #expect(problem(file: file(), ancestors: [folder("/"),
             folder("/Applications", uid: 0, gid: 20, mode: 0o775)]) != nil)
         #expect(problem(file: file(), ancestors: [folder("/"),
-            folder("/Users/me/bin", uid: 501, gid: 80, mode: 0o775)]) != nil)
+            folder("/Users/me/bin", uid: 501, gid: 20, mode: 0o775)]) != nil)
+        // Writable by everyone is refused whatever the group.
+        #expect(problem(file: file(), ancestors: [folder("/"),
+            folder("/Users/me/bin", uid: 501, gid: 80, mode: 0o777)]) != nil)
     }
 
     @Test func aDownloadedFileIsRefusedWithTheWayOut() {
         let text = problem(file: file(quarantined: true))
         #expect(text?.contains("downloaded") == true)
-        #expect(text?.contains("Terminal") == true)
+        #expect(text?.contains("Privacy & Security") == true)
+        #expect(text?.contains("xattr -d com.apple.quarantine") == true)
+    }
+
+    @Test func aDownloadMarkThatMacOSApprovedIsNotARefusal() {
+        let needs = ResearchExecutableCheck.quarantineNeedsApproval
+        // flags;time;agent;id. Bit 0x40 is set once the person allowed it.
+        #expect(needs("0083;65f0a1b2;Safari;1A2B3C4D-0000-0000-0000-000000000000"))
+        #expect(needs("0081;65f0a1b2;Safari;"))
+        #expect(!needs("00c3;65f0a1b2;Safari;1A2B3C4D-0000-0000-0000-000000000000"))
+        #expect(!needs("0041;65f0a1b2;Safari;"))
+        // A value that cannot be read counts as not approved.
+        #expect(needs(""))
+        #expect(needs("zz;1;2;3"))
     }
 
     // MARK: - Real files

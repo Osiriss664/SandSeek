@@ -1,4 +1,11 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#elseif canImport(Musl)
+import Musl
+#endif
 
 // What SandSeek runs to start a model server, as plain data.
 //
@@ -11,7 +18,7 @@ import Foundation
 
 /// Why a program, a path or a start was refused. The text is shown on the
 /// model server card.
-public struct ResearchLaunchProblem: Error, Equatable, Sendable, CustomStringConvertible {
+public struct ResearchLaunchProblem: LocalizedError, Equatable, Sendable, CustomStringConvertible {
     public let message: String
 
     public init(_ message: String) {
@@ -19,6 +26,7 @@ public struct ResearchLaunchProblem: Error, Equatable, Sendable, CustomStringCon
     }
 
     public var description: String { message }
+    public var errorDescription: String? { message }
 }
 
 public struct ResearchServerLaunchPlan: Equatable, Sendable {
@@ -110,14 +118,36 @@ public struct ResearchServerLaunchPlan: Equatable, Sendable {
         return alias.isEmpty ? "model" : alias
     }
 
-    /// Only these three variables, with values made here and not taken from
-    /// the app's own environment. That keeps `LLAMA_ARG_*` (for example a
-    /// second accepted key), `DYLD_*` (injected libraries) and `TUFF_*`
-    /// (kernel switches) out of a server SandSeek starts.
+    /// Only these three variables, and not copied from the app's own
+    /// environment. That keeps `LLAMA_ARG_*` (for example a second accepted
+    /// key), `DYLD_*` (injected libraries) and `TUFF_*` (kernel switches) out
+    /// of a server SandSeek starts. The values come from the system, not from
+    /// `$HOME` or `$TMPDIR`, which a session can set: the home folder from the
+    /// account database, the temporary folder from `confstr`.
     public static func environment(
-        home: String = NSHomeDirectory(), tmp: String = NSTemporaryDirectory()
+        home: String = userHome(), tmp: String = userTemporaryFolder()
     ) -> [String: String] {
         ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": home, "TMPDIR": tmp]
+    }
+
+    /// The home folder from the account database (`getpwuid`).
+    public static func userHome() -> String {
+        if let entry = getpwuid(getuid()), let directory = entry.pointee.pw_dir {
+            let home = String(cString: directory)
+            if home.hasPrefix("/") { return home }
+        }
+        return NSHomeDirectory()
+    }
+
+    /// The user's temporary folder (`confstr`, `/var/folders/...` on macOS).
+    public static func userTemporaryFolder() -> String {
+        #if canImport(Darwin)
+        var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
+        if confstr(_CS_DARWIN_USER_TEMP_DIR, &buffer, buffer.count) > 0 {
+            return buffer.withUnsafeBufferPointer { String(cString: $0.baseAddress!) }
+        }
+        #endif
+        return "/tmp/"
     }
 
     // MARK: - Checks

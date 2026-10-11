@@ -146,6 +146,16 @@ private final class TimedOutPort: ResearchHTTPTransport, @unchecked Sendable {
         #expect(rig.launcher.plans.isEmpty)
     }
 
+    @Test func aLaunchThatFailsShowsItsOwnMessage() async throws {
+        let launcher = FakeServerLauncher()
+        launcher.failure = ResearchLaunchProblem("The server log could not be created: no.")
+        let rig = try makeRig(launcher: launcher)
+        await rig.launch.start(using: rig.server)
+        #expect(failure(rig)
+            == "The server could not be started: The server log could not be created: no.")
+        #expect(rig.launch.owned == nil)
+    }
+
     @Test func startIsRefusedWhenThePortGivesNoClearAnswer() async throws {
         let rig = try makeRig(portTransport: TimedOutPort())
         await rig.launch.start(using: rig.server)

@@ -31,7 +31,8 @@ public struct ResearchFileFacts: Equatable, Sendable {
     public var mode: UInt32
     /// Whether the current user may run it (`access(X_OK)`).
     public var isExecutable: Bool
-    /// macOS marked the file as downloaded (`com.apple.quarantine`).
+    /// macOS marked the file as downloaded and nobody approved it yet
+    /// (`com.apple.quarantine` without the approved bit).
     public var isQuarantined: Bool
 
     public init(path: String, kind: Kind, uid: UInt32, gid: UInt32, mode: UInt32,
@@ -47,8 +48,9 @@ public struct ResearchFileFacts: Equatable, Sendable {
 }
 
 public enum ResearchExecutableCheck {
-    /// The group macOS gives to administrators. `/Applications` is owned by
-    /// root with this group and mode 775, so that group may write there.
+    /// The group macOS gives to administrators. `/Applications` (root) and the
+    /// Homebrew folders (you) have this group and mode 775, so that group may
+    /// write there. Its members can become root with `sudo` anyway.
     static let adminGroup: UInt32 = 80
 
     /// Why the program may not be started, or nil. `file` is the resolved
@@ -77,18 +79,20 @@ public enum ResearchExecutableCheck {
             }
             // A sticky world-writable folder (/tmp) lets nobody rename what is
             // not theirs. Otherwise world-writable is refused, and
-            // group-writable is fine only for root's admin group.
+            // group-writable is fine only for the admin group.
             if folder.mode & 0o1002 == 0o1002 { continue }
             if folder.mode & 0o002 != 0
-                || (folder.mode & 0o020 != 0 && !(folder.uid == 0 && folder.gid == adminGroup)) {
+                || (folder.mode & 0o020 != 0 && folder.gid != adminGroup) {
                 return ResearchLaunchProblem(
                     "The folder \(folder.path) can be changed by other users.")
             }
         }
         if file.isQuarantined {
             return ResearchLaunchProblem(
-                "macOS marked this file as downloaded. Open it once from Terminal so macOS can "
-                    + "check it, or remove the mark yourself if you trust where it came from.")
+                "macOS marked this program as downloaded and has not approved it yet. Run it "
+                    + "once from Terminal and allow it in System Settings > Privacy & Security, "
+                    + "or, if you trust where it came from, remove the mark with "
+                    + "`xattr -d com.apple.quarantine <file>`.")
         }
         return nil
     }
@@ -114,12 +118,31 @@ public enum ResearchExecutableCheck {
             isQuarantined: hasQuarantineMark(path))
     }
 
+    /// True when the file carries a download mark that macOS has not approved
+    /// yet. After Gatekeeper passes a file, or the person allows it, macOS
+    /// keeps the mark and sets the approved bit in it (see `needsApproval`).
     private static func hasQuarantineMark(_ path: String) -> Bool {
         #if canImport(Darwin)
-        return getxattr(path, "com.apple.quarantine", nil, 0, 0, XATTR_NOFOLLOW) >= 0
+        let name = "com.apple.quarantine"
+        let size = getxattr(path, name, nil, 0, 0, XATTR_NOFOLLOW)
+        guard size >= 0 else { return false }
+        var buffer = [UInt8](repeating: 0, count: size + 1)
+        let read = getxattr(path, name, &buffer, size, 0, XATTR_NOFOLLOW)
+        // A mark that cannot be read counts as not approved.
+        guard read >= 0 else { return true }
+        return quarantineNeedsApproval(String(decoding: buffer.prefix(read), as: UTF8.self))
         #else
         return false
         #endif
+    }
+
+    /// The value of `com.apple.quarantine` is `flags;time;agent;id`, flags in
+    /// hex. Bit 0x40 is "approved by the user". A value that cannot be read
+    /// counts as not approved.
+    static func quarantineNeedsApproval(_ value: String) -> Bool {
+        let field = value.split(separator: ";", omittingEmptySubsequences: false).first ?? ""
+        guard let flags = UInt32(field, radix: 16) else { return true }
+        return flags & 0x40 == 0
     }
 
     /// The program at `path`, with symbolic links resolved (Homebrew's

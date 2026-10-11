@@ -9,6 +9,9 @@ private final class ForegroundAppDelegate: NSObject, NSApplicationDelegate {
     /// Set by the app so quitting stops the sandbox and the model server this
     /// app started. A model server started by hand is never touched.
     @MainActor static var workspace: ResearchWorkspace?
+    /// Turns a plain SIGTERM (`killall SandSeek`, some quit-all tools) into a
+    /// normal quit, so that the model server SandSeek started is stopped too.
+    @MainActor private static var termination: DispatchSourceSignal?
 
     func applicationWillTerminate(_ notification: Notification) {
         MainActor.assumeIsolated {
@@ -17,6 +20,13 @@ private final class ForegroundAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        signal(SIGTERM, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        source.setEventHandler {
+            MainActor.assumeIsolated { NSApp.terminate(nil) }
+        }
+        source.resume()
+        Self.termination = source
         NSApp.setActivationPolicy(.regular)
         NSApp.activate()
     }
