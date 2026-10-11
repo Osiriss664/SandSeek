@@ -239,6 +239,9 @@ private struct FakeSandbox: ResearchHTTPTransport {
         case signedForAnotherNonce
         case malformedSignature(String)
         case redirect
+        /// A 408 for a body that did not arrive in full, signed over the empty
+        /// body (the real server never had the whole one), with the given key.
+        case requestTimeout(key: Data)
     }
 
     let keys: KeyBox
@@ -249,6 +252,9 @@ private struct FakeSandbox: ResearchHTTPTransport {
         keys = KeyBox(key)
         self.behaviour = behaviour
     }
+
+    static let timeoutBody = Data(
+        #"{"error":{"code":"request_timeout","message":"timed out waiting for the request body"}}"#.utf8)
 
     private func answer(for url: URL) -> Data {
         switch url.lastPathComponent {
@@ -308,6 +314,11 @@ private struct FakeSandbox: ResearchHTTPTransport {
             return signed(text)
         case .redirect:
             return ResearchHTTPResponse(status: 307, body: Data())
+        case .requestTimeout(let key):
+            let signature = expectedSignature(
+                key: key, nonce: nonce, requestBody: Data(), status: 408, body: Self.timeoutBody)
+            return ResearchHTTPResponse(status: 408, body: Self.timeoutBody,
+                                        headers: ["x-sandbox-signature": signature])
         }
     }
 }
@@ -448,6 +459,27 @@ private struct FakeSandbox: ResearchHTTPTransport {
         let file = try SecretFolder().write()
         await everyCall(client(FakeSandbox(key: secret, behaviour: .redirect), file: file),
                         expecting: .redirectRefused(status: 307))
+    }
+
+    /// The server answers 408 for a body that stopped short and signs it over
+    /// the empty body; that is a tool failure, not an impostor.
+    @Test func aTimeoutSignedOverTheEmptyBodyIsTheToolFailureNotAnImpostor() async throws {
+        let file = try SecretFolder().write()
+        let sandbox = client(FakeSandbox(key: secret, behaviour: .requestTimeout(key: secret)), file: file)
+        let failure = ResearchToolFailure(
+            message: "timed out waiting for the request body", status: 408)
+        await #expect(throws: failure) { _ = try await sandbox.search(query: "q", maxResults: 3) }
+        await #expect(throws: failure) {
+            _ = try await sandbox.fetch(url: "https://example.com/a", offset: 0, maxCharacters: 100)
+        }
+    }
+
+    @Test func aTimeoutSignedWithAnotherKeyIsStillRefused() async throws {
+        let file = try SecretFolder().write()
+        let wrong = Data(repeating: 0x41, count: 32)
+        await everyCall(
+            client(FakeSandbox(key: secret, behaviour: .requestTimeout(key: wrong)), file: file),
+            expecting: notSigned)
     }
 
     @Test func aTransportThatCannotSendHeadersFailsInsteadOfDroppingTheNonce() async throws {

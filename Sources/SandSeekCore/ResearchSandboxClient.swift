@@ -212,8 +212,15 @@ public struct ResearchSandboxClient: Sendable {
             throw ResearchError.sandboxUnavailable(error.localizedDescription)
         }
         if response.isRedirect { throw ResearchError.redirectRefused(status: response.status) }
-        if let signing, !signing.isValid(response, requestBody: body ?? Data()) {
-            throw ResearchError.sandboxNotSigned(address: address)
+        if let signing {
+            let sent = body ?? Data()
+            // The sandbox answers 408 when a body it was told to expect did not
+            // arrive in full, and signs that answer over an empty body, since
+            // it never had the whole one. For a 408 only, that signature counts.
+            guard signing.isValid(response, requestBody: sent)
+                    || (response.status == 408 && signing.isValid(response, requestBody: Data())) else {
+                throw ResearchError.sandboxNotSigned(address: address)
+            }
         }
         return response
     }

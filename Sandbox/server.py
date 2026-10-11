@@ -1294,8 +1294,9 @@ class Handler(BaseHTTPRequestHandler):
     _nonce: str | None = None
     _request_body: bytes = b""
     # True when the client announced a body and went silent (Handler.timeout);
-    # do_POST then answers 408, signed over an empty body like any answer given
-    # before a whole body was read.
+    # do_POST then answers 408, signed over the EMPTY body (not the body that
+    # was announced), like any answer given before a whole body was read. The
+    # Swift client accepts that for a 408 only.
     _body_timed_out: bool = False
 
     def _read_nonce(self) -> ToolError | None:

@@ -127,8 +127,9 @@ These hold as long as the design is intact and the VM boundary holds.
   everyone. Over IPv6 nothing but loopback is accepted inbound. The server
   listens on 0.0.0.0 because the published port reaches the VM's network
   address, not its loopback, and the Mac side is published on 127.0.0.1 only.
-  A client that connects and goes silent is dropped after 30 seconds (the same
-  limit applies to writing the answer, so a reader slower than about 240 KB/s
+  A client that connects and goes silent is dropped after 30 seconds (a body
+  that stops short gets a 408, signed over the empty body, since the server
+  never had the whole one; the same limit applies to writing the answer, so a reader slower than about 240 KB/s
   would be cut off on the largest `/v1/raw` answers). IPv6 neighbour discovery
   is dropped inbound as well; IPv6 was already unusable because the output
   chain does not allow link-local traffic.
