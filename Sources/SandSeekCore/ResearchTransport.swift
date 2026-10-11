@@ -290,6 +290,13 @@ public struct URLSessionResearchTransport: ResearchHTTPTransport {
         configuration.timeoutIntervalForResource = timeout
         // Both services are on loopback. A system proxy must never see them.
         configuration.connectionProxyDictionary = [:]
+        // No response cache: every answer must come from the server. An
+        // ephemeral session still keeps an in-memory cache, which served a
+        // repeated request to a 301 or 308 without asking the server (Mac
+        // test, 11.10.), and a cached signed answer would not match a fresh
+        // nonce anyway.
+        configuration.urlCache = nil
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         // Never follow a redirect (see `ResearchNoRedirectDelegate`). The
         // session retains the delegate. A nil delegate queue gives the
         // session its own serial queue.
