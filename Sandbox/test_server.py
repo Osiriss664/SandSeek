@@ -373,9 +373,27 @@ class FetchTests(unittest.TestCase):
             markup, "https://example.com/", timeout=10, extractor=control_extractor),
             "clean[2J text")
 
+    def test_the_fallback_parser_is_bounded_like_the_extractor(self):
+        markup = "<html><body><p>Never read.</p></body></html>"
+        # A fallback that never ends is killed at its own limit and gives no text.
+        started = time.monotonic()
+        with mock.patch.object(server, "_fallback_in_child", slow_extractor), \
+                mock.patch.object(server, "FALLBACK_TIMEOUT", 1):
+            text = server.extract_text_bounded(
+                markup, "https://example.com/", timeout=10, extractor=failing_extractor)
+        self.assertEqual(text, "")
+        self.assertLess(time.monotonic() - started, 8)
+        # It reads at most MAX_FALLBACK_CHARS, fewer than the extractor does.
+        with mock.patch.object(server, "_fallback_in_child", length_extractor):
+            text = server.extract_text_bounded(
+                "x" * (server.MAX_EXTRACT_CHARS + 10), "https://example.com/", timeout=10,
+                extractor=failing_extractor)
+        self.assertEqual(text, str(server.MAX_FALLBACK_CHARS))
+        self.assertLess(server.MAX_FALLBACK_CHARS, server.MAX_EXTRACT_CHARS)
+
     def test_child_results_are_never_unpickled(self):
         import inspect
-        source = inspect.getsource(server.extract_text_bounded)
+        source = inspect.getsource(server._run_in_child)
         self.assertIn("recv_bytes", source)
         self.assertNotIn(".recv(", source)
 

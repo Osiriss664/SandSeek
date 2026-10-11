@@ -95,6 +95,10 @@ FETCH_TOTAL_DEADLINE = float(os.environ.get("FETCH_TOTAL_DEADLINE", "90"))
 # cannot be stopped. Only the first MAX_EXTRACT_CHARS of a page are read.
 EXTRACT_TIMEOUT = float(os.environ.get("EXTRACT_TIMEOUT", "15"))
 MAX_EXTRACT_CHARS = 2_000_000
+# The fallback parser (html.parser) runs in a child as well, over fewer
+# characters and with a shorter limit than the extractor.
+FALLBACK_TIMEOUT = float(os.environ.get("FALLBACK_TIMEOUT", "10"))
+MAX_FALLBACK_CHARS = 500_000
 MAX_DOWNLOAD_BYTES = int(os.environ.get("MAX_DOWNLOAD_BYTES", str(5 * 1024 * 1024)))
 MAX_REDIRECTS = 5
 MAX_REQUEST_BYTES = 64 * 1024
@@ -562,12 +566,13 @@ def _extract_in_child(sender, extractor, markup: str, url: str) -> None:
         sender.close()
 
 
-def extract_text_bounded(markup: str, url: str, timeout: float | None = None,
-                         extractor: Callable[[str, str], str] = extract_text) -> str:
-    """Runs `extractor` in a child process and stops it after `timeout`
-    seconds. A page the extractor cannot finish in time, or fails on, is read
-    with the simple fallback parser instead, which is linear."""
-    markup = markup[:MAX_EXTRACT_CHARS]
+def _fallback_in_child(markup: str, url: str) -> str:
+    return fallback_text(markup)
+
+
+def _run_in_child(extractor, markup: str, url: str, timeout: float) -> str | None:
+    """`extractor(markup, url)` run in a child process that is killed after
+    `timeout` seconds. None when it fails, returns no text or runs out of time."""
     context = multiprocessing.get_context("forkserver")
     receiver, sender = context.Pipe(duplex=False)
     child = context.Process(target=_extract_in_child, args=(sender, extractor, markup, url),
@@ -576,7 +581,7 @@ def extract_text_bounded(markup: str, url: str, timeout: float | None = None,
     sender.close()
     text = None
     try:
-        if receiver.poll(EXTRACT_TIMEOUT if timeout is None else timeout):
+        if receiver.poll(timeout):
             # recv_bytes never unpickles; maxlength bounds what is read.
             message = receiver.recv_bytes(4 * MAX_EXTRACT_CHARS + 1)
             if message.startswith(b"\x01"):
@@ -588,10 +593,27 @@ def extract_text_bounded(markup: str, url: str, timeout: float | None = None,
         if child.is_alive():
             child.kill()
         child.join(5)
-    if isinstance(text, str):
+    return text if isinstance(text, str) else None
+
+
+def extract_text_bounded(markup: str, url: str, timeout: float | None = None,
+                         extractor: Callable[[str, str], str] = extract_text) -> str:
+    """Runs `extractor` in a child process and stops it after `timeout`
+    seconds. A page the extractor cannot finish in time, or fails on, is read
+    with the simple fallback parser instead. That is html.parser, which has had
+    quadratic cases (CVE-2025-6069), so it runs the same way: in a child with
+    its own limit and over fewer characters. A page it cannot finish either
+    gives no text, never an unbounded wait in this process."""
+    markup = markup[:MAX_EXTRACT_CHARS]
+    text = _run_in_child(extractor, markup, url, EXTRACT_TIMEOUT if timeout is None else timeout)
+    if text is not None:
         return text
     sys.stderr.write(f"extraction of {url} timed out or failed; used the fallback parser\n")
-    return fallback_text(markup)
+    text = _run_in_child(_fallback_in_child, markup[:MAX_FALLBACK_CHARS], url, FALLBACK_TIMEOUT)
+    if text is None:
+        sys.stderr.write(f"the fallback parser could not read {url} either; no text\n")
+        return ""
+    return text
 
 
 # --- Passages ---------------------------------------------------------------
@@ -1029,7 +1051,9 @@ class WebTools:
             "application/x-www-form-urlencoded")
         if response.status >= 400:
             raise ToolError(f"search answered HTTP {response.status}", "search_failed", 502)
-        markup = decode_body(response).decode("utf-8", errors="replace")
+        # html.parser runs here, in this process, so it reads a bounded amount
+        # (a results page is some 100 KB).
+        markup = decode_body(response).decode("utf-8", errors="replace")[:MAX_FALLBACK_CHARS]
         return parse_duckduckgo(markup)
 
     def _searxng(self, query: str) -> list[dict]:
