@@ -561,7 +561,7 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
 
         let wild = ResearchRunSettings(
             model: "m", maxSteps: 500, pageCharacters: 10, contextCharacters: 5,
-            searchResults: 50, toolCallsPerTurn: 0, minimumPages: 9,
+            searchResults: 50, toolCallsPerTurn: 0, minimumPages: 20,
             autoOpenPages: false, nudges: false, reviseUnreadCitations: false,
             stepTimeoutMinutes: 500, thinkingMinutes: 500)
         let options = wild.options
@@ -570,7 +570,7 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
         #expect(options.contextBudgetCharacters == 2_000)
         #expect(options.searchResults == 10)
         #expect(options.maxToolCallsPerTurn == 1)
-        #expect(options.minimumPagesRead == 6)
+        #expect(options.minimumPagesRead == ResearchOptions.minimumPagesRange.upperBound)
         #expect(!options.autoOpenPages && !options.nudges && !options.reviseUnreadCitations)
         #expect(wild.stepTimeout == 3_600)
         #expect(options.thinkingMinutes == 60)
