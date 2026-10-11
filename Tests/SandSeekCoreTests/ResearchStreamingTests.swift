@@ -10,7 +10,10 @@ import Testing
 // `finish_reason` and `tuff_timings_seconds`; with `include_usage` a chunk
 // with `choices: []`; then `data: [DONE]`. A failure after the stream has
 // started is `data: {"error":{…}}` and `data: [DONE]`, with HTTP status 200.
-// Replace them with real recordings (Scripts/record_stream.py) on the Mac.
+// Real recordings from TUFF 8.3.1 are tested in
+// ResearchStreamRecordingTests.swift; these hand-written ones cover edge
+// cases the server did not produce (CR line ends, U+2028, split tool
+// calls, white space).
 
 private enum Fixture {
     /// Reasoning and an answer over many chunks. The text starts and ends
