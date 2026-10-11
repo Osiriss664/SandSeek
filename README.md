@@ -37,15 +37,19 @@ addresses go to the internet. More in [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.m
 
 ## Quick start
 
-1. Install [Apple `container`](https://github.com/apple/container) and TUFF
-   (8.3.1 or newer). Either turn on TUFF's Background API, or let SandSeek
-   start TUFF's server for you (**Start server**, step 3).
+1. Install [Apple `container`](https://github.com/apple/container) and a local
+   model server. SandSeek 0.1.0 works with two:
+   - **TUFF** 8.3.1 or newer (tested with Qwen3.6 35B).
+   - **llama.cpp** (`llama-server`), experimental in 0.1.0.
+
+   Ollama and LM Studio are planned; other servers are not supported yet.
 2. Download `SandSeek-0.1.0.zip` from the release page, unzip it and move
    SandSeek to Applications. It is not notarized: on first launch choose
    System Settings → Privacy & Security → Open Anyway.
-3. Open SandSeek. On the model server card press **Check** (or choose the
-   server program once and press **Start server**), then **Start Sandbox**,
-   and ask your first question.
+3. Open SandSeek and choose your server on the model server card. Either
+   start the server yourself and press **Check**, or choose its program once
+   and press **Start server** (TUFF and llama.cpp). Then press **Start
+   Sandbox** and ask your first question.
 
 Step by step: [docs/INSTALL.md](docs/INSTALL.md).
 
@@ -77,7 +81,8 @@ above all test reports.
 
 - Apple silicon, macOS 26 (needed by Apple `container`)
 - [Apple `container`](https://github.com/apple/container)
-- A local model server on 127.0.0.1: TUFF 8.3.1 or newer. Streaming is on by
+- A local model server on 127.0.0.1: TUFF 8.3.1 or newer, or llama.cpp
+  (experimental, see below). Streaming is on by
   default for TUFF, so that Stop and the time limits make it stop generating.
   llama.cpp (`llama-server`) is experimental in 0.1.0: it works through
   `--server-type llamacpp` with plain requests (no streaming), the app's

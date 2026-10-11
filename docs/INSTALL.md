@@ -26,6 +26,8 @@ For what the security design does and does not promise, read
     project probed it with Bonsai). llama.cpp is experimental in 0.1.0: no
     streaming, the Thinking switch has no effect on it yet, and no research
     run was measured with it; see [SECURITY.md](SECURITY.md).
+  - Ollama and LM Studio are planned (the picker shows them as "later");
+    other servers are not supported yet.
 - Research makes many long prompts, so model speed matters. Qwen3.6 35B-A3B on
   TUFF gives good answers and takes a few minutes per question; Gemma 4 E4B is
   faster and weaker. A model that has to stream far more than the installed
