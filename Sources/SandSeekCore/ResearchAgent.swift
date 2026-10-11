@@ -2436,7 +2436,7 @@ public struct ResearchAgent: Sendable {
             onEvent(.toolFailed("open_page: \(site) failed \(State.failuresBeforeSkippingSite) "
                 + "times, not tried again"))
             return "Not opened: \(Self.sanitized(site, markers: state.markers)) failed "
-                + "\(State.failuresBeforeSkippingSite) times (access refused or an error). "
+                + "\(State.failuresBeforeSkippingSite) times (it turned the reader away). "
                 + "Open pages from other sites."
         }
         do {

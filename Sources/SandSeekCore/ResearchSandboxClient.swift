@@ -45,6 +45,14 @@ public struct ResearchToolFailure: Error, Equatable, Sendable {
     /// The sandbox's HTTP status for a failed request, when it had one.
     public var status: Int? = nil
 
+    /// The HTTP status a site answered with, as the sandbox reports it in
+    /// its message (`... answered HTTP 403`).
+    static func siteStatus(in message: String) -> Int? {
+        guard let range = message.range(of: #"answered HTTP (\d{3})"#, options: .regularExpression)
+        else { return nil }
+        return Int(message[range].suffix(3))
+    }
+
     /// Statuses that mean the site turned the reader away.
     var siteRefused: Bool { [401, 403, 429, 451].contains(status ?? 0) }
 }
@@ -165,7 +173,11 @@ public struct ResearchSandboxClient: Sendable {
         guard response.status == 200, let reply else {
             let message = reply?["error"]?["message"]?.stringValue
                 ?? "the sandbox answered HTTP \(response.status)"
-            throw ResearchToolFailure(message: message, status: response.status)
+            // The sandbox answers 502 when the site itself answered an error
+            // ("<url> answered HTTP 403"); that status is the one that counts.
+            throw ResearchToolFailure(
+                message: message, status: ResearchToolFailure.siteStatus(in: message)
+                    ?? response.status)
         }
         return reply
     }

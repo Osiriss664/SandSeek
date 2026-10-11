@@ -3381,6 +3381,9 @@ struct ResearchAgentTests {
         #expect(ResearchToolFailure(message: "x", status: 429).siteRefused)
         #expect(!ResearchToolFailure(message: "x", status: 404).siteRefused)
         #expect(!ResearchToolFailure(message: "x").siteRefused)
+        #expect(ResearchToolFailure.siteStatus(in: "https://www.zeit.de/a answered HTTP 403") == 403)
+        #expect(ResearchToolFailure.siteStatus(in: "the sandbox answered HTTP 502") == 502)
+        #expect(ResearchToolFailure.siteStatus(in: "timed out") == nil)
     }
 
     @Test func aSiteThatFailedThreeTimesIsNotTriedAgain() async throws {
