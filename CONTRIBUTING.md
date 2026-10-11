@@ -29,7 +29,7 @@ model server are described in [docs/SECURITY.md](docs/SECURITY.md).
 - Anything that changes what the model, the sandbox or a web page can reach
   needs a note in docs/SECURITY.md.
 - Write commit messages that say what changed and why.
-- Documentation is in English; docs/ANLEITUNG.md is the plain German guide.
+- Documentation is in English.
 
 By contributing you agree that your work is licensed under the Apache License
 2.0, like the rest of the project.

@@ -24,8 +24,7 @@ Swift package. Built, tested and tried by hand on a Mac with macOS 27, TUFF
    report you can reopen later.
 
 Your question and the answer stay on your Mac; only search words and page
-addresses go to the internet. More in [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md)
-and, in German, [docs/SO_FUNKTIONIERT_ES.md](docs/SO_FUNKTIONIERT_ES.md).
+addresses go to the internet. More in [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md).
 
 ## Quick start
 
@@ -37,8 +36,7 @@ and, in German, [docs/SO_FUNKTIONIERT_ES.md](docs/SO_FUNKTIONIERT_ES.md).
 3. Open SandSeek, press **Check** on the model server card and **Start
    Sandbox**, then ask your first question.
 
-Step by step: [docs/INSTALL.md](docs/INSTALL.md), or in German
-[docs/ANLEITUNG.md](docs/ANLEITUNG.md).
+Step by step: [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Problems, ideas, help
 
@@ -50,10 +48,7 @@ Step by step: [docs/INSTALL.md](docs/INSTALL.md), or in German
 
 - [docs/INSTALL.md](docs/INSTALL.md): requirements, build and package the app,
   start TUFF or llama.cpp safely, first run, where reports live, uninstall.
-- [docs/ANLEITUNG.md](docs/ANLEITUNG.md): the same in plain German, for people
-  who do not program.
-- [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md): the research method; in short
-  German: [docs/SO_FUNKTIONIERT_ES.md](docs/SO_FUNKTIONIERT_ES.md).
+- [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md): the research method.
 - [docs/SECURITY.md](docs/SECURITY.md): what the sandbox guarantees and what it
   does not, the threat model, the tests and how to run them, known limits.
 

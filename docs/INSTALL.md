@@ -5,7 +5,6 @@ download of a finished app yet. This page covers what you need, how to build and
 package the app, how to start a model server safely, the first run, where
 things are stored and how to remove everything again.
 
-A German guide for people who do not program is in [ANLEITUNG.md](ANLEITUNG.md).
 For what the security design does and does not promise, read
 [SECURITY.md](SECURITY.md).
 

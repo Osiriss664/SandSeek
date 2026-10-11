@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Please check docs/INSTALL.md (English) or docs/ANLEITUNG.md (German) first. Questions in German are welcome.
+        Please check docs/INSTALL.md and docs/HOW_IT_WORKS.md first.
   - type: textarea
     id: question
     attributes:
