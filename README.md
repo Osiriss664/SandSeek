@@ -18,6 +18,8 @@ Swift package. Built, tested and tried by hand on a Mac with macOS 27, TUFF
 8.3.1 and Qwen3.6 35B (11 October 2026); Start server was tried with TUFF 8.3.11
 and llama.cpp.
 
+![The SandSeek app: model server card with Start server, the web sandbox card and the question box](docs/assets/sandseek-app.png)
+
 ## How it works, in one minute
 
 1. You ask a question in the SandSeek app (or with the `sandseek` command).
