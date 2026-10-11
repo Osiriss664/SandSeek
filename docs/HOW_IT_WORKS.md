@@ -107,11 +107,22 @@ these right.
 **Keeping to the context window.** Long pages are read in slices. The loop
 keeps room for the reply and, when the conversation would outgrow the model's
 memory, shortens old results itself, not the model, so page text never gets a
-chance to steer the shortening: a page read twice keeps only its newest copy,
-older pages keep the passages that contain words from the question, older
-searches lose their snippets, and only then does an old result shrink to its
-first line. Reasoning from earlier steps is dropped before any result is
-shortened. A shortening never ends the research.
+chance to steer the shortening. Reasoning from earlier steps is dropped
+first. Then a page read twice keeps only its newest copy, old searches, errors
+and drafts are shortened, and outdated "Research so far" lines are dropped.
+Pages come last: older pages keep the passages that contain words from the
+question (text that is already short enough is left alone), and a page
+shrinks to a single line only in an emergency. A shortening never ends the
+research.
+
+**Sites that refuse.** A site that refuses a read three times (HTTP 401, 403,
+429 or 451) is skipped for the rest of the run; a good read from it resets the
+count. Other failures, such as a timeout, do not count against the site.
+
+**Rewrites.** After the answer, the loop may ask the model once to rewrite it
+(sources it never read, missing source numbers, or the wrong language). It
+skips that request when the context window cannot hold the answer twice, and
+keeps the first answer.
 
 **Getting the model to read.**
 - A model that answers from memory without searching is asked once to search.
@@ -203,11 +214,13 @@ Thorough values are a first guess and will be adjusted after measuring.
 Limits that protect the Mac are not settings: the sandbox, its firewall, the
 loopback-only addresses, the fetch limits and the report rules stay fixed.
 
-For measuring, two environment variables exist and the app has no setting for
-them: `SANDSEEK_PRESERVE_THINKING=on|off|auto` (whether the model's earlier
+For measuring, three environment variables exist and the app has no setting
+for them: `SANDSEEK_PRESERVE_THINKING=on|off|auto` (whether the model's earlier
 reasoning is sent back with its tool calls, which keeps a Qwen server's prompt
-cache valid) and `SANDSEEK_MARKERS=fixed|nonce` (a random code in the markers
-around web text).
+cache valid), `SANDSEEK_MARKERS=fixed|nonce` (a random code in the markers
+around web text) and `SANDSEEK_DUMP_ANSWER_REQUEST=<file>` (the command line
+writes the final answer request to that file, to check what page text reached
+the answer).
 
 ## The model servers
 

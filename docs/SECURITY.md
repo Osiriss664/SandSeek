@@ -66,7 +66,10 @@ These hold as long as the design is intact and the VM boundary holds.
 
 - **The model can only search and read.** There is no shell, file or network
   tool. The only files SandSeek writes are reports (to a new file, never over
-  an existing one) and the optional `--output` and `--save-pages` files.
+  an existing one), the optional `--output` and `--save-pages` files, and,
+  only when `SANDSEEK_DUMP_ANSWER_REQUEST` is set, a copy of the final answer
+  request (the question and all page text it holds; readable by your user
+  account only, and it replaces a file of the same name).
 - **Tool results are marked untrusted.** Every page is wrapped in markers that
   the system prompt tells the model to treat as information only. Copies of
   the markers inside a page are removed repeatedly, so a page cannot close the
