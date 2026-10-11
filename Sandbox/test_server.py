@@ -5,6 +5,8 @@ replaced with fakes. Run with `python3 -m unittest Sandbox/test_server.py`."""
 import base64
 import contextlib
 import gzip
+import hashlib
+import hmac
 import http.client
 import importlib.util
 import io
@@ -1494,7 +1496,7 @@ class HTTPAPITests(unittest.TestCase):
 
     def test_health(self):
         self.assertEqual(self.call("GET", "/health"),
-                         (200, {"status": "ok", "passages": True, "raw": True}))
+                         (200, {"status": "ok", "passages": True, "raw": True, "signed": False}))
 
     def test_fetch_passages_round_trip(self):
         status, payload = self.call("POST", "/v1/fetch", {
@@ -1590,7 +1592,7 @@ class RawAPITests(unittest.TestCase):
         status, payload = self.call("GET", "/health")
         self.assertEqual(status, 200)
         self.assertIs(payload["raw"], True)
-        self.assertEqual(payload, {"status": "ok", "passages": True, "raw": True})
+        self.assertEqual(payload, {"status": "ok", "passages": True, "raw": True, "signed": False})
 
     def test_a_page_round_trip(self):
         status, payload = self.raw(url="https://example.com/a", max_bytes=1000,
@@ -1704,6 +1706,269 @@ def _numeric_only_resolver(host, port):
     except UnicodeError:
         raise ToolError("URL has an invalid host name", "invalid_url")
     return [info[4][0] for info in infos]
+
+
+def expected_signature(secret, nonce, request_body, status, response_body):
+    """The documented formula, written out again here rather than imported from
+    the server, so a mistake in the server's own copy shows up."""
+    message = (b"tuff-sandbox-v1\n" + nonce.encode() + b"\n"
+               + hashlib.sha256(request_body).hexdigest().encode() + b"\n"
+               + str(status).encode() + b"\n" + response_body)
+    return hmac.new(secret, message, hashlib.sha256).hexdigest()
+
+
+class SignedAnswerTests(unittest.TestCase):
+    """X-Sandbox-Nonce in, X-Sandbox-Signature out."""
+
+    SECRET = b"0123456789abcdef" * 4
+    NONCE = "ab" * 32
+
+    @classmethod
+    def setUpClass(cls):
+        resolve = resolver({"example.com": ["93.184.216.34"]})
+        transport = FakeTransport({"https://example.com/a": page("<p>signed page</p>")})
+
+        class TestHandler(server.Handler):
+            tools = WebTools(resolver=resolve, transport=transport, searxng_url="")
+
+            def log_message(self, *args):
+                pass
+
+        cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), TestHandler)
+        cls.port = cls.httpd.server_address[1]
+        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+
+    def setUp(self):
+        patcher = mock.patch.object(server, "SIGNING_SECRET", self.SECRET)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def send(self, method, path, body=None, headers=None, nonce=NONCE):
+        """Returns (status, response headers, response body bytes, request body bytes)."""
+        data = json.dumps(body).encode() if body is not None else b""
+        all_headers = {"Content-Type": "application/json"}
+        if nonce is not None:
+            all_headers["X-Sandbox-Nonce"] = nonce
+        all_headers.update(headers or {})
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        connection.request(method, path, body=data or None, headers=all_headers)
+        response = connection.getresponse()
+        answer = response.read()
+        result = (response.status, response, answer, data)
+        connection.close()
+        return result
+
+    def assert_signed(self, method, path, body=None, expected_status=None, **kwargs):
+        status, response, answer, data = self.send(method, path, body, **kwargs)
+        if expected_status is not None:
+            self.assertEqual(status, expected_status)
+        nonce = kwargs.get("nonce", self.NONCE)
+        self.assertEqual(response.getheader("X-Sandbox-Signature"),
+                         expected_signature(self.SECRET, nonce, data, status, answer))
+        return status, answer
+
+    def test_health_is_signed_over_an_empty_request_body(self):
+        status, answer = self.assert_signed("GET", "/health", expected_status=200)
+        self.assertEqual(json.loads(answer)["signed"], True)
+        # The documented hash of nothing, not a value computed by the server.
+        self.assertEqual(hashlib.sha256(b"").hexdigest(),
+                         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
+
+    def test_a_raw_success_is_signed(self):
+        status, answer = self.assert_signed(
+            "POST", "/v1/raw", {"url": "https://example.com/a"}, expected_status=200)
+        self.assertEqual(json.loads(answer)["final_url"], "https://example.com/a")
+
+    def test_a_fetch_success_is_signed(self):
+        self.assert_signed("POST", "/v1/fetch", {"url": "https://example.com/a"},
+                           expected_status=200)
+
+    def test_a_search_answer_is_signed(self):
+        status, _ = self.assert_signed("POST", "/v1/search", {"query": ""})
+        self.assertGreaterEqual(status, 400)
+
+    def test_error_answers_are_signed(self):
+        status, answer = self.assert_signed(
+            "POST", "/v1/raw", {"url": "file:///etc/passwd"}, expected_status=422)
+        self.assertEqual(json.loads(answer)["error"]["code"], "unsupported_scheme")
+        status, answer = self.assert_signed(
+            "POST", "/v1/fetch", {"url": "file:///etc/passwd"}, expected_status=422)
+        self.assertEqual(json.loads(answer)["error"]["code"], "invalid_url")
+        self.assert_signed("POST", "/v1/shell", {}, expected_status=404)
+        self.assert_signed("GET", "/nothing", expected_status=404)
+
+    def test_errors_given_before_the_body_is_parsed_are_signed_too(self):
+        self.assert_signed("POST", "/v1/raw", {"url": "https://example.com/a"},
+                           expected_status=403, headers={"Host": "attacker.example"})
+        self.assert_signed("GET", "/health", expected_status=403,
+                           headers={"Host": "attacker.example"})
+        self.assert_signed("POST", "/v1/raw", {"url": "https://example.com/a"},
+                           expected_status=415, headers={"Content-Type": "text/plain"})
+
+    def test_no_secret_means_no_signature_and_health_says_so(self):
+        with mock.patch.object(server, "SIGNING_SECRET", None):
+            for method, path, body in (("GET", "/health", None),
+                                       ("POST", "/v1/raw", {"url": "https://example.com/a"}),
+                                       ("POST", "/v1/raw", {"url": "file:///x"})):
+                status, response, answer, _ = self.send(method, path, body)
+                self.assertIsNone(response.getheader("X-Sandbox-Signature"))
+            status, response, answer, _ = self.send("GET", "/health")
+            self.assertEqual(json.loads(answer)["signed"], False)
+
+    def test_no_secret_ignores_even_a_bad_nonce(self):
+        with mock.patch.object(server, "SIGNING_SECRET", None):
+            status, response, _, _ = self.send("GET", "/health", nonce="not hex")
+            self.assertEqual(status, 200)
+            self.assertIsNone(response.getheader("X-Sandbox-Signature"))
+
+    def test_no_nonce_means_no_signature(self):
+        for method, path, body in (("GET", "/health", None),
+                                   ("POST", "/v1/raw", {"url": "https://example.com/a"}),
+                                   ("POST", "/v1/raw", {"url": "file:///x"}),
+                                   ("GET", "/nothing", None)):
+            status, response, answer, _ = self.send(method, path, body, nonce=None)
+            self.assertIsNone(response.getheader("X-Sandbox-Signature"))
+        status, response, answer, _ = self.send("GET", "/health", nonce=None)
+        self.assertEqual(json.loads(answer)["signed"], True)
+
+    def test_a_bad_nonce_is_an_unsigned_400(self):
+        bad = ["", "ab" * 31, "ab" * 33, "ab" * 8, "ab" * 64, "zz" * 32, "ab" * 31 + "a ",
+               "ab" * 31 + "-1", "0x" + "a" * 62]
+        for nonce in bad:
+            for method, path, body in (("GET", "/health", None),
+                                       ("POST", "/v1/raw", {"url": "https://example.com/a"})):
+                status, response, answer, _ = self.send(method, path, body, nonce=nonce)
+                self.assertEqual(status, 400, nonce)
+                self.assertEqual(json.loads(answer)["error"]["code"], "invalid_request")
+                self.assertIsNone(response.getheader("X-Sandbox-Signature"))
+
+    def test_two_nonce_headers_are_a_bad_nonce(self):
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
+        connection.putrequest("GET", "/health")
+        connection.putheader("X-Sandbox-Nonce", self.NONCE)
+        connection.putheader("X-Sandbox-Nonce", self.NONCE)
+        connection.endheaders()
+        response = connection.getresponse()
+        response.read()
+        connection.close()
+        self.assertEqual(response.status, 400)
+        self.assertIsNone(response.getheader("X-Sandbox-Signature"))
+
+    def test_the_host_check_still_comes_before_the_nonce_check(self):
+        status, response, answer, _ = self.send(
+            "GET", "/health", nonce="bad", headers={"Host": "attacker.example"})
+        self.assertEqual((status, json.loads(answer)["error"]["code"]), (403, "forbidden_host"))
+
+    def test_the_signature_changes_with_everything_it_covers(self):
+        base = expected_signature(self.SECRET, self.NONCE, b"{}", 200, b"{}")
+        self.assertEqual(len(base), 64)
+        self.assertNotEqual(base, expected_signature(self.SECRET, "cd" * 32, b"{}", 200, b"{}"))
+        self.assertNotEqual(base, expected_signature(self.SECRET, self.NONCE, b'{"a":1}', 200, b"{}"))
+        self.assertNotEqual(base, expected_signature(self.SECRET, self.NONCE, b"{}", 404, b"{}"))
+        self.assertNotEqual(base, expected_signature(self.SECRET, self.NONCE, b"{}", 200, b"{ }"))
+        self.assertNotEqual(base, expected_signature(b"x" * 64, self.NONCE, b"{}", 200, b"{}"))
+        # The server's own function agrees with the test's, for each of them.
+        for args in ((self.NONCE, b"{}", 200, b"{}"), ("cd" * 32, b"{}", 200, b"{}"),
+                     (self.NONCE, b'{"a":1}', 200, b"{}"), (self.NONCE, b"{}", 404, b"{}"),
+                     (self.NONCE, b"{}", 200, b"{ }")):
+            self.assertEqual(server.response_signature(self.SECRET, *args),
+                             expected_signature(self.SECRET, *args))
+
+    def test_the_nonce_changes_the_signature_the_server_sends(self):
+        first = self.send("GET", "/health", nonce="11" * 32)[1].getheader("X-Sandbox-Signature")
+        second = self.send("GET", "/health", nonce="22" * 32)[1].getheader("X-Sandbox-Signature")
+        again = self.send("GET", "/health", nonce="11" * 32)[1].getheader("X-Sandbox-Signature")
+        self.assertNotEqual(first, second)
+        self.assertEqual(first, again)
+
+    def test_a_signature_for_one_request_body_does_not_verify_for_another(self):
+        # Same nonce, two different requests (and so two different answers).
+        a_status, a_response, a_answer, a_data = self.send(
+            "POST", "/v1/raw", {"url": "https://example.com/a"})
+        b_status, b_response, b_answer, b_data = self.send(
+            "POST", "/v1/raw", {"url": "file:///etc/passwd"})
+        self.assertNotEqual(a_data, b_data)
+        a_signature = a_response.getheader("X-Sandbox-Signature")
+        b_signature = b_response.getheader("X-Sandbox-Signature")
+        self.assertNotEqual(a_signature, b_signature)
+        # A's answer, presented as the answer to B's request: it must not verify.
+        self.assertNotEqual(a_signature, expected_signature(
+            self.SECRET, self.NONCE, b_data, a_status, a_answer))
+        # Even with B's own answer swapped in, only the request it answered fits.
+        self.assertNotEqual(a_signature, expected_signature(
+            self.SECRET, self.NONCE, a_data, b_status, b_answer))
+        self.assertEqual(b_signature, expected_signature(
+            self.SECRET, self.NONCE, b_data, b_status, b_answer))
+
+    def test_the_mac_test_script_agrees_with_the_server(self):
+        import subprocess
+        import tempfile
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "..", "Scripts", "verify_sandbox_signature.py")
+        request = {"url": "file:///etc/passwd"}
+        status, response, answer, data = self.send("POST", "/v1/raw", request)
+        with tempfile.TemporaryDirectory() as folder:
+            def write(name, content):
+                path = os.path.join(folder, name)
+                with open(path, "wb") as handle:
+                    handle.write(content)
+                return path
+            secret = write("secret", self.SECRET)
+            headers = write("headers", (f"HTTP/1.0 {status} X\r\nX-Sandbox-Signature: "
+                                        f"{response.getheader('X-Sandbox-Signature')}\r\n").encode())
+            body = write("body", answer)
+            sent = write("request", data)
+
+            def check(nonce, request_file):
+                return subprocess.run(
+                    [sys.executable, "-I", script, secret, nonce, request_file, headers, body],
+                    capture_output=True, text=True)
+            good = check(self.NONCE, sent)
+            self.assertEqual((good.returncode, good.stdout.strip()),
+                             (0, "status 422 | signature: present | matches: True"))
+            self.assertEqual(check("cd" * 32, sent).returncode, 1)
+            self.assertEqual(check(self.NONCE, "-").returncode, 1)
+
+    def test_a_trailing_newline_on_the_secret_is_not_part_of_the_key(self):
+        environ = {server.SECRET_ENV: self.SECRET.decode() + "\n"}
+        self.assertEqual(server.load_signing_secret(environ), self.SECRET)
+
+    def test_the_secret_is_removed_from_the_environment(self):
+        with mock.patch.dict(os.environ, {server.SECRET_ENV: self.SECRET.decode()}):
+            self.assertEqual(server.load_signing_secret(), self.SECRET)
+            self.assertNotIn(server.SECRET_ENV, os.environ)
+
+    def test_main_loads_the_secret_and_removes_it_before_serving(self):
+        fake_httpd = mock.MagicMock()
+        with mock.patch.dict(os.environ, {server.SECRET_ENV: self.SECRET.decode()}), \
+                mock.patch.object(server, "SIGNING_SECRET", None), \
+                mock.patch.object(server, "drop_privileges"), \
+                mock.patch.object(server, "ThreadingHTTPServer", return_value=fake_httpd), \
+                mock.patch.object(server, "stop_on_sigterm"), \
+                contextlib.redirect_stderr(io.StringIO()) as log:
+            with self.assertRaises(SystemExit) as context:
+                server.main()
+            self.assertEqual(context.exception.code, 0)
+            self.assertNotIn(server.SECRET_ENV, os.environ)
+            self.assertEqual(server.SIGNING_SECRET, self.SECRET)
+        self.assertIn("signing answers", log.getvalue())
+        self.assertNotIn(self.SECRET.decode(), log.getvalue())
+
+    def test_a_missing_or_empty_secret_means_no_signing(self):
+        self.assertIsNone(server.load_signing_secret({}))
+        self.assertIsNone(server.load_signing_secret({server.SECRET_ENV: ""}))
+
+    def test_a_secret_that_is_too_short_stops_the_start_without_printing_it(self):
+        environ = {server.SECRET_ENV: "short-secret-value"}
+        with self.assertRaises(SystemExit) as context:
+            server.load_signing_secret(environ)
+        self.assertNotIn("short-secret-value", str(context.exception.code))
+        self.assertNotIn(server.SECRET_ENV, environ)
 
 
 class AddressCheckScriptTests(unittest.TestCase):

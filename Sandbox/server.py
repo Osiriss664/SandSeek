@@ -32,6 +32,12 @@ over its size limit as an error instead of cutting it, sends no
 Accept-Encoding, and never uses the page cache. All of its redirects share one
 time limit.
 
+Signed answers: when SANDSEEK_SANDBOX_SECRET is set, a request that carries an
+X-Sandbox-Nonce header gets an X-Sandbox-Signature header on every answer (see
+"Signed answers" below), so a caller can tell this server from another program
+that took over the port. Without the secret, or without the nonce header,
+answers are unsigned, as before.
+
 Those checks live in this process, so they would not bind code that took it
 over. firewall.nft, loaded by entrypoint.sh before this server starts, applies
 the same rule to the whole VM, with one exception for DNS to the VM's name
@@ -46,6 +52,8 @@ import codecs
 import ctypes
 import errno
 import gzip
+import hashlib
+import hmac
 import html
 import http.client
 import ipaddress
@@ -1076,6 +1084,56 @@ def parse_duckduckgo(markup: str) -> list[dict]:
     ]
 
 
+# --- Signed answers ---------------------------------------------------------
+#
+# The launcher makes a random secret for each start, keeps a copy in a file only
+# the user can read, and passes it to this process in the environment. A caller
+# that can read the file sends a fresh random nonce with each request, and the
+# answer carries
+#   X-Sandbox-Signature: hex(HMAC-SHA256(secret,
+#       "tuff-sandbox-v1\n" + nonce + "\n" + hex(SHA256(request body)) + "\n"
+#       + status + "\n" + response body))
+# A program that merely sits on the port cannot make that, because the secret
+# never crosses the port. Covering the request body and the status stops a
+# genuine answer to one request from being passed off as the answer to another;
+# the nonce stops an old answer from being replayed. A GET has no body, so it
+# uses the hash of nothing.
+#
+# The key is the secret's bytes, without one trailing newline. An answer given
+# before the request body was read (an unparsable Content-Length) is signed over
+# an empty body.
+
+SECRET_ENV = "SANDSEEK_SANDBOX_SECRET"
+SIGNING_MIN_SECRET_BYTES = 32
+SIGNATURE_PREFIX = "tuff-sandbox-v1"
+NONCE_HEADER = "X-Sandbox-Nonce"
+SIGNATURE_HEADER = "X-Sandbox-Signature"
+NONCE_PATTERN = re.compile(r"[0-9a-fA-F]{64}")
+# The key for every signature, or None when no secret was given. Set once by
+# main() through load_signing_secret().
+SIGNING_SECRET: bytes | None = None
+
+
+def load_signing_secret(environ=os.environ) -> bytes | None:
+    """Takes the secret out of the environment, so it is not inherited by
+    anything this process starts and is gone from os.environ afterwards.
+    Missing or empty means no signing. A secret that is too short is a mistake
+    in the launcher, not a reason to sign with a weak key: refuse to start."""
+    value = environ.pop(SECRET_ENV, "").encode()
+    value = value.removesuffix(b"\n")
+    if not value:
+        return None
+    if len(value) < SIGNING_MIN_SECRET_BYTES:
+        sys.exit(f"{SECRET_ENV} is shorter than {SIGNING_MIN_SECRET_BYTES} bytes; refusing to start")
+    return value
+
+
+def response_signature(secret: bytes, nonce: str, request_body: bytes,
+                       status: int, body: bytes) -> str:
+    prefix = f"{SIGNATURE_PREFIX}\n{nonce}\n{hashlib.sha256(request_body).hexdigest()}\n{status}\n"
+    return hmac.new(secret, prefix.encode() + body, hashlib.sha256).hexdigest()
+
+
 # --- HTTP API ---------------------------------------------------------------
 
 def host_allowed(header: str | None) -> bool:
@@ -1098,12 +1156,48 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         sys.stderr.write("%s %s\n" % (self.command, fmt % args))
 
+    # The nonce of the request being answered, or None when its answer is not
+    # signed, and the request's body. Set at the start of every request.
+    _nonce: str | None = None
+    _request_body: bytes = b""
+
+    def _read_nonce(self) -> ToolError | None:
+        """Remembers a valid nonce so every answer to this request is signed,
+        the error answers too. Returns the error for a malformed nonce; the
+        caller raises it once the Host check has passed. Does nothing without
+        a secret: that server never signs and ignores the header."""
+        self._nonce = None
+        if SIGNING_SECRET is None:
+            return None
+        values = self.headers.get_all(NONCE_HEADER)
+        if not values:
+            return None
+        if len(values) != 1 or not NONCE_PATTERN.fullmatch(values[0].strip()):
+            return ToolError(f"{NONCE_HEADER} must be 64 hexadecimal characters",
+                             "invalid_request", 400)
+        self._nonce = values[0].strip()
+        return None
+
+    def _read_request_body(self) -> bytes:
+        """Reads the body before any check, so an error answer given before it
+        is parsed is signed over the bytes the caller sent. A Content-Length
+        that is missing, unparsable or too large gives no body here, and
+        do_POST reports it as before."""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            return self.rfile.read(length) if 0 < length <= MAX_REQUEST_BYTES else b""
+        except (ValueError, OSError):
+            return b""
+
     def _send(self, status: int, payload: dict):
         data = json.dumps(payload).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        if SIGNING_SECRET is not None and self._nonce is not None:
+            self.send_header(SIGNATURE_HEADER, response_signature(
+                SIGNING_SECRET, self._nonce, self._request_body, status, data))
         self.end_headers()
         self.wfile.write(data)
 
@@ -1111,18 +1205,28 @@ class Handler(BaseHTTPRequestHandler):
         self._send(error.status, {"error": {"message": error.message, "code": error.code}})
 
     def do_GET(self):
+        nonce_error = self._read_nonce()
+        self._request_body = b""
         if not host_allowed(self.headers.get("Host")):
             return self._error(ToolError("forbidden host", "forbidden_host", 403))
+        if nonce_error:
+            return self._error(nonce_error)
         if self.path == "/health":
             # "passages" tells the research loop this sandbox can rank passages.
-            # "raw" tells a caller that POST /v1/raw exists.
-            return self._send(200, {"status": "ok", "passages": True, "raw": True})
+            # "raw" tells a caller that POST /v1/raw exists. "signed" tells it
+            # that answers to a request with a nonce carry a signature.
+            return self._send(200, {"status": "ok", "passages": True, "raw": True,
+                                    "signed": SIGNING_SECRET is not None})
         self._error(ToolError("not found", "not_found", 404))
 
     def do_POST(self):
+        nonce_error = self._read_nonce()
+        self._request_body = self._read_request_body()
         try:
             if not host_allowed(self.headers.get("Host")):
                 raise ToolError("forbidden host", "forbidden_host", 403)
+            if nonce_error:
+                raise nonce_error
             # A browser cannot send application/json cross-origin without a
             # preflight, which this server never answers.
             if not (self.headers.get("Content-Type") or "").startswith("application/json"):
@@ -1131,7 +1235,7 @@ class Handler(BaseHTTPRequestHandler):
             if not 0 < length <= MAX_REQUEST_BYTES:
                 raise ToolError("request body is missing or too large", "invalid_request", 413)
             try:
-                request = json.loads(self.rfile.read(length))
+                request = json.loads(self._request_body)
             except ValueError:
                 raise ToolError("request body is not JSON", "invalid_request", 400)
             if not isinstance(request, dict):
@@ -1196,11 +1300,14 @@ def stop_on_sigterm(server) -> None:
 
 
 def main():
+    global SIGNING_SECRET
+    SIGNING_SECRET = load_signing_secret()
     drop_privileges()
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     server.daemon_threads = True
     stop_on_sigterm(server)
-    sys.stderr.write(f"SandSeek sandbox listening on :{PORT}\n")
+    sys.stderr.write(f"SandSeek sandbox listening on :{PORT}"
+                     f" ({'signing answers' if SIGNING_SECRET is not None else 'not signing'})\n")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
