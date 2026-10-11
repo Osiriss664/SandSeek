@@ -75,7 +75,11 @@ public struct ResearchOptions: Equatable, Sendable {
     /// default), or `nonce`, with a random code per run. A measuring aid: the
     /// command line reads it from the environment (`SANDSEEK_MARKERS`).
     public var markers: ResearchMarkerMode = .fixed
-    /// The code of the `code` markers, for tests; random when nil.
+    /// A file the first request for the answer is written to (the messages as
+    /// JSON), to measure what the model got to read. A measuring aid: the
+    /// command line reads it from `SANDSEEK_DUMP_ANSWER_REQUEST`; off when nil.
+    public var dumpAnswerRequestPath: String? = nil
+    /// The code of the `nonce` markers, for tests; random when nil.
     var markerCode: String? = nil
 
     /// The ranges the command line and the app accept. Limits that protect
@@ -1450,6 +1454,23 @@ public struct ResearchAgent: Sendable {
         let missing = !read.isEmpty && (figuresUncited || noneCited)
         let wanted = Self.wrongLanguage(question: state.question, answer: answer.0)
         guard !unknown.isEmpty || missing || wanted != nil else { return answer }
+        let request = Self.revisionRequest(
+            unknown: unknown, read: read, missingCitations: missing, language: wanted)
+        // The rewrite needs the answer once more in the prompt and room for a
+        // reply as long as the answer. When the window cannot hold both, the
+        // server cuts the reply off at the end of the window (Berlin on 1730d4f:
+        // 14,861 prompt tokens, reply cut at 1,523 after 139 s), so it is not
+        // asked. Unread citations are taken out of the answer afterwards anyway.
+        let needed = state.size(overhead: toolCharacters) + Self.State.characters(
+            of: .object(["role": .string("assistant"), "content": .string(answer.0)]))
+            + request.count + 64
+        // Only with a window the server named: a fixed or guessed budget is a
+        // speed cap for shortening, not the size of the window.
+        let windowKnown = options.contextBudgetCharacters == nil && state.contextTokens != nil
+        guard !windowKnown || needed <= continuationLimit(state) else {
+            onEvent(.rewriteNotKept("no room left in the context window"))
+            return answer
+        }
         if !unknown.isEmpty { onEvent(.revisingUnreadCitations) }
         if missing { onEvent(.askingForCitations) }
         if wanted != nil { onEvent(.askingForAnswerLanguage) }
@@ -1459,8 +1480,7 @@ public struct ResearchAgent: Sendable {
         ]))
         state.messages.append(.object([
             "role": .string("user"),
-            "content": .string(Self.revisionRequest(
-                unknown: unknown, read: read, missingCitations: missing, language: wanted)),
+            "content": .string(request),
         ]))
         // Rewriting needs no reasoning, which would only make the turn slow.
         let revision: ResearchAssistantTurn
@@ -2017,6 +2037,15 @@ public struct ResearchAgent: Sendable {
             onEvent(.shortenedOlderResults)
         }
         var sent = state.size(overhead: toolCharacters)
+        if state.answering, !state.dumpedAnswerRequest,
+           let path = options.dumpAnswerRequestPath {
+            state.dumpedAnswerRequest = true
+            if let data = try? ResearchJSON.array(state.messages).encoded() {
+                // Best effort and private: the file holds the pages as the model read them.
+                FileManager.default.createFile(
+                    atPath: path, contents: data, attributes: [.posixPermissions: 0o600])
+            }
+        }
         // A turn with reasoning on gets the thinking limit; others only the
         // transport's own step timeout.
         let limit = (thinking ?? chat.enableThinking) == true
@@ -3245,6 +3274,8 @@ public struct ResearchAgent: Sendable {
         var droppedUnreadCitations: [Int] = []
         /// The markers around web text in this run.
         var markers = Markers.fixed
+        /// The first request for the answer was written to `dumpAnswerRequestPath`.
+        var dumpedAnswerRequest = false
 
         /// The server's tokens held fewer characters than estimated: the
         /// estimate and the measured ratio both shrink a quarter.

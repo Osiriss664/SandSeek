@@ -5591,6 +5591,52 @@ struct ResearchRoundDLoopTests {
         #expect(services.requests.filter { $0.url.path == "/v1/fetch" }.count == 1)
     }
 
+    @Test func theAnswerRequestCanBeWrittenToAFile() async throws {
+        let path = NSTemporaryDirectory() + "answer-request-\(UUID().uuidString).json"
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        #expect(try ResearchArguments.parse(
+            ["q"], environment: [ResearchArguments.dumpAnswerRequestVariable: path])
+            .options.dumpAnswerRequestPath == path)
+        #expect(try ResearchArguments.parse(["q"], environment: [:])
+            .options.dumpAnswerRequestPath == nil)
+        var options = ResearchOptions()
+        options.nudges = false
+        options.dumpAnswerRequestPath = path
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
+            FakeServices.answer("VMs [1]."),
+        ])
+        _ = try await agent(services, options: options).run(question: "q")
+        let data = try #require(FileManager.default.contents(atPath: path))
+        let text = String(decoding: data, as: UTF8.self)
+        #expect(text.contains("Source [1]"))
+    }
+
+    @Test func aRewriteThatWouldNotFitTheContextIsNotAsked() async throws {
+        var options = ResearchOptions()
+        options.nudges = false
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
+            FakeServices.answer("VMs [1], and Linux 6 [3]."),
+        ]) { path, body in
+            if path == "/v1/models" {
+                // A window far smaller than the system prompt and the tools.
+                return FakeServices.json(200, .object(["object": .string("list"), "data": .array([
+                    .object(["id": .string("qwen3.6-35b-a3b"), "context_length": .integer(4_096)]),
+                ])]))
+            }
+            return FakeServices.webPages(path, body)
+        }
+        let log = EventLog()
+        let report = try await agent(services, options: options, events: log).run(question: "q")
+        // No third request: the answer plus the request would not fit the window.
+        #expect(services.modelRequests.count == 2)
+        #expect(log.events.contains(.rewriteNotKept("no room left in the context window")))
+        #expect(!log.events.contains(.revisingUnreadCitations))
+        #expect(report.answer == "VMs [1], and Linux 6.")
+        #expect(report.droppedUnreadCitations == [3])
+    }
+
     @Test func aCitationOfAnEmptyPageIsRewrittenLikeAnUnknownNumber() async throws {
         var options = ResearchOptions()
         options.nudges = false
