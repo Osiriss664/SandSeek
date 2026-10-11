@@ -22,6 +22,13 @@ connection. Redirects are followed by hand and checked the same way. That keeps
 the Mac (the VM's gateway), the local network and cloud metadata addresses out
 of reach.
 
+PDFs: when /v1/fetch gets an application/pdf page (or, for a response typed
+application/octet-stream or not typed at all, one whose body starts with
+"%PDF-"), the text is read with pypdf in a child process, like the HTML
+fallback parser, with limits on size, pages, time and memory. Encrypted PDFs
+are refused and nothing is OCR'd. The text then takes the same path as HTML
+text. /v1/raw never parses a PDF: it returns the bytes, as for any type.
+
 /v1/raw is for a caller that reads pages itself (TUFF's page reader). It does
 the same address checks, but returns the site's bytes as they came: base64 in
 JSON, with the site's status, content type and content encoding. Invisible-
@@ -56,12 +63,15 @@ import hashlib
 import hmac
 import html
 import http.client
+import io
 import ipaddress
 import json
+import logging
 import math
 import multiprocessing
 import os
 import re
+import resource
 import signal
 import socket
 import ssl
@@ -82,6 +92,11 @@ try:
     import trafilatura
 except ImportError:  # The extractor is optional so tests can run without it.
     trafilatura = None
+
+try:
+    from pypdf import PdfReader
+except ImportError:  # Without pypdf a PDF is refused as before; /health says "pdf": false.
+    PdfReader = None
 
 PORT = int(os.environ.get("PORT", "9100"))
 SEARXNG_URL = os.environ.get("SEARXNG_URL", "").rstrip("/")
@@ -109,6 +124,21 @@ MAX_EXTRACT_CHARS = 2_000_000
 FALLBACK_TIMEOUT = float(os.environ.get("FALLBACK_TIMEOUT", "10"))
 MAX_FALLBACK_CHARS = 500_000
 MAX_DOWNLOAD_BYTES = int(os.environ.get("MAX_DOWNLOAD_BYTES", str(5 * 1024 * 1024)))
+# PDFs are read by pypdf in a child process (see read_pdf_bounded). A PDF may
+# be as large as any download; one that is longer is refused, never cut. At
+# most MAX_PDF_PAGES pages are read, the child is killed after PDF_TIMEOUT
+# seconds, and it may not grow beyond PDF_MEMORY_LIMIT bytes of address space.
+# The text is capped at MAX_EXTRACT_CHARS like any page. No OCR.
+MAX_PDF_BYTES = MAX_DOWNLOAD_BYTES
+MAX_PDF_PAGES = 50
+PDF_TIMEOUT = float(os.environ.get("PDF_TIMEOUT", "15"))
+PDF_MEMORY_LIMIT = 1024 * 1024 * 1024
+# application/pdf is read as a PDF whatever the body (a body that is not one is
+# "pdf_unreadable"). A response with a generic or missing type is read as a PDF
+# only when its body starts with the PDF magic; no other type is sniffed.
+PDF_TYPES = ("application/pdf", "application/x-pdf")
+PDF_SNIFFED_TYPES = ("", "application/octet-stream", "binary/octet-stream")
+PDF_MAGIC = b"%PDF-"
 MAX_REDIRECTS = 5
 MAX_REQUEST_BYTES = 64 * 1024
 # Seconds a client may stay silent on an open connection (see Handler.timeout).
@@ -586,6 +616,10 @@ class _FallbackText(HTMLParser):
         return collapse_whitespace("".join(self.parts))
 
 
+def clean_title(title: str) -> str:
+    return clean_text(re.sub(r"\s+", " ", title)).strip()[:300]
+
+
 TITLE_OPEN = re.compile(r"<title(?:\s[^<>]{0,500})?>", re.I)
 
 
@@ -600,8 +634,7 @@ def extract_title(markup: str) -> str:
     end = head.lower().find("</title>", match.end())
     if end < 0:
         return ""
-    title = html.unescape(head[match.end():end])
-    return clean_text(re.sub(r"\s+", " ", title)).strip()[:300]
+    return clean_title(html.unescape(head[match.end():end]))
 
 
 def extract_text(markup: str, url: str) -> str:
@@ -638,22 +671,22 @@ def _fallback_in_child(markup: str, url: str) -> str:
     return fallback_text(markup)
 
 
-def _run_in_child(extractor, markup: str, url: str, timeout: float) -> str | None:
-    """`extractor(markup, url)` run in a child process that is killed after
-    `timeout` seconds. None when it fails, returns no text or runs out of time."""
+def _child_message(target, args: tuple, timeout: float, limit: int) -> bytes | None:
+    """The one message `target(sender, *args)` sends from a child process, or
+    None when the child sends nothing, dies or is still busy after `timeout`
+    seconds (it is killed then). Raw bytes only, never a pickle: the child
+    parses hostile files, and unpickling what it sends would let an exploited
+    parser run code in the server. recv_bytes never unpickles; `limit` bounds
+    what is read."""
     context = multiprocessing.get_context("forkserver")
     receiver, sender = context.Pipe(duplex=False)
-    child = context.Process(target=_extract_in_child, args=(sender, extractor, markup, url),
-                            daemon=True)
+    child = context.Process(target=target, args=(sender, *args), daemon=True)
     child.start()
     sender.close()
-    text = None
+    message = None
     try:
         if receiver.poll(timeout):
-            # recv_bytes never unpickles; maxlength bounds what is read.
-            message = receiver.recv_bytes(4 * MAX_EXTRACT_CHARS + 1)
-            if message.startswith(b"\x01"):
-                text = clean_text(message[1:].decode("utf-8", "replace"))
+            message = receiver.recv_bytes(limit)
     except (EOFError, OSError):
         pass
     finally:
@@ -661,7 +694,17 @@ def _run_in_child(extractor, markup: str, url: str, timeout: float) -> str | Non
         if child.is_alive():
             child.kill()
         child.join(5)
-    return text if isinstance(text, str) else None
+    return message
+
+
+def _run_in_child(extractor, markup: str, url: str, timeout: float) -> str | None:
+    """`extractor(markup, url)` run in a child process that is killed after
+    `timeout` seconds. None when it fails, returns no text or runs out of time."""
+    message = _child_message(_extract_in_child, (extractor, markup, url), timeout,
+                             4 * MAX_EXTRACT_CHARS + 1)
+    if message is not None and message.startswith(b"\x01"):
+        return clean_text(message[1:].decode("utf-8", "replace"))
+    return None
 
 
 def extract_text_bounded(markup: str, url: str, timeout: float | None = None,
@@ -682,6 +725,130 @@ def extract_text_bounded(markup: str, url: str, timeout: float | None = None,
         sys.stderr.write(f"the fallback parser could not read {url} either; no text\n")
         return ""
     return text
+
+
+# --- PDF --------------------------------------------------------------------
+
+class PdfRefused(Exception):
+    """A PDF that is read no further, with the tool error code to report."""
+
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
+def read_pdf(data: bytes) -> dict:
+    """Runs in the child. The text of at most MAX_PDF_PAGES pages, each cleaned
+    like HTML text, plus the document title and the page counts. Never
+    decrypts: an encrypted PDF is refused, whatever its password."""
+    if PdfReader is None:
+        raise PdfRefused("pdf_unreadable")
+    logging.getLogger("pypdf").setLevel(logging.CRITICAL)
+    reader = PdfReader(io.BytesIO(data), strict=False)
+    if reader.is_encrypted:
+        raise PdfRefused("pdf_encrypted")
+    total = len(reader.pages)
+    title = ""
+    try:
+        title = str(reader.metadata.title or "") if reader.metadata else ""
+    except Exception:
+        pass
+    parts: list[str] = []
+    chars = pages_read = pages_failed = 0
+    cut = False
+    for number in range(min(total, MAX_PDF_PAGES)):
+        pages_read += 1
+        try:
+            text = collapse_whitespace(clean_text(reader.pages[number].extract_text() or ""))
+        except Exception:
+            pages_failed += 1  # one odd page does not cost the rest
+            continue
+        if len(text) > MAX_EXTRACT_CHARS - chars:
+            text, cut = text[:MAX_EXTRACT_CHARS - chars], True
+        if text:
+            parts.append(text)
+            chars += len(text)
+        if cut:
+            break
+    return {"title": title, "text": "\n\n".join(parts), "pages": total,
+            "pages_read": pages_read, "pages_failed": pages_failed, "cut": cut}
+
+
+def _pdf_in_child(sender, reader, data: bytes) -> None:
+    # \x01 + JSON on success, \x02 + an error code on a refusal; anything else
+    # (a crash, a kill, no message) is "unreadable". Parsed with json, never pickle.
+    try:
+        try:
+            resource.setrlimit(resource.RLIMIT_AS, (PDF_MEMORY_LIMIT, PDF_MEMORY_LIMIT))
+        except (ValueError, OSError):
+            pass  # not every system allows it; the VM's own limits still apply
+        try:
+            result = reader(data)
+            sender.send_bytes(b"\x01" + json.dumps(result, ensure_ascii=False).encode("utf-8", "replace"))
+        except PdfRefused as refusal:
+            sender.send_bytes(b"\x02" + refusal.code.encode("ascii"))
+        except Exception:
+            sender.send_bytes(b"\x02pdf_unreadable")
+    finally:
+        sender.close()
+
+
+def read_pdf_bounded(data: bytes, timeout: float | None = None,
+                     reader: Callable[[bytes], dict] = read_pdf) -> dict:
+    """`reader(data)` in a child process that is killed after `timeout`
+    seconds. Returns {"title", "text", "pages", "pages_read", "pages_failed",
+    "cut"} with text and title cleaned again here (the child is not trusted),
+    or raises ToolError: pdf_encrypted, or pdf_unreadable for a PDF that is
+    malformed, has no text, or could not be read in time."""
+    limit = PDF_TIMEOUT if timeout is None else timeout
+    unreadable = ToolError("the PDF could not be read: it is damaged, or reading it took longer "
+                           f"than {limit:g} s", "pdf_unreadable")
+    message = _child_message(_pdf_in_child, (reader, data), limit, 4 * MAX_EXTRACT_CHARS + 65536)
+    if message is None:
+        raise unreadable
+    if message.startswith(b"\x02"):
+        code = message[1:].decode("ascii", "replace")
+        if code == "pdf_encrypted":
+            raise ToolError("the PDF is encrypted; encrypted PDFs are not read", code)
+        raise unreadable
+    try:
+        result = json.loads(message[1:]) if message.startswith(b"\x01") else None
+        title, text = result["title"], result["text"]
+        counts = [result[key] for key in ("pages", "pages_read", "pages_failed")]
+        if (not isinstance(title, str) or not isinstance(text, str) or result["cut"] not in (True, False)
+                or not all(type(n) is int and n >= 0 for n in counts)):
+            raise ValueError("unexpected types")
+    except (ValueError, KeyError, TypeError):
+        raise unreadable from None
+    result["title"] = clean_title(title)
+    result["text"] = collapse_whitespace(clean_text(text))
+    return result
+
+
+def last_path_segment(url: str) -> str:
+    segment = urllib.parse.unquote(urllib.parse.urlsplit(url).path.rstrip("/").rsplit("/", 1)[-1])
+    return clean_title(segment)
+
+
+def pdf_page(url: str, body: bytes) -> "Page":
+    """A Page from a PDF's bytes. Its text is cleaned like HTML text (see
+    read_pdf_bounded) and carries a closing note when pages were left out. The
+    title is the document's own, else the last part of the address."""
+    result = read_pdf_bounded(body)
+    notes = []
+    if result["pages_read"] < result["pages"]:
+        notes.append(f"only the first {result['pages_read']} of {result['pages']} pages were read")
+    if result["pages_failed"]:
+        notes.append(f"{result['pages_failed']} pages could not be read")
+    if result["cut"]:
+        notes.append(f"the text was cut after {MAX_EXTRACT_CHARS} characters")
+    text = result["text"]
+    if not text:
+        raise ToolError("the PDF has no text that can be read (scanned pages are not read; "
+                        "there is no OCR)", "pdf_unreadable")
+    if notes:
+        text += f"\n\n[PDF note: {'; '.join(notes)}.]"
+    return Page(url, result["title"] or last_path_segment(url), text)
 
 
 # --- Passages ---------------------------------------------------------------
@@ -997,17 +1164,29 @@ class WebTools:
         if response.status >= 400:
             raise ToolError(f"{final_url} answered HTTP {response.status}", "http_error", 502)
         content_type = response.headers.get("content-type", "").lower()
+        kind = content_type.split(";")[0].strip()
+        is_pdf = False
         if not content_type.startswith(TEXT_TYPES):
-            kind = content_type.split(";")[0] or "unknown"
-            raise ToolError(f"{final_url} is {kind}, not a web page", "unsupported_content")
-        body = decode_body(response)
-        raw = body.decode(page_charset(content_type, body), errors="replace")
-        if content_type.startswith("text/plain"):
-            # Runs of blanks are collapsed as in the fallback parser, so a page
-            # of millions of spaces is not kept (or searched) as such.
-            page = Page(final_url, "", collapse_whitespace(clean_text(raw)))
+            if PdfReader is not None and (kind in PDF_TYPES or kind in PDF_SNIFFED_TYPES):
+                body = decode_body(response)
+                is_pdf = kind in PDF_TYPES or body.startswith(PDF_MAGIC)
+            if not is_pdf:
+                raise ToolError(f"{final_url} is {kind or 'unknown'}, not a web page",
+                                "unsupported_content")
+        if is_pdf:
+            # A PDF cut at the size limit cannot be read, so it is refused. A
+            # body that fills the limit exactly after decompression was cut too.
+            if (response.truncated or len(body) > MAX_PDF_BYTES
+                    or (len(body) >= MAX_DOWNLOAD_BYTES
+                        and response.headers.get("content-encoding", "identity").lower()
+                        not in ("", "identity"))):
+                raise ToolError(f"{final_url} is a PDF larger than {MAX_PDF_BYTES} bytes",
+                                "oversized", 502)
+            page = pdf_page(final_url, body)
         else:
-            page = Page(final_url, extract_title(raw), extract_text_bounded(raw, final_url))
+            body = decode_body(response)
+            raw = body.decode(page_charset(content_type, body), errors="replace")
+            page = self._html_page(final_url, content_type, raw)
         with self.lock:
             for key in {url, final_url}:
                 self.cache[key] = page
@@ -1015,6 +1194,14 @@ class WebTools:
             while len(self.cache) > PAGE_CACHE_SIZE:
                 self.cache.popitem(last=False)
         return page
+
+    @staticmethod
+    def _html_page(final_url: str, content_type: str, raw: str) -> Page:
+        if content_type.startswith("text/plain"):
+            # Runs of blanks are collapsed as in the fallback parser, so a page
+            # of millions of spaces is not kept (or searched) as such.
+            return Page(final_url, "", collapse_whitespace(clean_text(raw)))
+        return Page(final_url, extract_title(raw), extract_text_bounded(raw, final_url))
 
     def fetch(self, url: str, offset: int = 0, max_chars: int = DEFAULT_SLICE_CHARS,
               passages: bool = False, query: str = "") -> dict:
@@ -1357,10 +1544,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(nonce_error)
         if self.path == "/health":
             # "passages" tells the research loop this sandbox can rank passages.
+            # "pdf" tells it /v1/fetch reads PDFs (pypdf is installed).
             # "raw" tells a caller that POST /v1/raw exists. "signed" tells it
             # that answers to a request with a nonce carry a signature.
-            return self._send(200, {"status": "ok", "passages": True, "raw": True,
-                                    "signed": SIGNING_SECRET is not None})
+            return self._send(200, {"status": "ok", "passages": True, "pdf": PdfReader is not None,
+                                    "raw": True, "signed": SIGNING_SECRET is not None})
         self._error(ToolError("not found", "not_found", 404))
 
     def do_POST(self):
