@@ -108,7 +108,9 @@ let agent = ResearchAgent(
         streaming: connection.streaming,
         authorization: authorization,
         transport: transport),
-    sandbox: ResearchSandboxClient(baseURL: arguments.sandboxURL, transport: sandboxTransport),
+    sandbox: ResearchSandboxClient(
+        baseURL: arguments.sandboxURL, transport: sandboxTransport,
+        secretFile: ResearchSandboxSecret.defaultFileURL),
     options: arguments.options,
     onEvent: { event in
         guard !quiet else { return }

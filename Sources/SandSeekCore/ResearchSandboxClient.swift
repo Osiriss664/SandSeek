@@ -61,10 +61,20 @@ public struct ResearchToolFailure: Error, Equatable, Sendable {
 public struct ResearchSandboxClient: Sendable {
     public let baseURL: URL
     private let transport: any ResearchHTTPTransport
+    private let secretFile: URL?
+    private let makeNonce: @Sendable () -> String
 
-    public init(baseURL: URL, transport: any ResearchHTTPTransport) {
+    /// With `secretFile` (see `ResearchSandboxSecret`), a request made while
+    /// that file exists carries a fresh nonce, and the answer is used only if
+    /// it is signed with the secret in the file. A missing file means unsigned
+    /// answers, as before, and so does nil, the default: tests, and anything
+    /// that talks to a sandbox the launcher did not start.
+    public init(baseURL: URL, transport: any ResearchHTTPTransport, secretFile: URL? = nil,
+                makeNonce: @escaping @Sendable () -> String = { ResearchSandboxSecret.randomNonce() }) {
         self.baseURL = baseURL
         self.transport = transport
+        self.secretFile = secretFile
+        self.makeNonce = makeNonce
     }
 
     /// What the user is told when the sandbox cannot rank passages.
@@ -76,16 +86,10 @@ public struct ResearchSandboxClient: Sendable {
     /// Checks that the sandbox answers. With `requirePassages`, it must also
     /// say it can rank passages, which an older sandbox does not.
     public func checkHealth(requirePassages: Bool = false) async throws {
-        let response: ResearchHTTPResponse
-        do {
-            response = try await transport.send(
-                method: "GET", url: baseURL.appendingPathComponent("health"), body: nil)
-        } catch {
-            throw ResearchError.sandboxUnavailable(error.localizedDescription)
-        }
         // A 3xx is never followed (see `ResearchNoRedirectDelegate`) and is an
         // error here, as every other answer but 200.
-        if response.isRedirect { throw ResearchError.redirectRefused(status: response.status) }
+        let response = try await exchange(
+            method: "GET", url: baseURL.appendingPathComponent("health"), body: nil)
         guard response.status == 200 else {
             throw ResearchError.sandboxUnavailable("health check answered HTTP \(response.status)")
         }
@@ -167,18 +171,14 @@ public struct ResearchSandboxClient: Sendable {
     }
 
     private func post(_ path: String, _ fields: [String: ResearchJSON]) async throws -> ResearchJSON {
-        let response: ResearchHTTPResponse
+        let body: Data
         do {
-            response = try await transport.send(
-                method: "POST",
-                url: baseURL.appendingPathComponent(path),
-                body: try ResearchJSON.object(fields).encoded())
+            body = try ResearchJSON.object(fields).encoded()
         } catch {
             throw ResearchError.sandboxUnavailable(error.localizedDescription)
         }
-        // The body of a redirect is not read: nothing that answers with a 3xx
-        // is the sandbox, so nothing in it is passed on to the model.
-        if response.isRedirect { throw ResearchError.redirectRefused(status: response.status) }
+        let response = try await exchange(
+            method: "POST", url: baseURL.appendingPathComponent(path), body: body)
         let reply = try? ResearchJSON.decode(response.body)
         guard response.status == 200, let reply else {
             let message = reply?["error"]?["message"]?.stringValue
@@ -190,5 +190,37 @@ public struct ResearchSandboxClient: Sendable {
                     ?? response.status)
         }
         return reply
+    }
+
+    /// One request and its answer. A 3xx is refused first: its body is never
+    /// read, since nothing that answers with a 3xx is the sandbox, so nothing
+    /// in it is passed on to the model. Then, when a secret file exists, the
+    /// request carries a fresh nonce and the answer's signature is checked
+    /// before anything in it is used. The secret is read for every request.
+    private func exchange(method: String, url: URL, body: Data?) async throws -> ResearchHTTPResponse {
+        let signing = try ResearchSandboxSigning.begin(secretFile: secretFile, makeNonce: makeNonce)
+        let response: ResearchHTTPResponse
+        do {
+            if let signing {
+                response = try await transport.send(
+                    method: method, url: url, body: body, timeout: nil, authorization: nil,
+                    headers: signing.requestHeaders)
+            } else {
+                response = try await transport.send(method: method, url: url, body: body)
+            }
+        } catch {
+            throw ResearchError.sandboxUnavailable(error.localizedDescription)
+        }
+        if response.isRedirect { throw ResearchError.redirectRefused(status: response.status) }
+        if let signing, !signing.isValid(response, requestBody: body ?? Data()) {
+            throw ResearchError.sandboxNotSigned(address: address)
+        }
+        return response
+    }
+
+    /// The sandbox's host and port for a message, such as `127.0.0.1:9100`.
+    private var address: String {
+        let host = baseURL.host ?? "127.0.0.1"
+        return (host.contains(":") ? "[\(host)]" : host) + ":" + String(baseURL.port ?? 80)
     }
 }

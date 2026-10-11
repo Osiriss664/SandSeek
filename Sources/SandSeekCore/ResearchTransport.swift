@@ -6,10 +6,14 @@ import FoundationNetworking
 public struct ResearchHTTPResponse: Equatable, Sendable {
     public let status: Int
     public let body: Data
+    /// The response headers, with the names in lower case. Empty from a
+    /// transport that does not read them, such as the test fakes.
+    public let headers: [String: String]
 
-    public init(status: Int, body: Data) {
+    public init(status: Int, body: Data, headers: [String: String] = [:]) {
         self.status = status
         self.body = body
+        self.headers = headers
     }
 
     /// A 3xx answer. `URLSessionResearchTransport` never follows a redirect,
@@ -175,6 +179,11 @@ public protocol ResearchHTTPTransport: Sendable {
     /// The streaming form of the request above, with the same header.
     func sendStreaming(method: String, url: URL, body: Data?, timeout: TimeInterval?,
                        authorization: String?) async throws -> ResearchHTTPLineResponse
+    /// The same as the request above, with more request headers (the sandbox's
+    /// `X-Sandbox-Nonce`); the response carries its headers. A transport that
+    /// cannot send headers gets the default below, which refuses to drop them.
+    func send(method: String, url: URL, body: Data?, timeout: TimeInterval?,
+              authorization: String?, headers: [String: String]) async throws -> ResearchHTTPResponse
 }
 
 public extension ResearchHTTPTransport {
@@ -191,6 +200,15 @@ public extension ResearchHTTPTransport {
     func sendStreaming(method: String, url: URL, body: Data?, timeout: TimeInterval?,
                        authorization: String?) async throws -> ResearchHTTPLineResponse {
         try await sendStreaming(method: method, url: url, body: body, timeout: timeout)
+    }
+
+    func send(method: String, url: URL, body: Data?, timeout: TimeInterval?,
+              authorization: String?, headers: [String: String]) async throws -> ResearchHTTPResponse {
+        guard headers.isEmpty else {
+            throw ResearchError.sandboxUnavailable("this transport cannot send request headers")
+        }
+        return try await send(method: method, url: url, body: body, timeout: timeout,
+                              authorization: authorization)
     }
 
     /// For a transport that cannot stream (every test fake): the whole reply
@@ -293,14 +311,22 @@ public struct URLSessionResearchTransport: ResearchHTTPTransport {
     /// making the next request wait for it.
     public func send(method: String, url: URL, body: Data?, timeout: TimeInterval?,
                      authorization: String?) async throws -> ResearchHTTPResponse {
+        try await send(method: method, url: url, body: body, timeout: timeout,
+                       authorization: authorization, headers: [:])
+    }
+
+    /// The same, with more request headers (names as they are sent). The
+    /// response's headers come back with their names in lower case.
+    public func send(method: String, url: URL, body: Data?, timeout: TimeInterval?,
+                     authorization: String?, headers: [String: String]) async throws -> ResearchHTTPResponse {
         guard let timeout else {
             return try await fetch(method: method, url: url, body: body,
-                                   authorization: authorization)
+                                   authorization: authorization, headers: headers)
         }
         return try await withThrowingTaskGroup(of: ResearchHTTPResponse.self) { group in
             group.addTask {
                 try await fetch(method: method, url: url, body: body,
-                                authorization: authorization)
+                                authorization: authorization, headers: headers)
             }
             group.addTask {
                 try await Task.sleep(nanoseconds: UInt64(max(0, timeout) * 1_000_000_000))
@@ -312,21 +338,56 @@ public struct URLSessionResearchTransport: ResearchHTTPTransport {
         }
     }
 
-    private func fetch(method: String, url: URL, body: Data?,
-                       authorization: String?) async throws -> ResearchHTTPResponse {
+    private func fetch(method: String, url: URL, body: Data?, authorization: String?,
+                       headers: [String: String]) async throws -> ResearchHTTPResponse {
         let request = Self.makeRequest(method: method, url: url, body: body,
-                                       accept: "application/json", authorization: authorization)
+                                       accept: "application/json", authorization: authorization,
+                                       headers: headers)
         #if canImport(FoundationNetworking)
         let (data, response) = try await session.data(for: request)
         #else
-        let (data, response) = try await session.data(for: request, delegate: owner.noRedirect)
+        // Read with a limit: a program on a loopback port must not make
+        // SandSeek hold an endless answer in memory before it is checked.
+        let (bytes, response) = try await session.bytes(for: request, delegate: owner.noRedirect)
+        if response.expectedContentLength > Int64(Self.maximumResponseBytes) {
+            bytes.task.cancel()
+            throw URLError(.dataLengthExceedsMaximum)
+        }
+        var data = Data()
+        for try await byte in bytes {
+            data.append(byte)
+            if data.count > Self.maximumResponseBytes {
+                bytes.task.cancel()
+                throw URLError(.dataLengthExceedsMaximum)
+            }
+        }
         #endif
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        return ResearchHTTPResponse(status: status, body: data)
+        return ResearchHTTPResponse(status: status, body: data,
+                                    headers: Self.lowercasedHeaders(of: response))
+    }
+
+    /// The most a `send` reads of one answer. The sandbox's and the model
+    /// server's answers are far smaller (a page slice is at most 20,000
+    /// characters; a model turn is a few thousand tokens).
+    static let maximumResponseBytes = 16 * 1024 * 1024
+
+    /// The headers of an HTTP reply, with the names in lower case. A name that
+    /// came twice is one entry, as `URLSession` joins the values.
+    static func lowercasedHeaders(of response: URLResponse) -> [String: String] {
+        guard let http = response as? HTTPURLResponse else { return [:] }
+        var headers: [String: String] = [:]
+        for (name, value) in http.allHeaderFields {
+            if let name = name as? String, let value = value as? String {
+                headers[name.lowercased()] = value
+            }
+        }
+        return headers
     }
 
     static func makeRequest(method: String, url: URL, body: Data?,
-                            accept: String, authorization: String? = nil) -> URLRequest {
+                            accept: String, authorization: String? = nil,
+                            headers: [String: String] = [:]) -> URLRequest {
         var request = URLRequest(url: url)
         request.httpMethod = method
         if let body {
@@ -337,6 +398,9 @@ public struct URLSessionResearchTransport: ResearchHTTPTransport {
         // The only place the key goes: a header, never the body or the URL.
         if let authorization, !authorization.isEmpty {
             request.setValue(authorization, forHTTPHeaderField: "Authorization")
+        }
+        for (name, value) in headers {
+            request.setValue(value, forHTTPHeaderField: name)
         }
         return request
     }
@@ -473,6 +537,13 @@ public enum ResearchError: Error, Equatable, CustomStringConvertible {
     /// The sandbox or the model server answered with a 3xx. SandSeek's client
     /// never follows redirects, and neither service redirects legitimately.
     case redirectRefused(status: Int)
+    /// The sandbox's secret file exists but cannot be used (see
+    /// `ResearchSandboxSecret`). The message says what is wrong with it, and
+    /// never holds the secret.
+    case sandboxSecretUnusable(String)
+    /// An answer from the sandbox's port is not signed with the sandbox's
+    /// secret. `address` is the host and port, such as `127.0.0.1:9100`.
+    case sandboxNotSigned(address: String)
 
     public var description: String {
         switch self {
@@ -502,6 +573,11 @@ public enum ResearchError: Error, Equatable, CustomStringConvertible {
             "something on that port answered with a redirect (HTTP \(status)), which SandSeek "
                 + "refuses. It never follows redirects from the sandbox or the model server, "
                 + "and neither of them redirects, so another program may be using the port."
+        case .sandboxSecretUnusable(let message):
+            "the sandbox's secret file cannot be used: \(message)"
+        case .sandboxNotSigned(let address):
+            "the answer on \(address) is not signed by the SandSeek sandbox; "
+                + "another program may be using the port"
         }
     }
 }

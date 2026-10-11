@@ -179,14 +179,20 @@ public final class ResearchRunController {
     /// and it is known whether anything was saved.
     private var stoppedStep: Int?
 
+    /// The sandbox's secret file (`ResearchSandboxSecret.defaultFileURL` in the
+    /// app); nil, the default, sends no nonce, as the tests need.
+    private let sandboxSecretFile: URL?
+
     public init(store: ResearchReportStore,
                 transport: (any ResearchHTTPTransport)? = nil,
                 now: @escaping @Sendable () -> Date = { Date() },
-                wake: any ResearchWakeAssertion = ProcessInfoWakeAssertion()) {
+                wake: any ResearchWakeAssertion = ProcessInfoWakeAssertion(),
+                sandboxSecretFile: URL? = nil) {
         self.store = store
         self.transport = transport
         self.now = now
         self.wake = wake
+        self.sandboxSecretFile = sandboxSecretFile
     }
 
     public var isRunning: Bool { phase == .running }
@@ -232,7 +238,8 @@ public final class ResearchRunController {
                 streaming: connection.streaming,
                 authorization: authorization,
                 transport: transport),
-            sandbox: ResearchSandboxClient(baseURL: sandboxURL, transport: sandboxTransport),
+            sandbox: ResearchSandboxClient(
+                baseURL: sandboxURL, transport: sandboxTransport, secretFile: sandboxSecretFile),
             options: options,
             onEvent: { continuation.yield($0) })
 

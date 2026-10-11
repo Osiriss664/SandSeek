@@ -17,6 +17,12 @@
 # processes on the Mac, can still reach 9100). The
 # server runs as a non-root user with no Linux capabilities. Its port is
 # published to the Mac's loopback address only. See docs/SECURITY.md.
+#
+# Each `start` makes a new random secret, writes it to the file below (mode
+# 0600, in a folder only you can write to) and hands it to the sandbox, which signs its answers
+# with it, so SandSeek can tell the sandbox from another program on the port.
+# `stop` leaves the file, so that program is still told apart when the sandbox
+# is not running.
 
 set -euo pipefail
 # No file name expansion: $dns_servers is split into words below, not matched.
@@ -39,6 +45,9 @@ port="${SANDSEEK_SANDBOX_PORT:-9100}"
 dns_servers="${SANDSEEK_DNS:-}"
 script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 context="$script_directory/../Sandbox"
+# Where the secret goes. SandSeek reads the same file (ResearchSandboxSecret in
+# Sources/SandSeekCore/ResearchSandboxSigning.swift); change both together.
+secret_file="$HOME/Library/Application Support/TUFF/web-sandbox.secret"
 
 # SANDSEEK_SANDBOX_PORT and SANDSEEK_DNS go into `container run` arguments;
 # a typo gives a confusing error from deep inside it, so check the form first.
@@ -72,8 +81,54 @@ require_container() {
   container system status >/dev/null 2>&1 || container system start
 }
 
+# Makes a new secret (32 random bytes as 64 hex characters), writes it to
+# $secret_file and prints it. The file is written to a temporary file in the
+# same folder, given mode 0600 and then renamed over the old one, so a reader
+# sees the old secret or the new one and never half of it. Everything here is a
+# shell builtin or reads /dev/urandom, so the secret is never in a command line.
+new_secret() {
+  local folder modes secret temporary
+  folder="$(dirname -- "$secret_file")"
+  # A missing folder is made with mode 0700. An existing one (TUFF's own, for
+  # example) is never changed: it only has to be yours, not a symlink, and not
+  # writable by group or others, so that nobody else can replace the file.
+  [[ -e "$folder" || -L "$folder" ]] || mkdir -p -m 700 -- "$folder"
+  if [[ -L "$folder" || ! -d "$folder" || ! -O "$folder" ]]; then
+    echo "$folder is not a folder of yours; not writing the sandbox secret" >&2
+    return 1
+  fi
+  modes="$(ls -ld -- "$folder")"
+  modes="${modes%% *}"
+  if [[ "${modes:5:1}" == w || "${modes:8:1}" == [wtT] ]]; then
+    echo "$folder can be written to by others (${modes}); not writing the sandbox secret. Run chmod go-w on it" >&2
+    return 1
+  fi
+  if [[ -d "$secret_file" ]]; then
+    echo "$secret_file is a folder; not writing the sandbox secret" >&2
+    return 1
+  fi
+  secret="$(LC_ALL=C od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+  if [[ ! "$secret" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "could not make a random secret" >&2
+    return 1
+  fi
+  temporary="$(umask 077 && mktemp -- "$folder/.web-sandbox.secret.XXXXXX")" || return 1
+  if ! { printf '%s' "$secret" >"$temporary" \
+         && chmod 600 -- "$temporary" \
+         && mv -f -- "$temporary" "$secret_file"; }; then
+    rm -f -- "$temporary"
+    echo "could not write $secret_file" >&2
+    return 1
+  fi
+  printf '%s' "$secret"
+}
+
 health() {
   curl -fsS --max-time 2 "http://127.0.0.1:$port/health" >/dev/null 2>&1
+}
+
+health_json() {
+  curl -fsS --max-time 2 "http://127.0.0.1:$port/health" 2>/dev/null
 }
 
 case "${1:-}" in
@@ -95,6 +150,12 @@ case "${1:-}" in
     exit "$build_status"
     ;;
   start)
+    # A trace would print the secret (`secret=...`, and the `container run`
+    # line with it), so do not run under `bash -x` or `set -x`.
+    if [[ $- == *x* ]]; then
+      echo "not starting with xtrace on: the trace would print the sandbox secret" >&2
+      exit 1
+    fi
     check_port
     check_dns
     require_container
@@ -102,8 +163,12 @@ case "${1:-}" in
     container delete "$name" >/dev/null 2>&1 || true
     # The entrypoint starts as root with these four capabilities only, to load
     # the firewall; the server then gives them all up and runs as user 10001.
+    # The secret goes in by name only (`--env NAME`, no value): the container
+    # tool takes the value from this script's environment, so it never appears
+    # in a command line, where other users would see it in `ps`.
     run_options=(
       --detach --rm --name "$name"
+      --env SANDSEEK_SANDBOX_SECRET
       --read-only --tmpfs /tmp
       --cap-drop ALL --cap-add NET_ADMIN --cap-add SETUID --cap-add SETGID --cap-add SETPCAP
       --ulimit nproc=512
@@ -116,7 +181,11 @@ case "${1:-}" in
     if [[ -n "${SEARXNG_URL:-}" ]]; then
       run_options+=(--env "SEARXNG_URL=$SEARXNG_URL")
     fi
-    container run "${run_options[@]}" "$image" >/dev/null
+    # The file is complete before the sandbox starts listening. The old VM is
+    # gone by now, so nothing is signing with the previous secret.
+    secret="$(new_secret)" || exit 1
+    SANDSEEK_SANDBOX_SECRET="$secret" container run "${run_options[@]}" "$image" >/dev/null
+    unset secret
     # The entrypoint refuses to start when it finds no default gateway (see
     # Sandbox/entrypoint.sh) or cannot load the firewall, and `--rm` deletes the
     # container then, so keep the last non-empty log (a later "not found" error
@@ -130,6 +199,13 @@ case "${1:-}" in
     deadline=$((SECONDS + 120))
     for _ in $(seq 1 50); do
       if health; then
+        reply="$(health_json || true)"
+        if [[ "$reply" != *'"signed": true'* ]]; then
+          echo "the sandbox started but is not signing its answers; the container did not get the secret (see docs/SECURITY.md). Stopping it." >&2
+          container stop "$name" >/dev/null 2>&1 || true
+          container delete "$name" >/dev/null 2>&1 || true
+          exit 1
+        fi
         echo "web research sandbox ready at http://127.0.0.1:$port"
         exit 0
       fi
@@ -177,6 +253,9 @@ case "${1:-}" in
       debug_command+=" $image"
       echo "the sandbox container exited and was removed (it runs with --rm)." >&2
       echo "To see why, run it once in the foreground without --rm: $debug_command" >&2
+      # --env SANDSEEK_SANDBOX_SECRET above carries the name only, never the
+      # value; the container tool takes the value from the terminal's environment.
+      echo "(the secret variable is passed by name, so the command shows no value. For the run to sign its answers as the real start does, export it first in that terminal: export SANDSEEK_SANDBOX_SECRET=\"\$(cat $(printf '%q' "$secret_file"))\" )" >&2
     else
       echo "sandbox started but did not answer on 127.0.0.1:$port; see: container logs $name" >&2
       if (( firewall_loaded && listening )); then

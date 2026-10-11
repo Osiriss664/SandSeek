@@ -151,6 +151,10 @@ public final class ResearchSandboxController {
     private let defaults: any ResearchSettingsStore
     private let environment: [String: String]
     private let resources: SandboxResources
+    /// The secret file the launcher script writes (`ResearchSandboxSecret`).
+    /// Nil, the default, makes the health check send no nonce, as the tests
+    /// need; the app passes `ResearchSandboxSecret.defaultFileURL`.
+    private let secretFile: URL?
 
     public init(baseURL: URL = ResearchSandboxController.defaultURL,
                 runner: any ResearchProcessRunning = FoundationProcessRunner(),
@@ -158,8 +162,10 @@ public final class ResearchSandboxController {
                 defaults: any ResearchSettingsStore = UserDefaults.standard,
                 environment: [String: String] = ResearchCommandEnvironment.environment(),
                 resources: SandboxResources = SandboxResources(),
-                stateDirectory: URL = ResearchSandboxController.defaultStateDirectory()) {
+                stateDirectory: URL = ResearchSandboxController.defaultStateDirectory(),
+                secretFile: URL? = nil) {
         self.baseURL = baseURL
+        self.secretFile = secretFile
         self.stateDirectory = stateDirectory
         self.runner = runner
         self.transport = transport
@@ -429,7 +435,8 @@ public final class ResearchSandboxController {
     /// with 200. A redirect is never followed and counts as not running.
     private func healthProblem() async -> ResearchError? {
         do {
-            try await ResearchSandboxClient(baseURL: baseURL, transport: transport).checkHealth()
+            try await ResearchSandboxClient(
+                baseURL: baseURL, transport: transport, secretFile: secretFile).checkHealth()
             return nil
         } catch let error as ResearchError {
             return error
@@ -440,7 +447,10 @@ public final class ResearchSandboxController {
 
     /// What a failed start adds when something else answers on the port.
     private static func portNote(_ problem: ResearchError) -> String {
-        guard case .redirectRefused = problem else { return "" }
+        switch problem {
+        case .redirectRefused, .sandboxNotSigned, .sandboxSecretUnusable: break
+        default: return ""
+        }
         let text = problem.description
         return " " + text.prefix(1).uppercased() + text.dropFirst()
     }
