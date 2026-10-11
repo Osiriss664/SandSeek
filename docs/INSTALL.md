@@ -24,8 +24,9 @@ For what the security design does and does not promise, read
   - **TUFF 8.3.1 or newer** (the official release), with a Qwen model for
     research; or
   - **llama.cpp** (`llama-server`), with a model that supports tool calls (the
-    project was tested with Bonsai). llama.cpp is only partly tested, see
-    [SECURITY.md](SECURITY.md).
+    project probed it with Bonsai). llama.cpp is experimental in 0.1.0: no
+    streaming, the Thinking switch has no effect on it yet, and no research
+    run was measured with it; see [SECURITY.md](SECURITY.md).
 - Research makes many long prompts, so model speed matters. Qwen3.6 35B-A3B on
   TUFF gives good answers and takes a few minutes per question; Gemma 4 E4B is
   faster and weaker. A model that has to stream far more than the installed

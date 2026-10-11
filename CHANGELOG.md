@@ -7,7 +7,7 @@ on your Mac.
 
 - `sandseek` command and SandSeek app (macOS) share one Swift package and
   one research loop.
-- Works with TUFF; llama.cpp support is included but not yet measured on a Mac.
+- Works with TUFF 8.3.1 or newer. llama.cpp support is experimental (see below).
 - Web search and page reading run in a throwaway Apple `container` VM:
   no shell, no files or host folders, read-only, non-root, with a firewall
   that only lets the Mac reach port 9100 from the VM's gateway.
@@ -20,3 +20,16 @@ on your Mac.
 - The app checks that the model server is not reachable from the network and
   runs a sandbox security check on request.
 - Reports are saved as JSON and Markdown and can be reopened in the app.
+
+Tested on an Apple silicon Mac with 16 GB, macOS 27.0.1, Apple `container`
+1.5.0, TUFF 8.3.1 and Qwen3.6 35B-A3B.
+
+Known limits:
+
+- llama.cpp: no streaming, the Thinking switch has no effect, no research run
+  measured, prompt-injection test with Bonsai not done.
+- No OCR: scanned PDFs and text in images are not read.
+- The app is signed ad hoc, not notarized: a copy downloaded from GitHub needs
+  "Open Anyway" in System Settings, Privacy & Security, on first launch.
+- A model can still follow instructions hidden in web pages or PDFs; it can
+  then only search and read pages.

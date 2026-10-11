@@ -32,9 +32,10 @@ SandSeek startet das Modell-Programm nicht selbst. Du startest es vorher.
 - **llama.cpp:** In SandSeek bei *Model server* **llama.cpp** wählen. Die Karte zeigt einen
   fertigen Startbefehl. Mit **Copy start command** kopieren, im Terminal einfügen, das
   Modell eintragen und Return drücken. Der Befehl enthält `--host 127.0.0.1`: das heißt, nur
-  dein Mac darf zugreifen. Lass diesen Teil immer drin. llama.cpp ist nur eingeschränkt
-  getestet: Mit dem Modell Bonsai ist die Prüfung gegen Angriffe aus Webseiten noch nicht
-  gemessen. Mit TUFF und Qwen ist sie bestanden.
+  dein Mac darf zugreifen. Lass diesen Teil immer drin. llama.cpp ist in Version 0.1.0
+  experimentell: Der Schalter *Thinking* wirkt dort noch nicht, und mit dem Modell Bonsai ist
+  die Prüfung gegen Angriffe aus Webseiten noch nicht gemessen. Mit TUFF und Qwen ist sie
+  bestanden.
 
 Auf einem Mac mit 16 GB darf immer nur ein Modell-Programm laufen.
 

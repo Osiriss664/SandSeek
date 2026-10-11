@@ -8,7 +8,7 @@ exactly two tools, `web_search` and `open_page`: no shell, no file access, no
 network tool. `open_page` reads web pages and text PDFs (up to 5 MB and 50
 pages, no OCR), parsed inside the VM.
 
-Status: pre-release, being moved out of a TUFF fork. The command-line tool,
+Status: 0.1.0, the first release. SandSeek began in a fork of TUFF. The command-line tool,
 the core library and the Mac app (a window with the same research loop) are one
 Swift package. Built, tested and tried by hand on a Mac with macOS 27, TUFF
 8.3.1 and Qwen3.6 35B (11 October 2026).
@@ -29,8 +29,10 @@ Swift package. Built, tested and tried by hand on a Mac with macOS 27, TUFF
 - [Apple `container`](https://github.com/apple/container)
 - A local model server on 127.0.0.1: TUFF 8.3.1 or newer. Streaming is on by
   default for TUFF, so that Stop and the time limits make it stop generating.
-  llama.cpp (`llama-server`) works through `--server-type llamacpp` (plain
-  requests, not tested against a real server yet). The app connects to a
+  llama.cpp (`llama-server`) is experimental in 0.1.0: it works through
+  `--server-type llamacpp` with plain requests (no streaming), the app's
+  Thinking switch has no effect on it yet, and it was probed but not measured
+  with a research run. The app connects to a
   server that already runs; it never starts one.
 - A Swift 6.2 toolchain to build
 
@@ -156,10 +158,11 @@ To record real streams from a running server for test fixtures, use
 
 ## Left undone
 
-- llama.cpp: plain (non-streaming) requests. That llama-server has
-  `--api-key-file`, enforces it, and answers `/props` and `/health` as assumed
-  is confirmed by the probe on the Mac (step 2b). Ollama and LM Studio come
-  later.
+- llama.cpp is experimental: plain (non-streaming) requests, and the
+  thinking setting is sent where llama.cpp ignores it (it reads only
+  `chat_template_kwargs.enable_thinking`). The probe on a Mac confirmed the
+  key file, `/props`, `/health`, tool calls and the context window. Ollama and
+  LM Studio come later.
 - Thorough preset values are a first guess; they will be adjusted after
   measuring.
 - The pre-question check does not yet verify mounts or that port 9100 is
