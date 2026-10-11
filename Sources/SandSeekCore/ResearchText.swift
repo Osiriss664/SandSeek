@@ -109,6 +109,11 @@ public enum ResearchText {
         return line.count > limit ? String(line.prefix(limit)) + "…" : line
     }
 
+    /// `text` cut to `limit` characters, with "…" where it was cut.
+    public static func capped(_ text: String, limit: Int) -> String {
+        text.count > limit ? String(text.prefix(limit)) + "…" : text
+    }
+
     /// A URL as one printable token: control characters and whitespace removed.
     public static func url(_ text: String) -> String {
         var scalars = String.UnicodeScalarView()

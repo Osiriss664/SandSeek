@@ -2252,7 +2252,7 @@ public struct ResearchAgent: Sendable {
                     onEvent(.repeatedPageRefused(ResearchText.oneLine(target, limit: 200)))
                     // An address that led elsewhere gets the same answer again.
                     if let rejection = read.redirectedElsewhere { return rejection }
-                    let shown = Self.sanitized(ResearchText.url(target), markers: state.markers)
+                    let shown = Self.shownURL(target, markers: state.markers)
                     let number = state.sources.first { $0.url == read.sourceURL }
                         .map { " as source [\($0.number)]" } ?? ""
                     let more = options.passages
@@ -2267,10 +2267,10 @@ public struct ResearchAgent: Sendable {
             }
         } catch let failure as ResearchToolFailure {
             onEvent(.toolFailed(failure.message))
-            return "Tool error: \(Self.sanitized(failure.message, markers: state.markers))"
+            return Self.toolError(failure.message, markers: state.markers)
         } catch {
             onEvent(.toolFailed(String(describing: error)))
-            return "Tool error: \(Self.sanitized(String(describing: error), markers: state.markers))"
+            return Self.toolError(String(describing: error), markers: state.markers)
         }
     }
 
@@ -2441,7 +2441,7 @@ public struct ResearchAgent: Sendable {
             state.refusedRepeats += 1
             onEvent(.toolFailed("open_page: \(site) failed \(State.failuresBeforeSkippingSite) "
                 + "times, not tried again"))
-            return "Not opened: \(Self.sanitized(site, markers: state.markers)) failed "
+            return "Not opened: \(Self.shownURL(site, markers: state.markers)) failed "
                 + "\(State.failuresBeforeSkippingSite) times (it turned the reader away). "
                 + "Open pages from other sites."
         }
@@ -2511,10 +2511,10 @@ public struct ResearchAgent: Sendable {
                 state.siteFailures[site, default: 0] += 1
             }
             onEvent(.toolFailed(failure.message))
-            return "Tool error: \(Self.sanitized(failure.message, markers: state.markers))"
+            return Self.toolError(failure.message, markers: state.markers)
         } catch {
             onEvent(.toolFailed(String(describing: error)))
-            return "Tool error: \(Self.sanitized(String(describing: error), markers: state.markers))"
+            return Self.toolError(String(describing: error), markers: state.markers)
         }
     }
 
@@ -2589,8 +2589,8 @@ public struct ResearchAgent: Sendable {
     static func redirectedElsewhere(requested: String, page: ResearchPageSlice,
                                     redirect: Redirect, pageLinks: Bool = false,
                                     markers: Markers = .fixed) -> String {
-        let asked = sanitized(ResearchText.url(requested), markers: markers)
-        let got = sanitized(ResearchText.url(page.url), markers: markers)
+        let asked = shownURL(requested, markers: markers)
+        let got = shownURL(page.url, markers: markers)
         let what = redirect == .homePage
             ? "redirected to the home page \(got), so the page was not found at that address"
             : "redirected to \(got), which is a different page and does not match"
@@ -2606,6 +2606,35 @@ public struct ResearchAgent: Sendable {
     /// along with control characters.
     static func sanitized(_ text: String, markers: Markers = .fixed) -> String {
         markers.cleaned(text)
+    }
+
+    /// How much of a page's title, of an address and of a tool failure's text
+    /// the loop's own lines show. Those lines stand outside the untrusted
+    /// block, so a page that sets them gets this much room and no more.
+    static let shownTitleCharacters = 120
+    static let shownURLCharacters = 300
+    static let shownMessageCharacters = 400
+
+    /// An address from the web for the loop's own lines: one token without
+    /// control or invisible characters, free of marker lookalikes, cut to
+    /// `shownURLCharacters`.
+    static func shownURL(_ text: String, markers: Markers = .fixed) -> String {
+        ResearchText.capped(sanitized(ResearchText.url(text), markers: markers),
+                            limit: shownURLCharacters)
+    }
+
+    /// A page title for the loop's own lines: one line, cut to
+    /// `shownTitleCharacters`, free of marker lookalikes.
+    static func shownTitle(_ text: String, markers: Markers = .fixed) -> String {
+        sanitized(ResearchText.oneLine(text, limit: shownTitleCharacters), markers: markers)
+    }
+
+    /// The tool result for a failed tool call. The text can echo a page's or
+    /// a redirect's address, so it is one short line like the other
+    /// page-derived text outside the untrusted block.
+    static func toolError(_ message: String, markers: Markers = .fixed) -> String {
+        "Tool error: " + sanitized(ResearchText.oneLine(message, limit: shownMessageCharacters),
+                                   markers: markers)
     }
 
     static let quotedQueryCharacters = 80
@@ -2667,10 +2696,12 @@ public struct ResearchAgent: Sendable {
         // The sandbox counts Unicode scalars (Python code points), not
         // grapheme clusters, so offsets match what it expects.
         let end = page.offset + page.text.unicodeScalars.count
-        let url = sanitized(ResearchText.url(page.url), markers: markers)
-        // Titles come from the page; one line keeps the header lines apart.
-        let title = page.title.isEmpty ? url
-            : sanitized(ResearchText.oneLine(page.title, limit: 300), markers: markers)
+        // The title and the address come from the page and stand outside the
+        // untrusted block, in the loop's own lines (`pageKeys` and the
+        // shortening read them there). So both are short, on one line and
+        // free of control, invisible and marker-like characters.
+        let url = shownURL(page.url, markers: markers)
+        let title = page.title.isEmpty ? url : shownTitle(page.title, markers: markers)
         var header = source.map { "Source [\($0.number)]: \(title)\n" } ?? "Page: \(title)\n"
         if alreadyNumbered, let source {
             header += "This is the same page as source [\(source.number)]; cite it only as "
