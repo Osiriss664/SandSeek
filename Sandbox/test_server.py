@@ -161,29 +161,77 @@ class AddressPolicyTests(unittest.TestCase):
                 raise ToolError("URL has an invalid host name", "invalid_url")
             return [info[4][0] for info in infos]
 
-        plain = ["http://2130706433/", "http://3232235521/"]
-        exotic = ["http://0x7f000001/", "http://0x7f.1/", "http://0177.0.0.1/",
-                  "http://017700000001/", "http://127.1/", "http://0/",
-                  "http://127.0.0.1%2f@example.com/",
-                  "http://\u2460\u2461\u2466.0.0.1/", "http://127\u30020\u30020\u30021/"]
-        parsed = 0
-        for url in plain + exotic:
-            try:
-                target = server.check_url(url, numeric_resolver)
-            except ToolError as error:
-                if url in plain:
-                    self.assertEqual(error.code, "blocked_address", url)
-                else:
-                    self.assertIn(error.code, {"invalid_url", "blocked_address", "dns_error"}, url)
-                parsed += error.code == "blocked_address"
-            else:
-                # The sandbox runs on glibc, which reads a leading 0 as octal.
-                # macOS libc reads 0177 as decimal 177, a public address.
-                if url == "http://0177.0.0.1/" and not sys.platform.startswith("linux"):
-                    self.assertEqual(target.address, "177.0.0.1")
-                    continue
-                self.fail(f"{url} was allowed: {target}")
-        self.assertGreaterEqual(parsed, 2)
+        # Refused by shape, whatever this system's libc makes of them.
+        spellings = ["http://2130706433/", "http://3232235521/", "http://0x7f000001/",
+                     "http://0x7f.1/", "http://0177.0.0.1/", "http://017700000001/",
+                     "http://127.1/", "http://0/"]
+        # Plain addresses once the host is normalised: the resolver's answer decides.
+        plain = ["http://127.0.0.1/", "http://127.0.0.1%2f@example.com/",
+                 "http://\u2460\u2461\u2466.0.0.1/", "http://127\u30020\u30020\u30021/"]
+        for url in spellings:
+            with self.assertRaises(ToolError, msg=url) as caught:
+                server.check_url(url, numeric_resolver)
+            self.assertEqual(caught.exception.code, "invalid_url", url)
+        for url in plain:
+            with self.assertRaises(ToolError, msg=url) as caught:
+                server.check_url(url, numeric_resolver)
+            self.assertIn(caught.exception.code, {"invalid_url", "blocked_address"}, url)
+        with self.assertRaises(ToolError) as caught:
+            server.check_url("http://127.0.0.1/", numeric_resolver)
+        self.assertEqual(caught.exception.code, "blocked_address")
+
+    def test_noncanonical_numeric_hosts_are_refused_before_any_lookup(self):
+        # The resolver must not be asked: macOS reads 0177.0.0.1 as 177.0.0.1
+        # (public) and glibc as 127.0.0.1, so the sandbox trusts neither.
+        def never(host, port):
+            raise AssertionError(f"{host} reached the resolver")
+
+        for url in ["http://0177.0.0.1/", "http://0x7f.0.0.1/", "http://127.1/",
+                    "http://2130706433/", "http://017700000001/", "http://127.0.0.01/",
+                    "http://0x7f000001/", "http://0x7f.0x0.0x0.0x1/", "http://127.0.1/",
+                    "http://0/", "http://0x0/", "http://0x/", "http://08.8.8.8/",
+                    "http://1.2.3.4.5/", "http://256.1.1.1/", "http://1.2.3.04/",
+                    "http://127.0.0.1.0/", "http://example.123/", "http://1..2/",
+                    "http://.1/", "https://0177.0.0.1/path?q=1", "http://0177.0.0.1:80/",
+                    "http://0X7F.0.0.1/", "http://\uff10\uff11\uff17\uff17.0.0.1/"]:
+            with self.assertRaises(ToolError, msg=url) as caught:
+                server.check_url(url, never)
+            self.assertEqual(caught.exception.code, "invalid_url", url)
+            self.assertEqual(caught.exception.status, 422, url)
+
+    def test_canonical_addresses_and_names_still_work(self):
+        resolve = resolver({"example.com": ["93.184.216.34"],
+                            "123.example.com": ["93.184.216.35"],
+                            "0x.example": ["93.184.216.36"],
+                            "1password.com": ["93.184.216.37"]})
+        for url, address in [("http://93.184.216.34/", "93.184.216.34"),
+                             ("http://93.184.216.34./", "93.184.216.34"),
+                             ("http://8.8.8.8/x", "8.8.8.8"),
+                             ("http://example.com/", "93.184.216.34"),
+                             ("http://123.example.com/", "93.184.216.35"),
+                             ("http://0x.example/", "93.184.216.36"),
+                             ("http://1password.com/", "93.184.216.37")]:
+            target = server.check_url(url, lambda host, port, a=address: [a])
+            self.assertEqual(target.address, address, url)
+        self.assertEqual(server.check_url("http://example.com/", resolve).host, "example.com")
+        # Canonical private addresses reach the policy and are blocked there.
+        for url in ["http://127.0.0.1/", "http://10.0.0.1/", "http://0.0.0.0/",
+                    "http://255.255.255.255/", "http://[::1]/", "http://[::ffff:127.0.0.1]/"]:
+            with self.assertRaises(ToolError, msg=url) as caught:
+                server.check_url(url, lambda host, port: [host])
+            self.assertEqual(caught.exception.code, "blocked_address", url)
+        # An IPv6 literal that is public is not mistaken for a number.
+        self.assertEqual(server.check_url("http://[2606:4700::1111]/",
+                                          lambda host, port: [host]).address, "2606:4700::1111")
+
+    def test_is_noncanonical_number(self):
+        for host in ["0177.0.0.1", "0x7f.0.0.1", "127.1", "2130706433", "017700000001",
+                     "127.0.0.01", "1.2.3", "1.2.3.4.5", "256.1.1.1", "0", "0x", "a.0x1"]:
+            self.assertTrue(server.is_noncanonical_number(host), host)
+        for host in ["93.184.216.34", "127.0.0.1", "0.0.0.0", "255.255.255.255", "example.com",
+                     "a.b.c.d", "123.example.com", "1password.com", "::1", "2606:4700::1111",
+                     "::ffff:127.0.0.1", "localhost"]:
+            self.assertFalse(server.is_noncanonical_number(host), host)
 
     def test_connection_is_pinned_to_checked_address(self):
         resolve = resolver({"example.com": ["93.184.216.34"]})
@@ -877,14 +925,32 @@ class AddressCheckScriptTests(unittest.TestCase):
         for case in self.check.CASES:
             if case.kind == "resolves":
                 continue
-            if case.url in self.check.LINUX_OCTAL_FORMS and not sys.platform.startswith("linux"):
-                continue
             with self.assertRaises(ToolError, msg=case.url) as caught:
                 server.check_url(case.url, _numeric_only_resolver)
             self.assertIn(caught.exception.code,
                           {"blocked_address", "blocked_port", "invalid_url", "dns_error"}, case.url)
             checked += 1
         self.assertGreater(checked, 80)
+
+    def test_refusals_do_not_depend_on_how_the_host_reads_leading_zeros(self):
+        # macOS getaddrinfo reads 0177.0.0.1 as decimal 177.0.0.1 (public); this
+        # resolver does the same on any system. The sandbox refuses the
+        # spelling itself, so the address never reaches it.
+        def decimal_resolver(host, port):
+            parts = host.split(".")
+            if len(parts) == 4 and all(part.isdigit() for part in parts):
+                return [".".join(str(int(part)) for part in parts)]
+            return _numeric_only_resolver(host, port)
+
+        for url in ["http://0177.0.0.1/", "http://017700000001/", "http://0177.0.0.01/"]:
+            with self.assertRaises(ToolError, msg=url) as caught:
+                server.check_url(url, decimal_resolver)
+            self.assertEqual(caught.exception.code, "invalid_url", url)
+        for case in self.check.CASES:
+            if case.kind == "resolves":
+                continue
+            with self.assertRaises(ToolError, msg=case.url):
+                server.check_url(case.url, decimal_resolver)
 
     def test_verdicts(self):
         classify, Case = self.check.classify, self.check.Case

@@ -181,6 +181,38 @@ class Target:
 # characters change.
 ASCII_URL_SAFE = "".join(chr(c) for c in range(0x21, 0x7f))
 
+_NUMBER_LABEL = re.compile(r"[0-9]+|0x[0-9a-f]*")
+_NUMBER_LIKE_LABEL = re.compile(r"[0-9]+|0x[0-9a-z]*")
+_DOTTED_QUAD_PART = re.compile(r"0|[1-9][0-9]{0,2}")
+
+
+def is_noncanonical_number(host: str) -> bool:
+    """True for a host that C libraries read as an IPv4 address, or that is
+    built like one, but is not a plain dotted quad.
+
+    inet_aton and getaddrinfo accept 2130706433, 0x7f000001, 127.1 and
+    0177.0.0.1, and they disagree: glibc reads a leading 0 as octal (127.0.0.1)
+    where macOS reads it as decimal (177.0.0.1). The policy must not depend on
+    that reading, so every such spelling is refused before any lookup. Only
+    four decimal parts without leading zeros, each at most 255, are an
+    address; a host whose last label is a number, or whose labels are all
+    numbers, is never a name (no top-level domain is numeric). IPv6 literals
+    and names with a letter in their last label are not affected.
+    """
+    if ":" in host:
+        return False
+    labels = host.split(".")
+    if not (_NUMBER_LABEL.fullmatch(labels[-1])
+            or all(_NUMBER_LIKE_LABEL.fullmatch(label) for label in labels)):
+        return False
+    if len(labels) == 4 and all(_DOTTED_QUAD_PART.fullmatch(label) for label in labels):
+        try:
+            ipaddress.IPv4Address(host)
+        except ValueError:
+            return True
+        return False
+    return True
+
 
 def check_url(url: str, resolver: Callable[[str, int], list[str]]) -> Target:
     """Parses `url` and pins it to one public address, or refuses it."""
@@ -214,6 +246,11 @@ def check_url(url: str, resolver: Callable[[str, int], list[str]]) -> Target:
         raise ToolError("URL has an invalid port", "invalid_url")
     if port != ALLOWED_PORTS[scheme]:
         raise ToolError(f"only port {ALLOWED_PORTS[scheme]} is allowed for {scheme}", "blocked_port")
+    # Before any lookup: libc's reading of these spellings differs between
+    # systems (see is_noncanonical_number), so none of them is trusted.
+    if is_noncanonical_number(host):
+        raise ToolError("URL has a number as host that is not a plain dotted IPv4 address",
+                        "invalid_url")
     addresses = resolver(host, port)
     if not addresses:
         raise ToolError(f"could not resolve {host}", "dns_error", 502)
