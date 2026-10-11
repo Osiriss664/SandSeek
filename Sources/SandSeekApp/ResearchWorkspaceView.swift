@@ -26,7 +26,8 @@ struct ResearchWorkspaceView: View {
                         alignment: .leading, spacing: 18
                     ) {
                         ConnectionCard(
-                            server: workspace.server, locked: running,
+                            server: workspace.server, launch: workspace.launch, locked: running,
+                            questionBusy: running || workspace.isPreparingQuestion,
                             promptBudget: workspace.presets.llamaPromptBudget)
                         SandboxCard(workspace: workspace)
                     }
@@ -102,7 +103,8 @@ struct ResearchWorkspaceView: View {
                 }
                 .help("Ask the model server for its models again")
                 .accessibilityLabel("Reload models")
-                .disabled(running || workspace.server.state.isBusy)
+                .disabled(running || workspace.server.state.isBusy
+                    || workspace.launch.state == .starting)
                 Picker("Mode", selection: $presetID) {
                     ForEach(ResearchPresetID.allCases) { preset in
                         Text(preset.title).tag(preset)

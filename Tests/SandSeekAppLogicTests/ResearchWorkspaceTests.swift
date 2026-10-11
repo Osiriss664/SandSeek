@@ -26,13 +26,15 @@ private final class BusyRunServices: ResearchHTTPTransport, @unchecked Sendable 
         let serverServices: FakeResearchServices
         let runServices: FakeResearchServices
         let run: ResearchRunController
+        let launch: ResearchServerLaunchController
     }
 
     private static let settings = ResearchRunSettings(
         model: "m", maxSteps: 2, autoOpenPages: false, nudges: false, reviseUnreadCitations: false)
 
     private func setup(llamaCpp: Bool = false,
-                       busyRun: Bool = false) async throws -> Setup {
+                       busyRun: Bool = false,
+                       launch: ResearchServerLaunchController? = nil) async throws -> Setup {
         let serverServices = llamaCpp
             ? FakeResearchServices(listedModels: ["m"], tuffStatus: false,
                                    requiredKey: "test-key", llamaContext: .some(nil))
@@ -54,11 +56,40 @@ private final class BusyRunServices: ResearchHTTPTransport, @unchecked Sendable 
             defaults: MemorySettings(), environment: [:], resources: try testResources(),
             stateDirectory: temporaryDirectory())
         await sandbox.start()
+        let launch = launch ?? testLaunchController()
         let workspace = ResearchWorkspace(
             sandbox: sandbox, server: server, reports: reports, run: run,
-            presets: ResearchPresetStore(defaults: MemorySettings()))
+            presets: ResearchPresetStore(defaults: MemorySettings()), launch: launch)
         return Setup(workspace: workspace, server: server, serverServices: serverServices,
-                     runServices: runServices, run: run)
+                     runServices: runServices, run: run, launch: launch)
+    }
+
+    @Test func refreshLeavesTheModelServerAloneWhileItIsStarting() async throws {
+        // A server that never answers keeps the start waiting.
+        let settings = MemorySettings()
+        settings.save("/opt/TUFF/TUFFServer", forKey: "ResearchServerProgram-tuff")
+        let silent = FakeResearchServices()
+        silent.setDown(true)
+        let launcher = FakeServerLauncher()
+        let launch = testLaunchController(
+            settings: settings, launcher: launcher, transport: silent,
+            timing: .init(poll: .milliseconds(5), tuffReady: .seconds(30),
+                          stopGrace: .milliseconds(100), killGrace: .milliseconds(100)))
+        let setup = try await setup(launch: launch)
+        let starting = Task { await launch.start(using: setup.server) }
+        await waitUntil { launch.state == .starting && launch.owned != nil }
+        #expect(launch.state == .starting)
+
+        setup.serverServices.clearPaths()
+        await setup.workspace.refresh()
+        #expect(setup.serverServices.paths.isEmpty)
+        #expect(setup.server.state == .ready)
+
+        await launch.stop()
+        await starting.value
+        #expect(launcher.servers.first?.signals == ["TERM"])
+        await setup.workspace.refresh()
+        #expect(!setup.serverServices.paths.isEmpty)
     }
 
     @Test func refreshLeavesTheModelServerAloneWhileAQuestionRuns() async throws {

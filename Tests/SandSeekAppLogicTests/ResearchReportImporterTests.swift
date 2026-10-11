@@ -260,7 +260,8 @@ import Testing
                 transport: FakeResearchServices()),
             reports: reports,
             run: ResearchRunController(store: reports, transport: FakeResearchServices()),
-            presets: ResearchPresetStore(defaults: MemorySettings()))
+            presets: ResearchPresetStore(defaults: MemorySettings()),
+            launch: testLaunchController())
         #expect(workspace.importedFromTUFF == nil)
 
         await workspace.importTUFFReports(from: folders.tuff, ledger: folders.ledger)

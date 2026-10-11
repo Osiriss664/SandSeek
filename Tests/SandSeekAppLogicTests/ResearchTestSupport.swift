@@ -318,3 +318,119 @@ func waitUntil(_ condition: @MainActor () -> Bool,
         try? await Task.sleep(for: .milliseconds(10))
     }
 }
+
+// MARK: - Starting a model server
+
+/// A server process that starts nothing: a test decides when it ends. By
+/// default it ends when it gets SIGTERM; `ignoresTerm` makes it need SIGKILL.
+final class FakeLaunchedServer: ResearchLaunchedServer, @unchecked Sendable {
+    let pid: Int32
+    let identity: ResearchProcessIdentity?
+    private let lock = NSLock()
+    private let ignoresTerm: Bool
+    private var ended: ResearchServerExit?
+    private var handler: (@Sendable (ResearchServerExit) -> Void)?
+    private var received: [String] = []
+
+    init(pid: Int32, path: String, ignoresTerm: Bool = false) {
+        self.pid = pid
+        identity = ResearchProcessIdentity(startSeconds: 1_000, startMicroseconds: UInt64(pid), path: path)
+        self.ignoresTerm = ignoresTerm
+    }
+
+    /// "TERM" and "KILL", in the order they arrived.
+    var signals: [String] { lock.withLock { received } }
+    var exit: ResearchServerExit? { lock.withLock { ended } }
+
+    func terminate() {
+        lock.withLock { received.append("TERM") }
+        if !ignoresTerm { end(ResearchServerExit(code: 15, bySignal: true)) }
+    }
+
+    func forceKill() {
+        lock.withLock { received.append("KILL") }
+        end(ResearchServerExit(code: 9, bySignal: true))
+    }
+
+    func onExit(_ handler: @escaping @Sendable (ResearchServerExit) -> Void) {
+        let done = lock.withLock { () -> ResearchServerExit? in
+            if ended == nil { self.handler = handler }
+            return ended
+        }
+        if let done { handler(done) }
+    }
+
+    func end(_ result: ResearchServerExit) {
+        let waiting = lock.withLock { () -> (@Sendable (ResearchServerExit) -> Void)? in
+            guard ended == nil else { return nil }
+            ended = result
+            defer { handler = nil }
+            return handler
+        }
+        waiting?(result)
+    }
+}
+
+/// Records the plans it is given and starts nothing.
+final class FakeServerLauncher: ResearchServerLaunching, @unchecked Sendable {
+    private let lock = NSLock()
+    private var madePlans: [ResearchServerLaunchPlan] = []
+    private var madeServers: [FakeLaunchedServer] = []
+    /// What the server writes to its log.
+    var logText = ""
+    /// The server ends at once with this result, as one that cannot bind.
+    var endsAtOnce: ResearchServerExit?
+    var ignoresTerm = false
+    var failure: (any Error)?
+
+    var plans: [ResearchServerLaunchPlan] { lock.withLock { madePlans } }
+    var servers: [FakeLaunchedServer] { lock.withLock { madeServers } }
+
+    func launch(_ plan: ResearchServerLaunchPlan, log: URL) throws -> any ResearchLaunchedServer {
+        if let failure { throw failure }
+        try FileManager.default.createDirectory(
+            at: log.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(logText.utf8).write(to: log)
+        let server = lock.withLock { () -> FakeLaunchedServer in
+            let made = FakeLaunchedServer(
+                pid: Int32(41_000 + madeServers.count), path: plan.executable,
+                ignoresTerm: ignoresTerm)
+            madePlans.append(plan)
+            madeServers.append(made)
+            return made
+        }
+        if let endsAtOnce { server.end(endsAtOnce) }
+        return server
+    }
+}
+
+/// Runs `after` once the inner launcher has started a server, for example to
+/// make the fake model server start answering.
+struct HookedLauncher: ResearchServerLaunching {
+    let inner: any ResearchServerLaunching
+    let after: @Sendable () -> Void
+
+    func launch(_ plan: ResearchServerLaunchPlan, log: URL) throws -> any ResearchLaunchedServer {
+        let server = try inner.launch(plan, log: log)
+        after()
+        return server
+    }
+}
+
+/// A launch controller that starts nothing and touches no real settings,
+/// state folder or log.
+@MainActor
+func testLaunchController(settings: MemorySettings = MemorySettings(),
+                          launcher: any ResearchServerLaunching = FakeServerLauncher(),
+                          transport: any ResearchHTTPTransport = FakeResearchServices(),
+                          stateDirectory: URL = temporaryDirectory(),
+                          logURL: URL = temporaryDirectory("SandSeekLog")
+                              .appendingPathComponent("model-server.log"),
+                          timing: ResearchServerLaunchController.Timing = .init(),
+                          identityOf: @escaping @Sendable (Int32) -> ResearchProcessIdentity? = { _ in nil }
+) -> ResearchServerLaunchController {
+    ResearchServerLaunchController(
+        defaults: settings, launcher: launcher, transport: transport,
+        stateDirectory: stateDirectory, logURL: logURL,
+        timing: timing, identityOf: identityOf, checkProgram: { .success($0) })
+}

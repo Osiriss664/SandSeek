@@ -6,8 +6,8 @@ import SwiftUI
 // executable (no .app bundle): Dock icon, click-to-activate, full main menu
 // with Quit (Cmd+Q).
 private final class ForegroundAppDelegate: NSObject, NSApplicationDelegate {
-    /// Set by the app so quitting stops the sandbox this app started. The
-    /// model server is never ours to stop.
+    /// Set by the app so quitting stops the sandbox and the model server this
+    /// app started. A model server started by hand is never touched.
     @MainActor static var workspace: ResearchWorkspace?
 
     func applicationWillTerminate(_ notification: Notification) {

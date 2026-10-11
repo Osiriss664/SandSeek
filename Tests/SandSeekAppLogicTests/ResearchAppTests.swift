@@ -982,7 +982,8 @@ private final class SlowStartRunner: ResearchProcessRunning, @unchecked Sendable
         let presets = ResearchPresetStore(defaults: MemorySettings())
         return Setup(
             workspace: ResearchWorkspace(
-                sandbox: sandbox, server: server, reports: reports, run: run, presets: presets),
+                sandbox: sandbox, server: server, reports: reports, run: run, presets: presets,
+                launch: testLaunchController()),
             sandbox: sandbox, run: run, runServices: runServices, stateDirectory: stateDirectory,
             bundle: bundle)
     }

@@ -11,24 +11,30 @@ public final class ResearchWorkspace {
     public let reports: ResearchReportStore
     public let run: ResearchRunController
     public let presets: ResearchPresetStore
+    /// Starts and stops the model server from the card.
+    public let launch: ResearchServerLaunchController
     /// The saved report on screen, when no run is.
     public var selectedReportID: UUID?
     /// How many reports the last import took over from TUFF; nil before it ran.
     public private(set) var importedFromTUFF: Int?
     /// The `sandbox.freshStarts` of the VM that a question last ran in.
     private var lastUsedStart: Int?
-    private var isPreparingQuestion = false
+    /// True while a question is being prepared (the sandbox may restart), before
+    /// the run starts.
+    public private(set) var isPreparingQuestion = false
 
     public init(sandbox: ResearchSandboxController,
                 server: ResearchServerController,
                 reports: ResearchReportStore,
                 run: ResearchRunController,
-                presets: ResearchPresetStore) {
+                presets: ResearchPresetStore,
+                launch: ResearchServerLaunchController) {
         self.sandbox = sandbox
         self.server = server
         self.reports = reports
         self.run = run
         self.presets = presets
+        self.launch = launch
     }
 
     public convenience init(reportsDirectory: URL = ResearchReportStore.defaultDirectory(),
@@ -43,7 +49,8 @@ public final class ResearchWorkspace {
             reports: reports,
             run: ResearchRunController(
                 store: reports, sandboxSecretFile: ResearchSandboxSecret.defaultFileURL),
-            presets: ResearchPresetStore(defaults: defaults))
+            presets: ResearchPresetStore(defaults: defaults),
+            launch: ResearchServerLaunchController(defaults: defaults))
     }
 
     /// Questions need the model server and a sandbox whose firewall and
@@ -64,9 +71,11 @@ public final class ResearchWorkspace {
     /// while it is ready; see `ResearchServerController.refresh`). The model
     /// server is left alone while a question runs: it is busy with that
     /// question, and a slow answer to a status check must not look like a
-    /// server that went away.
+    /// server that went away. It is also left alone while SandSeek starts it:
+    /// a llama.cpp server answers 503 while it loads its model, which the
+    /// normal look would report as "not llama.cpp".
     public func refresh() async {
-        if run.isRunning {
+        if run.isRunning || launch.state == .starting {
             await sandbox.refresh()
         } else {
             async let sandboxRefresh: Void = sandbox.refresh()
@@ -160,10 +169,14 @@ public final class ResearchWorkspace {
         await sandbox.stop()
     }
 
-    /// Called when the app quits: stops what this app started. The model
-    /// server is never ours to stop.
+    /// Called when the app quits: stops what this app started, the model
+    /// server and the sandbox. The model server gets SIGTERM first, so that it
+    /// shuts down while the sandbox is being stopped, and is waited for
+    /// afterwards. A model server that someone else started is never touched.
     public func shutdown() {
         run.stop()
+        launch.beginStopWhenQuitting()
         sandbox.stopWhenQuitting()
+        launch.finishStopWhenQuitting()
     }
 }

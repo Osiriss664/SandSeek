@@ -115,10 +115,11 @@ public struct FileKeyStore: ResearchKeyStoring {
     }
 }
 
-/// The model server a question is sent to. SandSeek never starts or stops a
-/// server: it connects to one that already runs, on this Mac's loopback
-/// address only. This controller holds the chosen type and address, looks at
-/// the server now and then, lists its models, and says how to start one.
+/// The model server a question is sent to. This controller connects to a
+/// server on this Mac's loopback address only: it holds the chosen type and
+/// address, looks at the server now and then, and lists its models. It never
+/// starts or stops a server itself; "Start server" and "Stop server" belong to
+/// `ResearchServerLaunchController`, which stops only a server SandSeek started.
 @MainActor @Observable
 public final class ResearchServerController {
     public enum State: Equatable, Sendable {
@@ -368,18 +369,27 @@ public final class ResearchServerController {
     /// The command that starts a llama.cpp server SandSeek can use. It names
     /// the key file and holds no key, so it can be shown and copied: the key
     /// itself would show in `ps` for every user of this Mac and stay in the
-    /// shell history. The port follows the address.
+    /// shell history. The port follows the address. The arguments are the list
+    /// "Start server" runs (`ResearchServerLaunchPlan.llamaArguments`), with
+    /// placeholders for the model and its name.
     ///
     /// `--api-key-file` is the flag the plan assumes; the llama.cpp probe on
     /// the Mac confirms that llama-server has it and enforces it.
     public var startCommand: String? {
         guard serverType == .llamacpp else { return nil }
         let url = serverURL
-        let port = url?.port ?? 8081
-        let host = url?.host == "::1" ? "::1" : "127.0.0.1"
-        return "llama-server -m <model.gguf> --alias <name> --host \(host) --port \(port) "
-            + "-c 16384 -np 1 --jinja --api-key-file "
-            + Self.shellQuoted(keyFilePath ?? "<key file>")
+        let arguments = ResearchServerLaunchPlan.llamaArguments(
+            model: "<model.gguf>", alias: "<name>",
+            host: url?.host == "::1" ? "::1" : ResearchServerLaunchPlan.host,
+            port: url?.port ?? 8081, keyFile: keyFilePath ?? "<key file>")
+        return (["llama-server"] + arguments).map(Self.shellWord).joined(separator: " ")
+    }
+
+    /// One word of a command: left as it is when it is plain, otherwise
+    /// quoted (a path always is).
+    nonisolated static func shellWord(_ text: String) -> String {
+        text.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || ".-_:".contains($0)) }
+            ? text : shellQuoted(text)
     }
 
     /// `text` in single quotes for a shell; a path with a space stays one word.
@@ -392,10 +402,12 @@ public final class ResearchServerController {
     public var startHint: String {
         switch serverType {
         case .tuff:
-            "Start TUFF's Background API in its Server screen, or run `tuff serve`. "
+            "Choose TUFFServer below and click Start server, or start TUFF's Background API "
+                + "in its Server screen, or run `tuff serve`. "
                 + "TUFF listens on 127.0.0.1:8080 unless you changed it."
         case .llamacpp:
-            "Start llama.cpp with the command below. Replace <model.gguf> with your model "
+            "Choose llama-server and a model below and click Start server, or start llama.cpp "
+                + "with the command below. Replace <model.gguf> with your model "
                 + "file and <name> with the name you want in the model list."
         case .ollama, .lmstudio:
             "\(serverType.displayName) support comes later."

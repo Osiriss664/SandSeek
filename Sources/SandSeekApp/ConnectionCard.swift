@@ -4,13 +4,18 @@ import SandSeekCore
 import SwiftUI
 
 /// The model server: which kind, where it listens, whether it answers, which
-/// models it lists, and how to start one. SandSeek never starts or stops a
-/// model server; it only connects to one that runs.
+/// models it lists, and how to start one. It connects to a server that runs on
+/// this Mac, and can start one itself (Start server, see ServerStartSection);
+/// it stops only a server it started.
 struct ConnectionCard: View {
     let server: ResearchServerController
+    let launch: ResearchServerLaunchController
     /// True while a question runs: the type, the address and Check stay as
     /// they are, so the card cannot flip to "Not running" under the run.
     let locked: Bool
+    /// True while a question runs or is being prepared, which also keeps Start
+    /// server and Stop server as they are.
+    let questionBusy: Bool
     /// The prompt budget set in Settings for a llama.cpp server that does not
     /// say how large its context is.
     let promptBudget: Int?
@@ -19,9 +24,12 @@ struct ConnectionCard: View {
     @State private var draft: String
     @State private var copied = false
 
-    init(server: ResearchServerController, locked: Bool, promptBudget: Int?) {
+    init(server: ResearchServerController, launch: ResearchServerLaunchController,
+         locked: Bool, questionBusy: Bool, promptBudget: Int?) {
         self.server = server
+        self.launch = launch
         self.locked = locked
+        self.questionBusy = questionBusy
         self.promptBudget = promptBudget
         _draft = State(initialValue: server.addressText)
     }
@@ -42,18 +50,18 @@ struct ConnectionCard: View {
                 }
                 .pickerStyle(.menu)
                 .fixedSize()
-                .disabled(locked)
+                .disabled(controlsLocked)
                 TextField("127.0.0.1:8080", text: $draft)
                     .textFieldStyle(.roundedBorder)
                     .font(.body.monospaced())
                     .onSubmit(commitAddress)
                     .accessibilityLabel("Server address")
-                    .disabled(locked)
+                    .disabled(controlsLocked)
                 Button("Check") {
                     commitAddress()
                     Task { await server.check() }
                 }
-                .disabled(locked || server.state.isBusy || draftProblem != nil)
+                .disabled(controlsLocked || server.state.isBusy || draftProblem != nil)
             }
             if let problem = draftProblem {
                 Text(problem)
@@ -68,7 +76,7 @@ struct ConnectionCard: View {
                 }
                 .buttonStyle(.link)
                 .font(.caption)
-                .disabled(locked)
+                .disabled(controlsLocked)
             }
             if locked {
                 Text("The server is busy with your question. It can be changed when the question is done.")
@@ -77,6 +85,7 @@ struct ConnectionCard: View {
             }
             detail
             exposureNotice
+            ServerStartSection(server: server, launch: launch, questionBusy: questionBusy)
             if server.serverType == .llamacpp {
                 llamaCommand
             }
@@ -88,6 +97,11 @@ struct ConnectionCard: View {
         .cardStyle()
         .onChange(of: server.addressText) { draft = server.addressText }
     }
+
+    /// The type, the address and Check stay as they are while a question runs
+    /// and while SandSeek starts a server (a llama.cpp server that is still
+    /// loading its model would be reported as "not llama.cpp").
+    private var controlsLocked: Bool { locked || launch.state == .starting }
 
     // MARK: - Parts
 
