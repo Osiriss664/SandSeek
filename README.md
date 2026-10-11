@@ -49,11 +49,21 @@ addresses go to the internet. More in [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.m
 
 Step by step: [docs/INSTALL.md](docs/INSTALL.md).
 
-## Problems, ideas, help
+## Contributions and testing welcome
 
-- Something broken or unclear: open an issue (bug report, question or idea).
-- A security problem: please report it privately, see [SECURITY.md](SECURITY.md).
-- Want to help: see [CONTRIBUTING.md](CONTRIBUTING.md).
+SandSeek is young, and help is very welcome: code, documentation, ideas, and
+above all test reports.
+
+- **Tried it?** Tell us how it went, especially on other Macs (memory, chip,
+  macOS version) and with other model servers or models. A short note in the
+  [test reports discussion](https://github.com/Osiriss664/SandSeek/discussions/1)
+  is enough.
+- **Questions and ideas:** [Discussions](https://github.com/Osiriss664/SandSeek/discussions)
+  (Q&A and Ideas).
+- **Something broken or unclear:** open an [issue](https://github.com/Osiriss664/SandSeek/issues/new/choose);
+  the forms ask for the details that help.
+- **Want to change code or docs:** see [CONTRIBUTING.md](CONTRIBUTING.md).
+- **A security problem:** please report it privately, see [SECURITY.md](SECURITY.md).
 
 ## Documentation
 

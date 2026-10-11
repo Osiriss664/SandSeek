@@ -3,3 +3,6 @@ contact_links:
   - name: Report a security problem privately
     url: https://github.com/Osiriss664/SandSeek/blob/main/SECURITY.md
     about: Please do not open a public issue for security problems.
+  - name: Questions, ideas and test reports
+    url: https://github.com/Osiriss664/SandSeek/discussions
+    about: Ask a question, share an idea or tell us how SandSeek ran on your Mac.
