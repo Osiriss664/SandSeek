@@ -119,14 +119,32 @@ case "${1:-}" in
     container run "${run_options[@]}" "$image" >/dev/null
     # The entrypoint refuses to start when it finds no default gateway (see
     # Sandbox/entrypoint.sh) or cannot load the firewall, and `--rm` deletes the
-    # container then, so keep the last log lines to show them below.
+    # container then, so keep the last non-empty log (a later "not found" error
+    # must not replace it) to show below.
     startup_log=""
+    polls_after_firewall=0
     for _ in $(seq 1 50); do
       if health; then
         echo "web research sandbox ready at http://127.0.0.1:$port"
         exit 0
       fi
-      startup_log="$(container logs "$name" 2>&1 | tail -n 5 || true)"
+      if out="$(container logs "$name" 2>/dev/null)" && [[ -n "$out" ]]; then
+        startup_log="$(tail -n 5 <<<"$out")"
+      fi
+      # Stop early when the entrypoint refused to start or the container is gone.
+      if [[ "$startup_log" == *"refusing to start"* ]]; then
+        break
+      fi
+      if remaining="$(container list --all --quiet 2>/dev/null)" \
+          && ! grep -qx "$name" <<<"$remaining"; then
+        break
+      fi
+      # The server is up (the firewall is loaded) but nothing reached it: each
+      # poll can wait 2 s, so give it a few more tries, not the whole 50.
+      if [[ "$startup_log" == *"firewall: inbound port 9100 accepted"* ]]; then
+        polls_after_firewall=$((polls_after_firewall + 1))
+        (( polls_after_firewall < 10 )) || break
+      fi
       sleep 0.2
     done
     if [[ -n "$startup_log" ]]; then
@@ -134,7 +152,9 @@ case "${1:-}" in
       printf '%s\n' "$startup_log" >&2
     fi
     echo "sandbox started but did not answer on 127.0.0.1:$port; see: container logs $name" >&2
-    echo "(port 9100 is open to the VM's default gateway only; the sandbox log names it. If the published port connects from another address, the server is unreachable; see docs/SECURITY.md)" >&2
+    if [[ "$startup_log" == *"firewall: inbound port 9100 accepted"* ]]; then
+      echo "(port 9100 is open to the VM's default gateway only, named in the log above. If the published port connects from another address, the server is unreachable; see docs/SECURITY.md)" >&2
+    fi
     exit 1
     ;;
   stop)
@@ -167,7 +187,8 @@ case "${1:-}" in
 
     echo "Fetches the sandbox must refuse:"
     # The same helper the entrypoint uses for the inbound rule.
-    gateway="$(container exec "$name" python3 /app/default_gateway.py)"
+    gateway="$(container exec "$name" python3 /app/default_gateway.py)" \
+      || { echo "  FAIL  could not read the VM's default gateway (rebuild the image?)" >&2; exit 1; }
     blocked_urls=(
       "http://$gateway/"
       "http://$gateway:8080/v1/models"

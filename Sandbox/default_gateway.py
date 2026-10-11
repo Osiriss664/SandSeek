@@ -28,15 +28,16 @@ def default_gateway(text):
     """The gateway of the default route with the lowest metric, as a string.
 
     /proc/net/route columns: Iface Destination Gateway Flags RefCnt Use Metric
-    Mask MTU Window IRTT; addresses are little-endian hex. A default route has
+    Mask MTU Window IRTT; addresses are the kernel's 32-bit
+    values in host byte order, printed as hex (so "=L" below, not "<L"). A default route has
     destination and mask 0, is up, and has a gateway (an on-link default route
     has gateway 0 and is skipped). Raises GatewayError when there is none or
     the address is not an ordinary unicast IPv4 address.
     """
     best = None
-    for line in text.splitlines()[1:]:
+    for line in text.splitlines():
         fields = line.split()
-        if len(fields) < 8:
+        if len(fields) < 8 or fields[0] == "Iface":
             continue
         try:
             destination, gateway, flags = int(fields[1], 16), int(fields[2], 16), int(fields[3], 16)
@@ -51,7 +52,7 @@ def default_gateway(text):
             best = (metric, gateway)
     if best is None:
         raise GatewayError("no default gateway found in the routing table")
-    text_address = socket.inet_ntoa(struct.pack("<L", best[1]))
+    text_address = socket.inet_ntoa(struct.pack("=L", best[1]))
     return validate(text_address)
 
 

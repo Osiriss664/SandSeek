@@ -127,8 +127,7 @@ These hold as long as the design is intact and the VM boundary holds.
   everyone. Over IPv6 nothing but loopback is accepted inbound. The server
   listens on 0.0.0.0 because the published port reaches the VM's network
   address, not its loopback, and the Mac side is published on 127.0.0.1 only.
-  A client that connects and goes
-  silent is dropped after 30 seconds (the same limit applies to writing the
+  A client that connects and goes silent is dropped after 30 seconds (the same limit applies to writing the
   answer, so a reader slower than about 240 KB/s would be cut off on the
   largest `/v1/raw` answers). IPv6 neighbour discovery is dropped inbound as
   well; IPv6 was already unusable because the output chain does not allow
@@ -218,19 +217,25 @@ These hold as long as the design is intact and the VM boundary holds.
   public pages fetched through it. That is the same trust boundary as any local
   server. Browser pages cannot (Host check, JSON only).
 - **Anything that can send from the VM's gateway address can still reach port
-  9100 of the VM directly.** The inbound firewall accepts that port from the
-  default gateway only (a Mac test showed the published port connects from the
-  vmnet gateway, 192.168.64.1, for a VM at 192.168.64.58), so other VMs or
-  containers on the same network are refused. But processes on the Mac can
-  reach the VM network and send from the gateway address, and a caller can send
-  any `Host` header. That is why the server checks `Host` and accepts JSON
-  only, and why the Mac cleans the text it gets back again. Every other inbound port is closed. The sandbox log shows the
-  gateway that was allowed (`firewall: inbound port 9100 accepted from the
-  default gateway ...`). If a configuration publishes the port from a different
-  source address than the default gateway, the server would be unreachable
-  (`start` reports that it did not answer, with the log). The gateway as the
-  source was observed on one Mac setup; a run on another one confirms it. `selftest` reads the loaded rule and checks
-  that it names the gateway; it does not send packets from other addresses.
+  9100 of the VM directly.** The inbound firewall accepts that port (plus
+  replies) from the default gateway only. A Mac test showed that the published
+  port connects from the vmnet gateway, 192.168.64.1, for a VM at
+  192.168.64.58. Other VMs or containers on the same network are refused,
+  unless they forge the gateway's address on the shared bridge. Processes on
+  the Mac can reach the VM network and send from the gateway address. A
+  non-browser caller can send any `Host` header, so the Host check only stops
+  browser pages; the boundary is the same as for "any program on your Mac"
+  above. Every other inbound port is closed.
+  The sandbox log shows the gateway that was allowed (`firewall: inbound port
+  9100 accepted from the default gateway ...`). If a configuration publishes
+  the port from a different source address than the default gateway, the
+  server would be unreachable. The gateway was observed as the source on one
+  Mac so far; if `start` says the sandbox did not answer, compare the gateway
+  in the log with the peer address in `/proc/net/tcp` during a request.
+  `selftest` reads the loaded rule and checks that it names the gateway; it
+  does not send packets from other addresses. The app's own firewall check
+  (`firewallProblem`) looks at the output chain only, not the input chain;
+  that is a later follow-up.
 - **The search path through SearXNG** (`SEARXNG_URL`, the operator's own
   service) follows no redirect and uses no proxy from the environment, but it
   is the one request that skips the public-address check; the firewall's single

@@ -2229,6 +2229,11 @@ class DefaultGatewayTests(unittest.TestCase):
         header = SAMPLE_ROUTE.splitlines()[0]
         return header + "\n" + "\n".join(rows) + "\n"
 
+    def test_a_line_that_is_not_hex_is_skipped_whatever_the_header_says(self):
+        text = "eth0 Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT\n" \
+            + SAMPLE_ROUTE.splitlines()[1] + "\n"
+        self.assertEqual(self.module.default_gateway(text), "192.168.64.1")
+
     def test_reads_the_gateway_from_a_real_looking_route_table(self):
         self.assertEqual(self.module.default_gateway(SAMPLE_ROUTE), "192.168.64.1")
 
@@ -2341,9 +2346,11 @@ class EntrypointTests(unittest.TestCase):
         self.assertEqual(calls, "")
 
     def test_a_gateway_that_does_not_look_like_ipv4_is_refused(self):
-        for output in ("1.2.3.4; accept", "$(id)", "1.2.3.4 ", "..", "::1", ".1.2.3"):
+        for output in ("1.2.3.4; accept", "$(id)", "1.2.3.4 ", "..", "::1", ".1.2.3",
+                       "0", "4294967295", "1.2.3", "1.2.3.4.5", "1234.1.1.1", "a.b.c.d"):
             result, calls = self.run_entrypoint(f"#!/bin/sh\nprintf '%s\\n' '{output}'\n")
             self.assertEqual(result.returncode, 1, output)
+            self.assertIn("is not an IPv4 address; refusing to start", result.stderr, output)
             self.assertNotIn("nft", calls, output)
             self.assertNotIn("server.py", calls, output)
 

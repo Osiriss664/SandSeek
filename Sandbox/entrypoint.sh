@@ -18,9 +18,11 @@ if [ -z "$gateway" ]; then
   echo "no usable default gateway; cannot restrict port 9100 to it, refusing to start" >&2
   exit 1
 fi
-case "$gateway" in
-  *[!0-9.]*|*..*|.*|*.) echo "default gateway '$gateway' is not an IPv4 address; refusing to start" >&2; exit 1 ;;
-esac
+# Exactly four dot-separated groups of one to three digits.
+if [ "$(expr "x$gateway" : 'x[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}\.[0-9]\{1,3\}$')" = 0 ]; then
+  echo "default gateway '$gateway' is not an IPv4 address; refusing to start" >&2
+  exit 1
+fi
 if ! nft -D "gateway=$gateway" -f /app/firewall.nft; then
   echo "could not load the sandbox firewall; refusing to start" >&2
   exit 1
