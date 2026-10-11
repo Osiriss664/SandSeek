@@ -42,6 +42,11 @@ public struct ResearchPageSlice: Equatable, Sendable {
 /// a 404. It becomes the tool result instead of ending the research run.
 public struct ResearchToolFailure: Error, Equatable, Sendable {
     public let message: String
+    /// The sandbox's HTTP status for a failed request, when it had one.
+    public var status: Int? = nil
+
+    /// Statuses that mean the site turned the reader away.
+    var siteRefused: Bool { [401, 403, 429, 451].contains(status ?? 0) }
 }
 
 /// Client for the web tool server running in the Apple container sandbox.
@@ -160,7 +165,7 @@ public struct ResearchSandboxClient: Sendable {
         guard response.status == 200, let reply else {
             let message = reply?["error"]?["message"]?.stringValue
                 ?? "the sandbox answered HTTP \(response.status)"
-            throw ResearchToolFailure(message: message)
+            throw ResearchToolFailure(message: message, status: response.status)
         }
         return reply
     }

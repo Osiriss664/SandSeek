@@ -3361,6 +3361,28 @@ struct ResearchAgentTests {
             == .string("Source [1]: Page 1\n(Earlier result shortened to save context.)"))
     }
 
+    @Test func shorteningTwiceDoesNotWearPassagesDownFurther() {
+        var state = ResearchAgent.State(question: "Berlin Zeitung")
+        state.messages = [
+            .object(["role": .string("system"), "content": .string("s")]),
+            .object(["role": .string("user"), "content": .string(state.question)]),
+            Self.toolMessage("a", Self.pageResult(1, url: "https://a.example/")),
+            Self.toolMessage("b", Self.pageResult(2, url: "https://b.example/")),
+        ]
+        state.compact(toFit: 200)
+        let once = state.messages
+        #expect(once[2]["content"]?.stringValue?.contains("Zeitung") == true)
+        state.compact(toFit: 200)
+        #expect(state.messages == once)
+    }
+
+    @Test func onlyRefusalsCountAgainstASite() {
+        #expect(ResearchToolFailure(message: "x", status: 403).siteRefused)
+        #expect(ResearchToolFailure(message: "x", status: 429).siteRefused)
+        #expect(!ResearchToolFailure(message: "x", status: 404).siteRefused)
+        #expect(!ResearchToolFailure(message: "x").siteRefused)
+    }
+
     @Test func aSiteThatFailedThreeTimesIsNotTriedAgain() async throws {
         let failing = "https://blocked.example/"
         let services = FakeServices(modelReplies: [

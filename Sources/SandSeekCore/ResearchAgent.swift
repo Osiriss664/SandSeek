@@ -1703,6 +1703,9 @@ public struct ResearchAgent: Sendable {
         var pages: [String] = []
         let unread = state.topResults().filter { url in
             !state.sources.contains { $0.url == url } && state.pageRead(url: url, offset: 0) == nil
+                && !(State.siteName(of: url).map {
+                    state.siteFailures[$0, default: 0] >= State.failuresBeforeSkippingSite
+                } ?? false)
         }
         for url in unread.prefix(Self.autoOpenAttempts) where pages.count < wanted {
             let read = state.sources.count
@@ -2493,11 +2496,14 @@ public struct ResearchAgent: Sendable {
                 state.recordText(page.text, for: source)
             }
             state.recordRead(requested: url, page: page, offset: offset)
+            if let site = State.siteName(of: url) { state.siteFailures[site] = nil }
             return Self.formatPage(page, source: source, alreadyNumbered: alreadyNumbered,
                                    requested: state.requested, pagesRead: state.sources.count,
                                    markers: state.markers)
         } catch let failure as ResearchToolFailure {
-            if let site = State.siteName(of: url) { state.siteFailures[site, default: 0] += 1 }
+            if failure.siteRefused, let site = State.siteName(of: url) {
+                state.siteFailures[site, default: 0] += 1
+            }
             onEvent(.toolFailed(failure.message))
             return "Tool error: \(Self.sanitized(failure.message, markers: state.markers))"
         } catch {
@@ -3426,10 +3432,10 @@ public struct ResearchAgent: Sendable {
                     switch level {
                     case 0: shorter = repeatedRead(at: index) ? Self.firstLineOnly(
                         content, note: "(Shortened: the same text appears again below.)") : nil
-                    case 1: shorter = isPage ? nil : Self.shortened(
+                    case 1: shorter = isPage ? nil : (Self.shortened(
                         message, content: content,
                         passageLimit: Self.keptPassageCharacters[0], stems: stems,
-                        markers: markers)
+                        markers: markers) ?? Self.withoutProgressLine(content, role: message["role"]))
                     case 2, 3: shorter = isPage || level == 3 ? Self.shortened(
                         message, content: content,
                         passageLimit: Self.keptPassageCharacters[level - 2], stems: stems,
@@ -3467,6 +3473,15 @@ public struct ResearchAgent: Sendable {
         /// untrusted block and is no list of search results.
         static func isPageResult(_ content: String, markers: Markers) -> Bool {
             content.contains(markers.open) && !content.hasPrefix("Search results for ")
+        }
+
+        /// A tool result without its out-of-date "Research so far:" line.
+        static func withoutProgressLine(_ content: String, role: ResearchJSON?) -> String? {
+            guard role?.stringValue == "tool", content.contains("Research so far:") else { return nil }
+            return content.split(separator: "\n", omittingEmptySubsequences: false)
+                .filter { !$0.hasPrefix("Research so far:") }
+                .joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
         /// Whether a later message holds the same page text, read again.
@@ -3533,7 +3548,10 @@ public struct ResearchAgent: Sendable {
                 output += rest[..<open.upperBound]
                 let body = String(rest[open.upperBound..<close.lowerBound])
                     .trimmingCharacters(in: .newlines)
+                // Text already within the limit stays as it is: shortening it
+                // again would wear it down to its lead at every compaction.
                 let kept = isSearch ? searchTitles(body)
+                    : body.count <= passageLimit ? body
                     : extract(body, limit: passageLimit, stems: stems)
                 // Page text was cleaned of markers already; cleaning the
                 // cut-down text again keeps that true whatever the cut.
