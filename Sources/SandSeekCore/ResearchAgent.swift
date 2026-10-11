@@ -541,7 +541,8 @@ public struct ResearchAgent: Sendable {
         ]
 
         /// Web text without anything that could pass as one of these markers.
-        /// Copies of the markers go first. Then, in both modes, the lookalike
+        /// Copies of the markers go first, then the words UNTRUSTED WEB CONTENT
+        /// in any case and spacing. Then, in both modes, the lookalike
         /// brackets become plain ones and `<<<` and `>>>` are made harmless, so
         /// a page cannot write a marker with extra blanks or full-width
         /// brackets that a model might read as one. With a code, the code is
@@ -557,6 +558,12 @@ public struct ResearchAgent: Sendable {
                     .replacingOccurrences(of: ResearchAgent.untrustedClose, with: "")
                     .replacingOccurrences(of: open, with: "")
                     .replacingOccurrences(of: close, with: "")
+                // The phrase itself goes, in any case and spacing, so what the
+                // defused brackets leave behind (`‹‹‹END UNTRUSTED WEB CONTENT›››`)
+                // and a marker rebuilt from pieces cannot read as a marker.
+                next = next.replacingOccurrences(
+                    of: #"UNTRUSTED[\s\p{Z}]*WEB[\s\p{Z}]*CONTENT"#, with: "",
+                    options: [.regularExpression, .caseInsensitive])
                 for (form, plain) in Self.lookalikes {
                     next = next.replacingOccurrences(of: form, with: plain)
                 }
