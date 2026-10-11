@@ -47,7 +47,9 @@ itself cannot run in the VM (it has no GPU), and does not need to.
 
 The VM has a read-only root filesystem, 1 GB of memory, a process limit and a
 firewall of its own, and it is replaced by a fresh one before each question
-after the first.
+after the first. Each start also makes a new random secret, which the sandbox
+uses to sign its answers, so SandSeek can tell the real sandbox from another
+program on the same port (see `docs/SECURITY.md`).
 
 ## What happens when you ask a question
 

@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import SandSeekCore
 
 /// Everything the Research screen works with: the model server connection,
 /// the sandbox, the run in progress, the saved reports and the presets.
@@ -34,12 +35,14 @@ public final class ResearchWorkspace {
                             defaults: any ResearchSettingsStore = UserDefaults.standard) {
         let reports = ResearchReportStore(directory: reportsDirectory)
         self.init(
-            sandbox: ResearchSandboxController(defaults: defaults),
+            sandbox: ResearchSandboxController(
+                defaults: defaults, secretFile: ResearchSandboxSecret.defaultFileURL),
             server: ResearchServerController(
                 defaults: defaults,
                 exposureCheck: ResearchServerController.networkExposureCheck),
             reports: reports,
-            run: ResearchRunController(store: reports),
+            run: ResearchRunController(
+                store: reports, sandboxSecretFile: ResearchSandboxSecret.defaultFileURL),
             presets: ResearchPresetStore(defaults: defaults))
     }
 

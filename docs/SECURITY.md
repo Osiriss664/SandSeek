@@ -147,10 +147,45 @@ These hold as long as the design is intact and the VM boundary holds.
   where SandSeek runs, because Foundation on Linux follows redirects of
   completion-handler tasks without asking the delegate): a 3xx answer is an
   error, so a program that took over the port cannot send SandSeek, a POST
-  body or the llama.cpp key elsewhere. What remains: if the sandbox is not
-  running, another program on 127.0.0.1:9100 could answer with made-up pages,
-  because the loopback channel has no authentication yet. A token shared by
-  SandSeek and the sandbox is a possible later step; there is none today.
+  body or the llama.cpp key elsewhere.
+- **Answers are signed, so the sandbox can be told from a program squatting on
+  its port.** Each `Scripts/research_sandbox.sh start` (the app starts the
+  sandbox through the same script) makes 32 random bytes, writes them as 64
+  hex characters to `~/Library/Application Support/TUFF/web-sandbox.secret`
+  (file mode 0600, written to a temporary file and renamed before the
+  sandbox starts; the folder is made with mode 0700 when it is missing, and an
+  existing one, such as TUFF's own, is never changed, but the script refuses to
+  use a folder that is not yours or that group or others can write to) and
+  hands them to the container as the variable
+  `SANDSEEK_SANDBOX_SECRET`, by name only, so the value is in no command line
+  and other users cannot see it in `ps`. The sandbox removes the variable from its
+  environment at start. While the file exists, SandSeek sends a fresh random
+  nonce (`X-Sandbox-Nonce`) with every request and uses an answer only if its
+  `X-Sandbox-Signature` is `hex(HMAC-SHA256(secret, "tuff-sandbox-v1\n" +
+  nonce + "\n" + hex(SHA256(request body)) + "\n" + status + "\n" + answer))`,
+  compared in constant time before anything in the answer is read (an answer
+  is read up to 16 MiB, so a program on the port cannot make SandSeek buffer
+  an endless one). The secret
+  never crosses the port, so a program that answers there cannot make a valid
+  signature, an old answer does not fit a new nonce, and a genuine answer to
+  one request does not fit another. Without a valid signature the check fails
+  with "the answer on 127.0.0.1:9100 is not signed by the SandSeek sandbox;
+  another program may be using the port". SandSeek reads the file at every
+  request, and refuses a file that is a symbolic link, not a regular file, not
+  yours, readable or writable by group or others, or shorter than 32 bytes.
+  `stop` leaves the file, so a squatter is still told apart while the sandbox
+  is not running. The script will not start under `bash -x`, whose trace would
+  print the secret, and it stops the container again if `/health` does not
+  report `"signed": true` after the start.
+  What this does not cover: a program running as you can read the file, which
+  is the honest limit (it could also read your reports and settings). A
+  sandbox started some other way, with no secret, is refused while the file
+  exists; delete the file to use it. With no file at all (a sandbox from
+  before this change, or one never started by the script) SandSeek behaves as
+  it did, unsigned, because SandSeek is the launcher and a missing file only
+  means no secret was made. Inside the VM the server listens on all of the
+  VM's addresses, because the published port has to reach it, and the Mac
+  reaches it only through the `127.0.0.1:9100` publish.
 
 ## What it does not guarantee
 
