@@ -498,8 +498,9 @@ public struct ResearchAgent: Sendable {
     /// The markers around web text in one run. `fixed` is the same text in
     /// every run. With a code (`nonce`) the markers carry a random code of
     /// 16 characters per run, the system text says only markers with that code
-    /// count, `<<<` and `>>>` are made harmless in web text and the code is
-    /// removed from it, so web text cannot build a marker that looks real.
+    /// count, and the code is removed from web text. In both modes `<<<` and
+    /// `>>>` (also in full-width form) are made harmless in web text, so it
+    /// cannot build a marker that looks real.
     struct Markers: Equatable, Sendable {
         let open: String
         let close: String
@@ -531,22 +532,27 @@ public struct ResearchAgent: Sendable {
         ]
 
         /// Web text without anything that could pass as one of these markers.
+        /// Copies of the markers go first. Then, in both modes, the lookalike
+        /// brackets become plain ones and `<<<` and `>>>` are made harmless, so
+        /// a page cannot write a marker with extra blanks or full-width
+        /// brackets that a model might read as one. With a code, the code is
+        /// removed as well.
         func cleaned(_ text: String) -> String {
             var current = ResearchText.terminalSafe(text)
             while true {
                 var next = current
                 if let code {
                     next = next.replacingOccurrences(of: code, with: "")
-                    for (form, plain) in Self.lookalikes {
-                        next = next.replacingOccurrences(of: form, with: plain)
-                    }
-                    next = next.replacingOccurrences(of: "<<<", with: "\u{2039}\u{2039}\u{2039}")
-                        .replacingOccurrences(of: ">>>", with: "\u{203A}\u{203A}\u{203A}")
                 }
                 next = next.replacingOccurrences(of: ResearchAgent.untrustedOpen, with: "")
                     .replacingOccurrences(of: ResearchAgent.untrustedClose, with: "")
                     .replacingOccurrences(of: open, with: "")
                     .replacingOccurrences(of: close, with: "")
+                for (form, plain) in Self.lookalikes {
+                    next = next.replacingOccurrences(of: form, with: plain)
+                }
+                next = next.replacingOccurrences(of: "<<<", with: "\u{2039}\u{2039}\u{2039}")
+                    .replacingOccurrences(of: ">>>", with: "\u{203A}\u{203A}\u{203A}")
                 if next == current { return current }
                 current = next
             }
