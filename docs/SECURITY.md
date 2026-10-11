@@ -129,8 +129,9 @@ These hold as long as the design is intact and the VM boundary holds.
   address, not its loopback, and the Mac side is published on 127.0.0.1 only.
   A client that connects and goes silent is dropped after 30 seconds (a body
   that stops short gets a 408, signed over the empty body, since the server
-  never had the whole one; the same limit applies to writing the answer, so a reader slower than about 240 KB/s
-  would be cut off on the largest `/v1/raw` answers). IPv6 neighbour discovery
+  never had the whole one; the same limit applies to writing the answer, so
+  a reader slower than about 240 KB/s would be cut off on the largest
+  `/v1/raw` answers). IPv6 neighbour discovery
   is dropped inbound as well; IPv6 was already unusable because the output
   chain does not allow link-local traffic.
 - **The sandbox fetches public addresses only.** It resolves each name, refuses
@@ -385,7 +386,7 @@ Durations are estimates from earlier runs on a 16 GB MacBook Air.
 
 | Test | What it checks | How to run | Expect | Time |
 | --- | --- | --- | --- | --- |
-| Sandbox self-test | the sandbox refuses the Mac, loopback, private ranges, metadata addresses, odd ports and schemes; the firewall is loaded and drops inbound connections except to port 9100 from the VM's gateway (rule text only); the server runs as user 10001 with no capabilities; raw connections from inside the VM to the Mac, the router addresses and the metadata address fail; every TCP port on the Mac is tried (only DNS may answer); a foreign `Host` and a browser-style POST are refused; a public page loads | `Scripts/research_sandbox.sh selftest` (also the app's **Security check**) | `all sandbox checks passed` | about 1 min |
+| Sandbox self-test | the sandbox refuses the Mac, loopback, private ranges, metadata addresses, odd ports and schemes; the firewall is loaded and drops inbound connections except to port 9100 from the VM's gateway (rule text only); the server runs as user 10001 with no capabilities; raw connections from inside the VM to the Mac, the router addresses and the metadata address fail; every TCP port on the Mac is tried (only DNS may answer); a foreign `Host` and a browser-style POST are refused; a fresh nonce to `/health` gets a valid signature; a public page loads | `Scripts/research_sandbox.sh selftest` (also the app's **Security check**) | `all sandbox checks passed` | about 1 min |
 | Address check | 98 addresses (private, loopback, link-local, IPv6 forms, numeric spellings, `localhost`, names that resolve to private addresses, bad schemes and ports) are refused, sent straight to the sandbox with no model; a public page still loads | `python3 Scripts/research_address_check.py` | `RESULT: pass`, exit 0 | 1 to 3 min |
 | Sandbox unit tests | the address policy, fetching, redirects, extraction, cleaning, the HTTP API, and the address check's list against the real policy; no network | `python3 -m unittest Sandbox/test_server.py` | `OK` | seconds |
 | Swift tests | the research loop with fake services, the command, the app logic, streaming, the exposure check | `swift test` | all pass | minutes |

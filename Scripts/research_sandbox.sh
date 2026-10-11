@@ -432,7 +432,7 @@ with ThreadPoolExecutor(64) as pool:
       if [[ "$(health_json || true)" == *'"signed": true'* ]]; then
         fail "the sandbox signs its answers but $secret_file does not exist"
       else
-        echo "  skip  no secret file and an unsigned sandbox: nothing to check"
+        echo "  warn  no secret file and an unsigned sandbox: nothing to check"
       fi
     else
       # A fresh nonce, the answer's headers and body, and the checker that

@@ -242,6 +242,9 @@ private struct FakeSandbox: ResearchHTTPTransport {
         /// A 408 for a body that did not arrive in full, signed over the empty
         /// body (the real server never had the whole one), with the given key.
         case requestTimeout(key: Data)
+        /// An honest key, but the answer is signed over the empty body whatever
+        /// was sent, with this status.
+        case signedOverTheEmptyBody(status: Int)
     }
 
     let keys: KeyBox
@@ -314,6 +317,11 @@ private struct FakeSandbox: ResearchHTTPTransport {
             return signed(text)
         case .redirect:
             return ResearchHTTPResponse(status: 307, body: Data())
+        case .signedOverTheEmptyBody(let status):
+            let signature = expectedSignature(
+                key: honestKey, nonce: nonce, requestBody: Data(), status: status, body: payload)
+            return ResearchHTTPResponse(status: status, body: payload,
+                                        headers: ["x-sandbox-signature": signature])
         case .requestTimeout(let key):
             let signature = expectedSignature(
                 key: key, nonce: nonce, requestBody: Data(), status: 408, body: Self.timeoutBody)
@@ -480,6 +488,20 @@ private struct FakeSandbox: ResearchHTTPTransport {
         await everyCall(
             client(FakeSandbox(key: secret, behaviour: .requestTimeout(key: wrong)), file: file),
             expecting: notSigned)
+    }
+
+    /// Only a 408 may be signed over the empty body; any other answer to a POST
+    /// has to be signed over the body that was sent.
+    @Test func anotherStatusSignedOverTheEmptyBodyIsRefused() async throws {
+        let file = try SecretFolder().write()
+        for status in [200, 400, 403, 413, 504] {
+            let sandbox = client(
+                FakeSandbox(key: secret, behaviour: .signedOverTheEmptyBody(status: status)), file: file)
+            await #expect(throws: notSigned) { _ = try await sandbox.search(query: "q", maxResults: 3) }
+            await #expect(throws: notSigned) {
+                _ = try await sandbox.fetch(url: "https://example.com/a", offset: 0, maxCharacters: 100)
+            }
+        }
     }
 
     @Test func aTransportThatCannotSendHeadersFailsInsteadOfDroppingTheNonce() async throws {
