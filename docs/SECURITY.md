@@ -197,8 +197,11 @@ These hold as long as the design is intact and the VM boundary holds.
   hands them to the container as the variable
   `SANDSEEK_SANDBOX_SECRET`, by name only, so the value is in no command line
   and other users cannot see it in `ps`. The sandbox removes the variable from its
-  environment at start. While the file exists, SandSeek sends a fresh random
-  nonce (`X-Sandbox-Nonce`) with every request and uses an answer only if its
+  environment at start. The container's configuration keeps the variable, so
+  it is visible to `container exec` processes and to `container inspect` (same
+  Mac user only); the launcher strips it from the exec probes it runs
+  (`env -u SANDSEEK_SANDBOX_SECRET`). While the file exists, SandSeek sends a
+  fresh random nonce (`X-Sandbox-Nonce`) with every request and uses an answer only if its
   `X-Sandbox-Signature` is `hex(HMAC-SHA256(secret, "tuff-sandbox-v1\n" +
   nonce + "\n" + hex(SHA256(request body)) + "\n" + status + "\n" + answer))`,
   compared in constant time before anything in the answer is read (an answer
@@ -221,9 +224,9 @@ These hold as long as the design is intact and the VM boundary holds.
   exists; delete the file to use it. With no file at all (a sandbox from
   before this change, or one never started by the script) SandSeek behaves as
   it did, unsigned, because SandSeek is the launcher and a missing file only
-  means no secret was made. Inside the VM the server listens on all of the
-  VM's addresses, because the published port has to reach it, and the Mac
-  reaches it only through the `127.0.0.1:9100` publish.
+  means no secret was made. Inside the VM the server listens on 0.0.0.0,
+  because the published port has to reach it; who can connect is set by the
+  inbound rule above (the gateway only).
 
 ## What it does not guarantee
 
@@ -251,7 +254,9 @@ These hold as long as the design is intact and the VM boundary holds.
   comes from Debian's current packages when the image is built.
 - **Any program on your Mac can call the sandbox** on 127.0.0.1:9100 and have
   public pages fetched through it. That is the same trust boundary as any local
-  server. Browser pages cannot (Host check, JSON only).
+  server. Browser pages cannot (Host check, JSON only). Signing proves the
+  sandbox's answers to SandSeek; it does not authenticate callers of the
+  sandbox.
 - **Anything that can send from the VM's gateway address can still reach port
   9100 of the VM directly.** The inbound firewall accepts new connections to
   that port from the default gateway only (replies to the VM's own outbound

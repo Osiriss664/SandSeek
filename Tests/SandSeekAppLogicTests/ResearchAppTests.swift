@@ -626,7 +626,8 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
         #expect(sandbox.startedByApp)
         #expect(runner.scriptCommands == ["build", "start"])
         #expect(runner.commands.contains {
-            $0.starts(with: ["env", "container", "exec", "sandseek-sandbox", "nft",
+            $0.starts(with: ["env", "container", "exec", "sandseek-sandbox",
+                             "env", "-u", "SANDSEEK_SANDBOX_SECRET", "nft",
                              "list", "table", "inet", "sandseek_sandbox"])
         })
 

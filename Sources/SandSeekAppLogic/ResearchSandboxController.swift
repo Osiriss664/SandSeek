@@ -256,6 +256,7 @@ public final class ResearchSandboxController {
         let firewall = try? await runner.run(
             executable: URL(fileURLWithPath: "/usr/bin/env"),
             arguments: ["container", "exec", Self.containerName,
+                        "env", "-u", "SANDSEEK_SANDBOX_SECRET",
                         "nft", "list", "table", "inet", Self.firewallTable],
             environment: environment, timeout: 30)
         guard state == .ready else { return }
@@ -272,6 +273,7 @@ public final class ResearchSandboxController {
         let privileges = try? await runner.run(
             executable: URL(fileURLWithPath: "/usr/bin/env"),
             arguments: ["container", "exec", Self.containerName,
+                        "env", "-u", "SANDSEEK_SANDBOX_SECRET",
                         "python3", "-c", Self.privilegeCheck],
             environment: environment, timeout: 30)
         guard state == .ready else { return }

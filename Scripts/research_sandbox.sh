@@ -251,11 +251,13 @@ case "${1:-}" in
         esac
       done
       debug_command+=" $image"
-      echo "the sandbox container exited and was removed (it runs with --rm)." >&2
-      echo "To see why, run it once in the foreground without --rm: $debug_command" >&2
       # --env SANDSEEK_SANDBOX_SECRET above carries the name only, never the
-      # value; the container tool takes the value from the terminal's environment.
-      echo "(the secret variable is passed by name, so the command shows no value. For the run to sign its answers as the real start does, export it first in that terminal: export SANDSEEK_SANDBOX_SECRET=\"\$(cat $(printf '%q' "$secret_file"))\" )" >&2
+      # value; the container tool takes the value from its own environment.
+      # Printed as a prefix to this one command, so the secret does not stay
+      # exported in the terminal. The value itself is never printed.
+      debug_command="SANDSEEK_SANDBOX_SECRET=\"\$(cat $(printf '%q' "$secret_file"))\" $debug_command"
+      echo "the sandbox container exited and was removed (it runs with --rm)." >&2
+      echo "To see why, run it once in the foreground without --rm (the prefix hands it the secret for this one command, so it signs its answers as the real start does): $debug_command" >&2
     else
       echo "sandbox started but did not answer on 127.0.0.1:$port; see: container logs $name" >&2
       if (( firewall_loaded && listening )); then
@@ -295,7 +297,7 @@ case "${1:-}" in
 
     echo "Fetches the sandbox must refuse:"
     # The same helper the entrypoint uses for the inbound rule.
-    gateway="$(container exec "$name" python3 /app/default_gateway.py)" \
+    gateway="$(container exec "$name" env -u SANDSEEK_SANDBOX_SECRET python3 /app/default_gateway.py)" \
       || { echo "  FAIL  could not read the VM's default gateway (rebuild the image?)" >&2; exit 1; }
     blocked_urls=(
       "http://$gateway/"
@@ -325,7 +327,7 @@ case "${1:-}" in
     done
 
     echo "The VM's own protection:"
-    if container exec "$name" nft list table inet sandseek_sandbox >/dev/null 2>&1; then
+    if container exec "$name" env -u SANDSEEK_SANDBOX_SECRET nft list table inet sandseek_sandbox >/dev/null 2>&1; then
       pass "the firewall is loaded"
     else
       fail "the firewall is not loaded"
@@ -334,7 +336,7 @@ case "${1:-}" in
     # This reads the loaded rules; it does not send a packet from another
     # address, so it shows that the rule names the gateway, not that other
     # senders are refused.
-    input_rules="$(container exec "$name" nft -nn list chain inet sandseek_sandbox input 2>/dev/null || true)"
+    input_rules="$(container exec "$name" env -u SANDSEEK_SANDBOX_SECRET nft -nn list chain inet sandseek_sandbox input 2>/dev/null || true)"
     if grep -q 'hook input.*policy drop' <<<"$input_rules" \
         && grep -qF "ip saddr $gateway tcp dport 9100 accept" <<<"$input_rules" \
         && [[ "$(grep -c 'dport 9100' <<<"$input_rules")" == 1 ]]; then
@@ -342,7 +344,7 @@ case "${1:-}" in
     else
       fail "the firewall's input chain is missing or not as expected: ${input_rules:0:200}"
     fi
-    privileges="$(container exec "$name" python3 -c '
+    privileges="$(container exec "$name" env -u SANDSEEK_SANDBOX_SECRET python3 -c '
 import glob
 for path in glob.glob("/proc/[0-9]*/cmdline"):
     try:
@@ -366,7 +368,7 @@ for path in glob.glob("/proc/[0-9]*/cmdline"):
     # The Mac's DNS port (53) is the one exception, when the VM uses it.
     for target in "$gateway:8080" "$gateway:22" "$gateway:5000" "$gateway:443" \
                   "192.168.1.1:80" "192.168.0.1:80" "10.0.0.1:80" "169.254.169.254:80"; do
-      if container exec --user 10001:10001 "$name" python3 -c "
+      if container exec --user 10001:10001 "$name" env -u SANDSEEK_SANDBOX_SECRET python3 -c "
 import socket, sys
 host, port = sys.argv[1].rsplit(':', 1)
 try:
@@ -383,7 +385,7 @@ except OSError:
     # Every TCP port on the Mac. DNS (53) may answer when the VM's name server
     # is the Mac, which is the default; nothing else may.
     echo "Every TCP port on the Mac, from inside the VM:"
-    open_ports="$(container exec --user 10001:10001 "$name" python3 -c '
+    open_ports="$(container exec --user 10001:10001 "$name" env -u SANDSEEK_SANDBOX_SECRET python3 -c '
 import socket, sys
 from concurrent.futures import ThreadPoolExecutor
 host = sys.argv[1]
@@ -397,7 +399,7 @@ with ThreadPoolExecutor(64) as pool:
     print(" ".join(str(p) for p in pool.map(probe, range(1, 65536)) if p))
 ' "$gateway" 2>/dev/null)" || open_ports="error"
     mac_dns="no"
-    if container exec "$name" awk '$1 == "nameserver" { print $2 }' /etc/resolv.conf 2>/dev/null \
+    if container exec "$name" env -u SANDSEEK_SANDBOX_SECRET awk '$1 == "nameserver" { print $2 }' /etc/resolv.conf 2>/dev/null \
         | grep -qx "$gateway"; then
       mac_dns="yes"
     fi
@@ -424,6 +426,33 @@ with ThreadPoolExecutor(64) as pool:
     status="$(curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: text/plain' \
       --data '{"url":"https://example.com/"}' "http://127.0.0.1:$port/v1/fetch")"
     [[ "$status" == "415" ]] && pass "browser-style simple POST refused" || fail "simple POST answered $status"
+
+    echo "The sandbox must sign its answers:"
+    if [[ ! -e "$secret_file" ]]; then
+      if [[ "$(health_json || true)" == *'"signed": true'* ]]; then
+        fail "the sandbox signs its answers but $secret_file does not exist"
+      else
+        echo "  skip  no secret file and an unsigned sandbox: nothing to check"
+      fi
+    else
+      # A fresh nonce, the answer's headers and body, and the checker that
+      # knows the formula (Scripts/verify_sandbox_signature.py). It reads the
+      # secret from the file itself; nothing secret is printed or in a command line.
+      # The temporary files hold the public /health answer only.
+      nonce="$(LC_ALL=C od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+      work="$(mktemp -d)"
+      if [[ "$nonce" =~ ^[0-9a-f]{64}$ ]] \
+          && curl -sS --max-time 5 -H "X-Sandbox-Nonce: $nonce" -D "$work/headers" \
+              -o "$work/body" "http://127.0.0.1:$port/health" \
+          && verdict="$(python3 "$script_directory/verify_sandbox_signature.py" \
+              "$secret_file" "$nonce" - "$work/headers" "$work/body" 2>&1)"; then
+        pass "/health is signed for a fresh nonce ($verdict)"
+      else
+        fail "/health is not signed correctly for a fresh nonce: ${verdict:-no valid answer}"
+      fi
+      rm -rf -- "$work"
+      unset nonce work verdict
+    fi
 
     echo "A public page must still work:"
     if curl -fsS --max-time 30 -H 'Content-Type: application/json' \
