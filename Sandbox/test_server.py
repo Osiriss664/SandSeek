@@ -208,7 +208,9 @@ class AddressPolicyTests(unittest.TestCase):
                     "http://1.2.3.4.5/", "http://256.1.1.1/", "http://1.2.3.04/",
                     "http://127.0.0.1.0/", "http://example.123/", "http://1..2/",
                     "http://.1/", "https://0177.0.0.1/path?q=1", "http://0177.0.0.1:80/",
-                    "http://0X7F.0.0.1/", "http://\uff10\uff11\uff17\uff17.0.0.1/"]:
+                    "http://0X7F.0.0.1/", "http://\uff10\uff11\uff17\uff17.0.0.1/",
+                    "http://0177.0.0.1\u3002/", "http://2130706433\uff0e/",
+                    "http://0x7f000001\uff61/"]:
             with self.assertRaises(ToolError, msg=url) as caught:
                 server.check_url(url, never)
             self.assertEqual(caught.exception.code, "invalid_url", url)
@@ -238,6 +240,21 @@ class AddressPolicyTests(unittest.TestCase):
         # An IPv6 literal that is public is not mistaken for a number.
         self.assertEqual(server.check_url("http://[2606:4700::1111]/",
                                           lambda host, port: [host]).address, "2606:4700::1111")
+
+    def test_trailing_unicode_full_stop_is_dropped_like_an_ascii_dot(self):
+        # U+3002 / U+FF0E / U+FF61 turn into "." only in the IDNA step; the
+        # host that is checked, resolved and sent must not keep that dot.
+        for dot in ["\u3002", "\uff0e", "\uff61"]:
+            with self.assertRaises(ToolError, msg=dot) as caught:
+                server.check_url(f"http://127.0.0.1{dot}/", lambda host, port: [host])
+            self.assertEqual(caught.exception.code, "blocked_address", dot)
+            target = server.check_url(f"http://Example.com{dot}/a",
+                                      lambda host, port: ["93.184.216.34"])
+            self.assertEqual(target.host, "example.com", dot)
+            self.assertEqual(target.url, "http://example.com/a", dot)
+            with self.assertRaises(ToolError, msg=dot) as caught:
+                server.check_url(f"http://{dot}/", lambda host, port: ["93.184.216.34"])
+            self.assertEqual(caught.exception.code, "invalid_url", dot)
 
     def test_is_noncanonical_number(self):
         for host in ["0177.0.0.1", "0x7f.0.0.1", "127.1", "2130706433", "017700000001",

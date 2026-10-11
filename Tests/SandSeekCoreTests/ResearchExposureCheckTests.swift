@@ -199,7 +199,8 @@ private final class LocalListener {
     @Test func theSystemListHoldsOnlyAddressesThatAreWorthTrying() {
         // Whatever this machine has: none of it is loopback or link-local.
         let found = ResearchHostAddress.localNetworkAddresses()
-        #expect(found.allSatisfy(\.isNetworkAddress))
+        let ok = found.allSatisfy(\.isNetworkAddress)
+        #expect(ok)
         #expect(Set(found).count == found.count)
     }
 
