@@ -40,6 +40,10 @@ if [[ -z "$version" ]]; then
     echo "Could not read the version from Sources/SandSeekCore/SandSeekVersion.swift." >&2
     exit 1
 fi
+if [[ ! "$version" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
+    echo "The version must be 1 to 3 numbers separated by dots, not: $version" >&2
+    exit 1
+fi
 build_directory="$root/build"
 # A relative output directory is relative to where the command was run.
 requested="${1:-$build_directory}"
