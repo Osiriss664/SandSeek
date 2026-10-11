@@ -129,9 +129,9 @@ These hold as long as the design is intact and the VM boundary holds.
   address, not its loopback, and the Mac side is published on 127.0.0.1 only.
   A client that connects and goes silent is dropped after 30 seconds (the same
   limit applies to writing the answer, so a reader slower than about 240 KB/s
-  would be cut off on the largest `/v1/raw` answers). IPv6 neighbour discovery is dropped inbound as
-  well; IPv6 was already unusable because the output chain does not allow
-  link-local traffic.
+  would be cut off on the largest `/v1/raw` answers). IPv6 neighbour discovery
+  is dropped inbound as well; IPv6 was already unusable because the output
+  chain does not allow link-local traffic.
 - **The sandbox fetches public addresses only.** It resolves each name, refuses
   the request if any answer is not public (loopback, private, link-local,
   shared, multicast, reserved, and IPv6 forms that carry an IPv4 address such
@@ -217,10 +217,10 @@ These hold as long as the design is intact and the VM boundary holds.
   public pages fetched through it. That is the same trust boundary as any local
   server. Browser pages cannot (Host check, JSON only).
 - **Anything that can send from the VM's gateway address can still reach port
-  9100 of the VM directly.** The inbound firewall accepts new connections to that
-  port from the default gateway only (replies to the VM's own outbound
-  connections are accepted from any address). A Mac test showed that the published
-  port connects from the vmnet gateway, 192.168.64.1, for a VM at
+  9100 of the VM directly.** The inbound firewall accepts new connections to
+  that port from the default gateway only (replies to the VM's own outbound
+  connections are accepted from any address). A Mac test showed that the
+  published port connects from the vmnet gateway, 192.168.64.1, for a VM at
   192.168.64.58. Other VMs or containers on the same network are refused,
   unless they forge the gateway's address on the shared bridge. Processes on
   the Mac can reach the VM network and send from the gateway address. A
@@ -231,12 +231,14 @@ These hold as long as the design is intact and the VM boundary holds.
   9100 accepted from the default gateway ...`). If a configuration publishes
   the port from a different source address than the default gateway, the
   server would be unreachable. The gateway was observed as the source on one
-  Mac so far. If `start` says the server is listening but did not answer,
-  note that a connection from another source is dropped before the server
-  sees it, so `/proc/net/tcp` shows nothing; see it instead with a temporary
-  counter or log rule (`nft insert rule inet sandseek_sandbox input tcp dport
-  9100 log prefix "9100 "`) or `nft monitor trace`, and compare the source
-  address with the gateway in the log.
+  Mac so far. If `start` says the server is listening but did not answer, a
+  connection from another source was dropped before the server saw it, so
+  `/proc/net/tcp` shows nothing. To check, add a temporary counter in the VM
+  (`container exec sandseek-sandbox nft insert rule inet sandseek_sandbox
+  input tcp dport 9100 ip saddr != GATEWAY counter`, with the gateway from the
+  log), repeat the request and run `nft list chain inet sandseek_sandbox
+  input`: packets counted there came from another address. The rule goes away
+  with the VM.
   `selftest` reads the loaded rule and checks that it names the gateway; it
   does not send packets from other addresses. The app's own firewall check
   (`firewallProblem`) looks at the output chain only, not the input chain;

@@ -125,6 +125,9 @@ case "${1:-}" in
     startup_log=""
     refused=0 firewall_loaded=0 listening=0 gone=0 firewall_line=""
     polls_after_listening=0
+    # A hung curl or `container` call must not outlast the app's start timeout
+    # (180 s), so the poll counts below also sit under an overall deadline.
+    deadline=$((SECONDS + 120))
     for _ in $(seq 1 50); do
       if health; then
         echo "web research sandbox ready at http://127.0.0.1:$port"
@@ -153,6 +156,7 @@ case "${1:-}" in
         polls_after_listening=$((polls_after_listening + 1))
         (( polls_after_listening < 10 )) || break
       fi
+      (( SECONDS < deadline )) || break
       sleep 0.2
     done
     if [[ -n "$startup_log" ]]; then
@@ -165,6 +169,8 @@ case "${1:-}" in
       for option in "${run_options[@]}"; do
         case "$option" in
           --rm|--detach) ;;
+          # The value may hold credentials and this goes into error messages.
+          SEARXNG_URL=*) debug_command+=" SEARXNG_URL=<your value>" ;;
           *) debug_command+=" $(printf '%q' "$option")" ;;
         esac
       done
