@@ -11,7 +11,10 @@ refused:
                 (mapped, NAT64, 6to4, Teredo, site-local, documentation)
   numeric       spellings of 127.0.0.1 and other private addresses that a C
                 library reads as an address: 2130706433, 0x7f000001, 127.1,
-                0177.0.0.1, fullwidth digits and dots
+                0177.0.0.1, fullwidth digits and dots. The sandbox refuses
+                every number that is not a plain dotted quad by its shape
+                (invalid_url), because libc systems disagree on them (macOS
+                reads 0177.0.0.1 as 177.0.0.1, glibc as 127.0.0.1)
   names         localhost and the container gateway name
   dns           host names that resolve to private addresses (localtest.me,
                 *.nip.io and *.sslip.io); these need DNS, so a network that
@@ -193,10 +196,6 @@ CASES: list[Case] = (
 )
 
 GROUPS = ["private", "numeric", "names", "dns", "shape"]
-# libc on Linux reads a leading 0 as octal. macOS reads 0177 as decimal, a
-# public address; the sandbox runs on Linux, so these are the live sandbox's
-# business only, not a unit test's on a Mac.
-LINUX_OCTAL_FORMS = frozenset({"http://0177.0.0.1/", "http://017700000001/"})
 
 
 def classify(case: Case, status: int, payload: object) -> tuple[str, str]:

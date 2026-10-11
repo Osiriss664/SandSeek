@@ -97,7 +97,11 @@ These hold as long as the design is intact and the VM boundary holds.
   `*.internal`, `*.lan`, names without a dot, and IPv4 and IPv6 literals in
   loopback, private, link-local, shared (100.64/10), unspecified, multicast and
   reserved ranges, including mapped forms and numeric spellings
-  (2130706433, 0x7f000001, 0177.0.0.1, 127.1).
+  (2130706433, 0x7f000001, 0177.0.0.1, 127.1). The sandbox does not trust
+  the system's reading of such spellings (glibc reads `0177.0.0.1` as
+  127.0.0.1, macOS as 177.0.0.1): it refuses by shape, before any lookup, every
+  numeric host that is not a plain dotted quad of four decimal parts without
+  leading zeros (`invalid_url`).
 - **`open_page` opens only addresses the research showed the model.** An
   address must appear verbatim in a search result, in the question or be a page
   already read. A made-up address is refused and never fetched. A link that
