@@ -350,12 +350,16 @@ public struct URLSessionResearchTransport: ResearchHTTPTransport {
         // SandSeek hold an endless answer in memory before it is checked.
         let (bytes, response) = try await session.bytes(for: request, delegate: owner.noRedirect)
         if response.expectedContentLength > Int64(Self.maximumResponseBytes) {
+            bytes.task.cancel()
             throw URLError(.dataLengthExceedsMaximum)
         }
         var data = Data()
         for try await byte in bytes {
             data.append(byte)
-            if data.count > Self.maximumResponseBytes { throw URLError(.dataLengthExceedsMaximum) }
+            if data.count > Self.maximumResponseBytes {
+                bytes.task.cancel()
+                throw URLError(.dataLengthExceedsMaximum)
+            }
         }
         #endif
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0

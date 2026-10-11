@@ -121,6 +121,12 @@ case "${1:-}" in
     exit "$build_status"
     ;;
   start)
+    # A trace would print the secret (`secret=...`, and the `container run`
+    # line with it), so do not run under `bash -x` or `set -x`.
+    if [[ $- == *x* ]]; then
+      echo "not starting with xtrace on: the trace would print the sandbox secret" >&2
+      exit 1
+    fi
     require_container
     container stop "$name" >/dev/null 2>&1 || true
     container delete "$name" >/dev/null 2>&1 || true
@@ -143,12 +149,6 @@ case "${1:-}" in
     done
     if [[ -n "${SEARXNG_URL:-}" ]]; then
       run_options+=(--env "SEARXNG_URL=$SEARXNG_URL")
-    fi
-    # A trace would print the secret (`secret=...`, and the `container run`
-    # line with it), so do not run under `bash -x` or `set -x`.
-    if [[ $- == *x* ]]; then
-      echo "not starting with xtrace on: the trace would print the sandbox secret" >&2
-      exit 1
     fi
     # The file is complete before the sandbox starts listening. The old VM is
     # gone by now, so nothing is signing with the previous secret.
