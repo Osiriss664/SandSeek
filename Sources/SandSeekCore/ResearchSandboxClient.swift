@@ -57,24 +57,68 @@ public struct ResearchToolFailure: Error, Equatable, Sendable {
     var siteRefused: Bool { [401, 403, 429, 451].contains(status ?? 0) }
 }
 
+/// When a client last proved, with a signed health check, that it is talking
+/// to the sandbox. The client is a value that is copied around; its copies share
+/// one of these, so a proof one copy made counts for all.
+public final class ResearchSandboxProof: @unchecked Sendable {
+    private let lock = NSLock()
+    private var provedAt: Date?
+
+    public init() {}
+
+    /// Whether a proof was made at most `maxAge` seconds before `now`. A proof
+    /// dated after `now` (the clock moved back) is no proof.
+    func isFresh(now: Date, maxAge: TimeInterval) -> Bool {
+        lock.withLock { () -> Bool in
+            guard let provedAt else { return false }
+            let age = now.timeIntervalSince(provedAt)
+            return age >= 0 && age <= maxAge
+        }
+    }
+
+    func record(at date: Date) {
+        lock.withLock { provedAt = date }
+    }
+
+    func forget() {
+        lock.withLock { provedAt = nil }
+    }
+}
+
 /// Client for the web tool server running in the Apple container sandbox.
+///
+/// Every request is signed with the secret in `secretFile` and every answer
+/// is checked against it before anything in it is used (see
+/// `ResearchSandboxSigning`). Without the file nothing is sent. A search or a
+/// read that comes more than `identityMaxAge` seconds after the last signed
+/// health check is preceded by one, so a sandbox that was replaced by another
+/// program during a pause (a model turn can take minutes) is noticed before
+/// the request, and its text, goes anywhere.
 public struct ResearchSandboxClient: Sendable {
+    /// How long a signed health check vouches for the sandbox.
+    static let identityMaxAge: TimeInterval = 5
+
     public let baseURL: URL
     private let transport: any ResearchHTTPTransport
-    private let secretFile: URL?
+    private let secretFile: URL
     private let makeNonce: @Sendable () -> String
+    private let now: @Sendable () -> Date
+    private let proof: ResearchSandboxProof
 
-    /// With `secretFile` (see `ResearchSandboxSecret`), a request made while
-    /// that file exists carries a fresh nonce, and the answer is used only if
-    /// it is signed with the secret in the file. A missing file means unsigned
-    /// answers, as before, and so does nil, the default: tests, and anything
-    /// that talks to a sandbox the launcher did not start.
-    public init(baseURL: URL, transport: any ResearchHTTPTransport, secretFile: URL? = nil,
-                makeNonce: @escaping @Sendable () -> String = { ResearchSandboxSecret.randomNonce() }) {
+    /// `secretFile` is where the launcher writes the secret (see
+    /// `ResearchSandboxSecret`; the app passes `ResearchSandboxSecret.defaultFileURL`).
+    /// `now` is the clock for the request time and for the health check's age.
+    /// `proof` is shared by copies of the client; a new one is made by default.
+    public init(baseURL: URL, transport: any ResearchHTTPTransport, secretFile: URL,
+                makeNonce: @escaping @Sendable () -> String = { ResearchSandboxSecret.randomNonce() },
+                now: @escaping @Sendable () -> Date = { Date() },
+                proof: ResearchSandboxProof = ResearchSandboxProof()) {
         self.baseURL = baseURL
         self.transport = transport
         self.secretFile = secretFile
         self.makeNonce = makeNonce
+        self.now = now
+        self.proof = proof
     }
 
     /// What the user is told when the sandbox cannot rank passages.
@@ -83,22 +127,33 @@ public struct ResearchSandboxClient: Sendable {
         + "(Scripts/research_sandbox.sh build), or turn off 'Read the passages that best "
         + "match the question first' (--passages off)."
 
-    /// Checks that the sandbox answers. With `requirePassages`, it must also
-    /// say it can rank passages, which an older sandbox does not.
+    /// Checks that the sandbox answers, signed, with `status` `ok` and API 1. With
+    /// `requirePassages`, it must also say it can rank passages. A health check
+    /// that passes is the proof of identity that `search` and `fetch` rely on.
     public func checkHealth(requirePassages: Bool = false) async throws {
         // A 3xx is never followed (see `ResearchNoRedirectDelegate`) and is an
         // error here, as every other answer but 200.
-        let response = try await exchange(
-            method: "GET", url: baseURL.appendingPathComponent("health"), body: nil)
+        let response = try await exchange(method: "GET", path: "health", body: nil)
         guard response.status == 200 else {
             throw ResearchError.sandboxUnavailable("health check answered HTTP \(response.status)")
         }
+        let reply = try? ResearchJSON.decode(response.body)
+        guard reply?["status"]?.stringValue == "ok" else {
+            throw ResearchError.sandboxUnavailable("health check did not say the sandbox is ok")
+        }
+        guard reply?["api"]?.intValue == 1 else { throw ResearchError.sandboxWrongVersion }
         if requirePassages {
-            let reply = try? ResearchJSON.decode(response.body)
             guard reply?["passages"] == .bool(true) else {
                 throw ResearchError.sandboxCannotRankPassages
             }
         }
+        proof.record(at: now())
+    }
+
+    /// A signed health check first, unless one passed in the last few seconds.
+    private func proveIdentityIfStale() async throws {
+        guard !proof.isFresh(now: now(), maxAge: Self.identityMaxAge) else { return }
+        try await checkHealth()
     }
 
     public func search(query: String, maxResults: Int) async throws -> [ResearchSearchResult] {
@@ -177,8 +232,8 @@ public struct ResearchSandboxClient: Sendable {
         } catch {
             throw ResearchError.sandboxUnavailable(error.localizedDescription)
         }
-        let response = try await exchange(
-            method: "POST", url: baseURL.appendingPathComponent(path), body: body)
+        try await proveIdentityIfStale()
+        let response = try await exchange(method: "POST", path: path, body: body)
         let reply = try? ResearchJSON.decode(response.body)
         guard response.status == 200, let reply else {
             let message = reply?["error"]?["message"]?.stringValue
@@ -192,35 +247,31 @@ public struct ResearchSandboxClient: Sendable {
         return reply
     }
 
-    /// One request and its answer. A 3xx is refused first: its body is never
-    /// read, since nothing that answers with a 3xx is the sandbox, so nothing
-    /// in it is passed on to the model. Then, when a secret file exists, the
-    /// request carries a fresh nonce and the answer's signature is checked
-    /// before anything in it is used. The secret is read for every request.
-    private func exchange(method: String, url: URL, body: Data?) async throws -> ResearchHTTPResponse {
-        let signing = try ResearchSandboxSigning.begin(secretFile: secretFile, makeNonce: makeNonce)
+    /// One signed request and its answer. A 3xx is refused first: its body is
+    /// never read, since nothing that answers with a 3xx is the sandbox, so
+    /// nothing in it is passed on to the model. Then the answer's signature is
+    /// checked, whatever its status, before anything in it is used. The secret
+    /// is read for every request, and a missing one stops it here.
+    private func exchange(method: String, path: String, body: Data?) async throws -> ResearchHTTPResponse {
+        // The path that is signed is the one that is sent.
+        let url = baseURL.appendingPathComponent(path)
+        let signing = try ResearchSandboxSigning.begin(
+            secretFile: secretFile, method: method, path: url.path, now: now(), makeNonce: makeNonce)
         let response: ResearchHTTPResponse
         do {
-            if let signing {
-                response = try await transport.send(
-                    method: method, url: url, body: body, timeout: nil, authorization: nil,
-                    headers: signing.requestHeaders)
-            } else {
-                response = try await transport.send(method: method, url: url, body: body)
-            }
+            response = try await transport.send(
+                method: method, url: url, body: body, timeout: nil, authorization: nil,
+                headers: signing.requestHeaders(body: body ?? Data()))
         } catch {
             throw ResearchError.sandboxUnavailable(error.localizedDescription)
         }
-        if response.isRedirect { throw ResearchError.redirectRefused(status: response.status) }
-        if let signing {
-            let sent = body ?? Data()
-            // The sandbox answers 408 when a body it was told to expect did not
-            // arrive in full, and signs that answer over an empty body, since
-            // it never had the whole one. For a 408 only, that signature counts.
-            guard signing.isValid(response, requestBody: sent)
-                    || (response.status == 408 && signing.isValid(response, requestBody: Data())) else {
-                throw ResearchError.sandboxNotSigned(address: address)
-            }
+        if response.isRedirect {
+            proof.forget()
+            throw ResearchError.redirectRefused(status: response.status)
+        }
+        guard signing.isValid(response) else {
+            proof.forget()
+            throw ResearchError.sandboxNotSigned(address: address)
         }
         return response
     }

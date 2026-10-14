@@ -254,12 +254,12 @@ import Testing
             sandbox: ResearchSandboxController(
                 runner: FakeProcessRunner(), transport: FakeResearchServices(),
                 defaults: MemorySettings(), environment: [:],
-                resources: try testResources(), stateDirectory: temporaryDirectory()),
+                resources: try testResources(), stateDirectory: temporaryDirectory(), secretFile: TestSandboxSecret.file),
             server: ResearchServerController(
                 defaults: MemorySettings(), keyStore: MemoryKeyStore(key: "k"),
                 transport: FakeResearchServices()),
             reports: reports,
-            run: ResearchRunController(store: reports, transport: FakeResearchServices()),
+            run: ResearchRunController(store: reports, transport: FakeResearchServices(), sandboxSecretFile: TestSandboxSecret.file),
             presets: ResearchPresetStore(defaults: MemorySettings()),
             launch: testLaunchController())
         #expect(workspace.importedFromTUFF == nil)

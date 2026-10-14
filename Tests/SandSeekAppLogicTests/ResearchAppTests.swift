@@ -276,6 +276,12 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
         }
         return try await services.send(method: method, url: url, body: body)
     }
+
+    func send(method: String, url: URL, body: Data?, timeout: TimeInterval?,
+              authorization: String?, headers: [String: String]) async throws -> ResearchHTTPResponse {
+        try await services.send(method: method, url: url, body: body, timeout: timeout,
+                                authorization: authorization, headers: headers)
+    }
 }
 
 @Suite @MainActor struct ResearchRunControllerTests {
@@ -292,7 +298,7 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
                 reasoning: "One source is enough here."),
         ])
         let store = ResearchReportStore(directory: temporaryDirectory())
-        let run = ResearchRunController(store: store, transport: services)
+        let run = ResearchRunController(store: store, transport: services, sandboxSecretFile: TestSandboxSecret.file)
 
         run.start(question: "  How are containers isolated?  ",
                   settings: ResearchRunSettings(model: "gemma-4-e4b-it", maxSteps: 4),
@@ -319,7 +325,7 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
     @Test func aMissingSandboxEndsTheRunWithItsMessage() async {
         let services = FakeResearchServices(sandboxHealthy: false)
         let store = ResearchReportStore(directory: temporaryDirectory())
-        let run = ResearchRunController(store: store, transport: services)
+        let run = ResearchRunController(store: store, transport: services, sandboxSecretFile: TestSandboxSecret.file)
         run.start(question: "Anything about https://github.com/apple/container", settings: ResearchRunSettings(model: "m"),
                   serverURL: server, sandboxURL: sandbox)
         await waitUntil { !run.isRunning }
@@ -342,7 +348,7 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
             FakeResearchServices.answer("A short answer."),
         ])
         let store = ResearchReportStore(directory: temporaryDirectory())
-        let run = ResearchRunController(store: store, transport: services)
+        let run = ResearchRunController(store: store, transport: services, sandboxSecretFile: TestSandboxSecret.file)
         run.start(question: "Anything about https://github.com/apple/container", settings: ResearchRunSettings(model: "m"),
                   serverURL: server, sandboxURL: sandbox)
         await waitUntil { !run.isRunning }
@@ -360,7 +366,7 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
             FakeResearchServices.answer("From the page [1]."),
         ])
         let store = ResearchReportStore(directory: temporaryDirectory())
-        let run = ResearchRunController(store: store, transport: services)
+        let run = ResearchRunController(store: store, transport: services, sandboxSecretFile: TestSandboxSecret.file)
         run.start(question: "Anything about https://github.com/apple/container", settings: ResearchRunSettings(model: "m"),
                   serverURL: server, sandboxURL: sandbox)
         await waitUntil { !run.isRunning }
@@ -377,7 +383,7 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
             FakeResearchServices.answer("From the page [1]."),
         ])
         let store = ResearchReportStore(directory: temporaryDirectory())
-        let run = ResearchRunController(store: store, transport: services)
+        let run = ResearchRunController(store: store, transport: services, sandboxSecretFile: TestSandboxSecret.file)
         run.start(question: "Anything about https://github.com/apple/container",
                   settings: ResearchRunSettings(model: "m"),
                   serverURL: server, sandboxURL: sandbox,
@@ -409,7 +415,7 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
             FakeResearchServices.answer("From the page [1]."),
         ])
         let run = ResearchRunController(
-            store: ResearchReportStore(directory: temporaryDirectory()), transport: services)
+            store: ResearchReportStore(directory: temporaryDirectory()), transport: services, sandboxSecretFile: TestSandboxSecret.file)
         run.start(question: "Anything about https://github.com/apple/container",
                   settings: ResearchRunSettings(model: "m"),
                   serverURL: server, sandboxURL: sandbox,
@@ -424,7 +430,7 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
             FakeResearchServices.answer("Too late."),
         ])
         let store = ResearchReportStore(directory: temporaryDirectory())
-        let run = ResearchRunController(store: store, transport: services)
+        let run = ResearchRunController(store: store, transport: services, sandboxSecretFile: TestSandboxSecret.file)
         run.start(question: "Anything about https://github.com/apple/container", settings: ResearchRunSettings(model: "m"),
                   serverURL: server, sandboxURL: sandbox)
         run.stop()
@@ -444,7 +450,7 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
         ])
         let run = ResearchRunController(
             store: ResearchReportStore(directory: temporaryDirectory()),
-            transport: services, wake: wake)
+            transport: services, wake: wake, sandboxSecretFile: TestSandboxSecret.file)
         run.start(question: "Anything about https://github.com/apple/container", settings: ResearchRunSettings(model: "m"),
                   serverURL: server, sandboxURL: sandbox)
         #expect(wake.events == ["begin"])
@@ -456,7 +462,7 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
         let failedWake = RecordingWake()
         let failing = ResearchRunController(
             store: ResearchReportStore(directory: temporaryDirectory()),
-            transport: FakeResearchServices(sandboxHealthy: false), wake: failedWake)
+            transport: FakeResearchServices(sandboxHealthy: false), wake: failedWake, sandboxSecretFile: TestSandboxSecret.file)
         failing.start(question: "Anything about https://github.com/apple/container", settings: ResearchRunSettings(model: "m"),
                       serverURL: server, sandboxURL: sandbox)
         await waitUntil { !failing.isRunning }
@@ -468,7 +474,7 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
             store: ResearchReportStore(directory: temporaryDirectory()),
             transport: FakeResearchServices(modelReplies: [
                 FakeResearchServices.answer("Too late."),
-            ]), wake: stoppedWake)
+            ]), wake: stoppedWake, sandboxSecretFile: TestSandboxSecret.file)
         stopping.start(question: "Anything about https://github.com/apple/container", settings: ResearchRunSettings(model: "m"),
                        serverURL: server, sandboxURL: sandbox)
         stopping.stop()
@@ -485,7 +491,7 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
             failure, failure,
         ])
         let store = ResearchReportStore(directory: temporaryDirectory())
-        let run = ResearchRunController(store: store, transport: services)
+        let run = ResearchRunController(store: store, transport: services, sandboxSecretFile: TestSandboxSecret.file)
         run.start(question: "How are containers isolated?",
                   settings: ResearchRunSettings(model: "m", thinking: false),
                   serverURL: server, sandboxURL: sandbox)
@@ -513,7 +519,7 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
             FakeResearchServices.call("open_page", #"{"url": "https://github.com/apple/container"}"#),
         ]))
         let store = ResearchReportStore(directory: temporaryDirectory())
-        let run = ResearchRunController(store: store, transport: hanging)
+        let run = ResearchRunController(store: store, transport: hanging, sandboxSecretFile: TestSandboxSecret.file)
         run.start(question: "Anything about https://github.com/apple/container", settings: ResearchRunSettings(model: "m"),
                   serverURL: server, sandboxURL: sandbox)
         await waitUntil { hanging.chatCalls >= 2 }
@@ -532,7 +538,7 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
     @Test func emptyQuestionsDoNotStart() {
         let run = ResearchRunController(
             store: ResearchReportStore(directory: temporaryDirectory()),
-            transport: FakeResearchServices())
+            transport: FakeResearchServices(), sandboxSecretFile: TestSandboxSecret.file)
         run.start(question: "   ", settings: ResearchRunSettings(model: "m"),
                   serverURL: server, sandboxURL: sandbox)
         #expect(run.phase == .idle)
@@ -586,6 +592,19 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
     }
 }
 
+/// Answers every request, the sandbox's too, without a signature: a program
+/// that took over the port.
+private struct UnsignedServices: ResearchHTTPTransport {
+    func send(method: String, url: URL, body: Data?) async throws -> ResearchHTTPResponse {
+        ResearchHTTPResponse(status: 200, body: Data(#"{"status":"ok","api":1,"passages":true}"#.utf8))
+    }
+
+    func send(method: String, url: URL, body: Data?, timeout: TimeInterval?,
+              authorization: String?, headers: [String: String]) async throws -> ResearchHTTPResponse {
+        try await send(method: method, url: url, body: body)
+    }
+}
+
 @Suite @MainActor struct ResearchSandboxControllerTests {
     private func defaults() -> MemorySettings {
         MemorySettings()
@@ -599,7 +618,45 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
         ResearchSandboxController(
             runner: runner, transport: services, defaults: defaults(),
             environment: [:], resources: try testResources(bundle: bundle),
-            stateDirectory: stateDirectory)
+            stateDirectory: stateDirectory, secretFile: TestSandboxSecret.file)
+    }
+
+    @Test func aSandboxWithoutASecretFileIsNotRunning() async throws {
+        // The fake answers /health, but without the secret nothing is sent: a
+        // stopped sandbox has no secret, and `stop` deletes the file.
+        let services = FakeResearchServices()
+        let missing = temporaryDirectory().appendingPathComponent("secret")
+        let sandbox = ResearchSandboxController(
+            runner: FakeProcessRunner(), transport: services, defaults: defaults(),
+            environment: [:], resources: try testResources(),
+            stateDirectory: temporaryDirectory(), secretFile: missing)
+        await sandbox.refresh()
+        #expect(sandbox.state == .off)
+        #expect(services.paths.isEmpty)
+    }
+
+    @Test func aSandboxThatAnswersSignedIsRunning() async throws {
+        let services = FakeResearchServices()
+        let sandbox = try controller(services: services)
+        await sandbox.refresh()
+        #expect(sandbox.state == .ready)
+        #expect(services.paths.first == "/health")
+    }
+
+    @Test func aSandboxThatAnswersUnsignedIsNotRunning() async throws {
+        // Something else on the port: it answers /health, but not signed.
+        let sandbox = ResearchSandboxController(
+            runner: FakeProcessRunner(), transport: UnsignedServices(), defaults: defaults(),
+            environment: [:], resources: try testResources(),
+            stateDirectory: temporaryDirectory(), secretFile: TestSandboxSecret.file)
+        await sandbox.refresh()
+        #expect(sandbox.state == .off)
+        await sandbox.start()
+        guard case .failed(let message) = sandbox.state else {
+            Issue.record("expected a failure, got \(sandbox.state)")
+            return
+        }
+        #expect(message.contains("not signed by the SandSeek sandbox"))
     }
 
     @Test func theNamesAndThePortAreSandSeeks() {
@@ -626,8 +683,7 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
         #expect(sandbox.startedByApp)
         #expect(runner.scriptCommands == ["build", "start"])
         #expect(runner.commands.contains {
-            $0.starts(with: ["env", "container", "exec", "sandseek-sandbox",
-                             "env", "-u", "SANDSEEK_SANDBOX_SECRET", "nft",
+            $0.starts(with: ["env", "container", "exec", "sandseek-sandbox", "nft",
                              "list", "table", "inet", "sandseek_sandbox"])
         })
 
@@ -864,7 +920,7 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
             runner: runner, transport: FakeResearchServices(sandboxHealthy: false),
             defaults: defaults(), environment: [:],
             resources: SandboxResources(bundledRoot: nil, environment: [:], allowsOverride: false),
-            stateDirectory: temporaryDirectory())
+            stateDirectory: temporaryDirectory(), secretFile: TestSandboxSecret.file)
         await sandbox.start()
         guard case .failed(let message) = sandbox.state else {
             Issue.record("expected a failure, got \(sandbox.state)")
@@ -884,7 +940,7 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
                 bundledRoot: nil,
                 environment: [SandboxResources.overrideVariable: checkout.path],
                 allowsOverride: true),
-            stateDirectory: temporaryDirectory())
+            stateDirectory: temporaryDirectory(), secretFile: TestSandboxSecret.file)
         await sandbox.start()
         #expect(sandbox.state == .ready)
         #expect(sandbox.files?.origin == .checkout)
@@ -900,7 +956,7 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
             environment: ["PATH": "/usr/bin", "SANDSEEK_SANDBOX_PORT": "9555",
                           "SANDSEEK_SANDBOX_NAME": "other", "SANDSEEK_SOURCE_DIR": "/tmp/x",
                           "SANDSEEK_DNS": "1.1.1.1"],
-            resources: try testResources(), stateDirectory: temporaryDirectory())
+            resources: try testResources(), stateDirectory: temporaryDirectory(), secretFile: TestSandboxSecret.file)
         await sandbox.start()
         let environments = runner.environments
         #expect(!environments.isEmpty)
@@ -966,7 +1022,7 @@ private final class SlowStartRunner: ResearchProcessRunning, @unchecked Sendable
         let sandbox = ResearchSandboxController(
             runner: runner, transport: FakeResearchServices(), defaults: MemorySettings(),
             environment: [:], resources: try testResources(bundle: bundle),
-            stateDirectory: stateDirectory)
+            stateDirectory: stateDirectory, secretFile: TestSandboxSecret.file)
         let server = ResearchServerController(
             defaults: MemorySettings(), keyStore: MemoryKeyStore(key: "k"),
             transport: FakeResearchServices(listedModels: ["m"]),
@@ -977,7 +1033,7 @@ private final class SlowStartRunner: ResearchProcessRunning, @unchecked Sendable
         // so no request reaches the fake with nothing scripted.
         let runServices = FakeResearchServices(
             modelReplies: Array(repeating: FakeResearchServices.answer("An answer."), count: 8))
-        let run = ResearchRunController(store: reports, transport: runServices)
+        let run = ResearchRunController(store: reports, transport: runServices, sandboxSecretFile: TestSandboxSecret.file)
         await server.refresh()
         let presets = ResearchPresetStore(defaults: MemorySettings())
         return Setup(

@@ -24,6 +24,15 @@ private final class RedirectingServices: ResearchHTTPTransport, @unchecked Senda
         }
         return try await inner.send(method: method, url: url, body: body)
     }
+
+    func send(method: String, url: URL, body: Data?, timeout: TimeInterval?,
+              authorization: String?, headers: [String: String]) async throws -> ResearchHTTPResponse {
+        if everything || redirected.contains(url.path) {
+            return ResearchHTTPResponse(status: 307, body: Data())
+        }
+        return try await inner.send(method: method, url: url, body: body, timeout: timeout,
+                                    authorization: authorization, headers: headers)
+    }
 }
 
 @Suite @MainActor struct ResearchRedirectAppTests {
@@ -82,7 +91,7 @@ private final class RedirectingServices: ResearchHTTPTransport, @unchecked Senda
         let sandbox = ResearchSandboxController(
             runner: FakeProcessRunner(), transport: RedirectingServices(everything: true),
             defaults: MemorySettings(), environment: [:],
-            resources: try testResources(), stateDirectory: temporaryDirectory())
+            resources: try testResources(), stateDirectory: temporaryDirectory(), secretFile: TestSandboxSecret.file)
         await sandbox.refresh()
         #expect(sandbox.state == .off)
 

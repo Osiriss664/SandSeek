@@ -152,9 +152,9 @@ public final class ResearchSandboxController {
     private let environment: [String: String]
     private let resources: SandboxResources
     /// The secret file the launcher script writes (`ResearchSandboxSecret`).
-    /// Nil, the default, makes the health check send no nonce, as the tests
-    /// need; the app passes `ResearchSandboxSecret.defaultFileURL`.
-    private let secretFile: URL?
+    /// The health check is signed with it; the app uses the default, and the
+    /// tests give each controller a file of their own.
+    private let secretFile: URL
 
     public init(baseURL: URL = ResearchSandboxController.defaultURL,
                 runner: any ResearchProcessRunning = FoundationProcessRunner(),
@@ -163,7 +163,7 @@ public final class ResearchSandboxController {
                 environment: [String: String] = ResearchCommandEnvironment.environment(),
                 resources: SandboxResources = SandboxResources(),
                 stateDirectory: URL = ResearchSandboxController.defaultStateDirectory(),
-                secretFile: URL? = nil) {
+                secretFile: URL = ResearchSandboxSecret.defaultFileURL) {
         self.baseURL = baseURL
         self.secretFile = secretFile
         self.stateDirectory = stateDirectory
@@ -256,7 +256,6 @@ public final class ResearchSandboxController {
         let firewall = try? await runner.run(
             executable: URL(fileURLWithPath: "/usr/bin/env"),
             arguments: ["container", "exec", Self.containerName,
-                        "env", "-u", "SANDSEEK_SANDBOX_SECRET",
                         "nft", "list", "table", "inet", Self.firewallTable],
             environment: environment, timeout: 30)
         guard state == .ready else { return }
@@ -273,7 +272,6 @@ public final class ResearchSandboxController {
         let privileges = try? await runner.run(
             executable: URL(fileURLWithPath: "/usr/bin/env"),
             arguments: ["container", "exec", Self.containerName,
-                        "env", "-u", "SANDSEEK_SANDBOX_SECRET",
                         "python3", "-c", Self.privilegeCheck],
             environment: environment, timeout: 30)
         guard state == .ready else { return }
@@ -433,8 +431,10 @@ public final class ResearchSandboxController {
         await healthProblem() == nil
     }
 
-    /// Why the sandbox does not count as running: nil when it answers `/health`
-    /// with 200. A redirect is never followed and counts as not running.
+    /// Why the sandbox does not count as running: nil when it answers a signed
+    /// `/health` request with a signed 200. No secret file (the sandbox is not
+    /// started), a redirect or an answer that is not signed all count as not
+    /// running.
     private func healthProblem() async -> ResearchError? {
         do {
             try await ResearchSandboxClient(
@@ -450,7 +450,7 @@ public final class ResearchSandboxController {
     /// What a failed start adds when something else answers on the port.
     private static func portNote(_ problem: ResearchError) -> String {
         switch problem {
-        case .redirectRefused, .sandboxNotSigned, .sandboxSecretUnusable: break
+        case .redirectRefused, .sandboxNotSigned, .sandboxSecretUnusable, .sandboxWrongVersion: break
         default: return ""
         }
         let text = problem.description

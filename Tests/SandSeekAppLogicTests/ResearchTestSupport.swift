@@ -61,6 +61,16 @@ final class FakeResearchServices: ResearchHTTPTransport, @unchecked Sendable {
         try await respond(url: url, body: body, authorization: nil)
     }
 
+    /// The sandbox's requests carry the signing headers; the answer is signed
+    /// as the real sandbox signs it (with `TestSandboxSecret`), from the
+    /// request's nonce, method and path.
+    func send(method: String, url: URL, body: Data?, timeout: TimeInterval?,
+              authorization: String?, headers: [String: String]) async throws -> ResearchHTTPResponse {
+        let response = try await send(
+            method: method, url: url, body: body, timeout: timeout, authorization: authorization)
+        return TestSandboxSecret.signed(response, for: method, url: url, headers: headers)
+    }
+
     private func respond(url: URL, body: Data?,
                          authorization: String?) async throws -> ResearchHTTPResponse {
         let json = try body.map { try ResearchJSON.decode($0) }
@@ -98,7 +108,7 @@ final class FakeResearchServices: ResearchHTTPTransport, @unchecked Sendable {
                 ]))
             case "/health":
                 return sandboxHealthy
-                    ? Self.json(.object(["status": .string("ok")]))
+                    ? Self.json(.object(["status": .string("ok"), "api": .integer(1)]))
                     : ResearchHTTPResponse(status: 503, body: Data())
             case "/v1/search":
                 return Self.json(.object(["results": .array([.object([
@@ -440,4 +450,36 @@ func testLaunchController(settings: MemorySettings = MemorySettings(),
         defaults: settings, launcher: launcher, transport: transport,
         stateDirectory: stateDirectory, logURL: logURL,
         timing: timing, identityOf: identityOf, checkProgram: { .success($0) })
+}
+
+/// The secret that tests sign with: one file for the whole test run, written
+/// the way the launcher writes it (64 hex characters, mode 0600).
+enum TestSandboxSecret {
+    static let text = String(repeating: "0123456789abcdef", count: 4)
+    static let key = Data(text.utf8)
+
+    static let file: URL = {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SandSeekTestSecret-\(UUID().uuidString)", isDirectory: true)
+        try! FileManager.default.createDirectory(
+            at: folder, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        let file = folder.appendingPathComponent("secret")
+        try! Data(text.utf8).write(to: file)
+        try! FileManager.default.setAttributes(
+            [.posixPermissions: 0o600], ofItemAtPath: file.path)
+        return file
+    }()
+
+    /// `response` with the signature the sandbox would put on it, when the
+    /// request carried a nonce.
+    static func signed(_ response: ResearchHTTPResponse, for method: String, url: URL,
+                       headers: [String: String]) -> ResearchHTTPResponse {
+        guard let nonce = headers[ResearchSandboxSigning.nonceHeader] else { return response }
+        var signedHeaders = response.headers
+        signedHeaders[ResearchSandboxSigning.answerAuthHeader] = ResearchSandboxSigning.responseAuth(
+            key: key, method: method, path: url.path, nonce: nonce,
+            status: response.status, body: response.body)
+        return ResearchHTTPResponse(status: response.status, body: response.body, headers: signedHeaders)
+    }
 }

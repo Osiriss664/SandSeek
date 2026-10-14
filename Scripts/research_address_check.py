@@ -2,8 +2,9 @@
 """Asks the running sandbox to open addresses it must refuse, and checks that it does.
 
 This is the address half of the sandbox's protection, tried from outside and
-without a model. It sends `open_page` requests (the sandbox's POST /v1/fetch)
-straight to the sandbox on 127.0.0.1:9100 and expects every one of these to be
+without a model. It sends `open_page` requests (the sandbox's POST /v1/fetch),
+signed with the sandbox's secret file, straight to the sandbox on
+127.0.0.1:9100 and expects every one of these to be
 refused:
 
   private       loopback, private, link-local, shared, multicast and reserved
@@ -46,16 +47,23 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import hmac
 import http.client
 import json
 import os
 import re
 import sys
+import time
 import unicodedata
 import urllib.parse
 from dataclasses import dataclass
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import verify_sandbox_signature as signing  # noqa: E402
+
 DEFAULT_SANDBOX = "http://127.0.0.1:9100"
+DEFAULT_SECRET_FILE = os.path.join(os.path.expanduser("~"), "Library", "Application Support",
+                                   "SandSeek", "sandbox", "secret")
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 CONTROL_URL = "https://example.com/"
 
@@ -235,35 +243,53 @@ def is_loopback(url: str) -> bool:
         return False
 
 
-def post_fetch(sandbox: str, url: str, timeout: float) -> tuple[int, object]:
-    """POST /v1/fetch with {"url": url}; (HTTP status, decoded JSON or the raw text)."""
+class UnsignedAnswer(OSError):
+    """The answer did not carry the signature only the real sandbox can make."""
+
+
+def signed_call(sandbox: str, secret: bytes, method: str, path: str, body: bytes,
+                timeout: float) -> tuple[int, bytes]:
+    """One signed request; (HTTP status, answer body). The sandbox refuses a
+    request that is not signed, and an answer that is not signed correctly
+    for this request is not trusted: it raises UnsignedAnswer."""
     parts = urllib.parse.urlsplit(sandbox)
     connection = http.client.HTTPConnection(parts.hostname, parts.port or 80, timeout=timeout)
+    nonce = os.urandom(32).hex()
+    stamp = str(int(time.time()))
+    headers = {"Host": f"127.0.0.1:{parts.port or 80}",
+               "X-Sandbox-Nonce": nonce, "X-Sandbox-Time": stamp,
+               "X-Sandbox-Auth": signing.request_auth(secret, method, path, nonce, stamp, body)}
+    if method == "POST":
+        headers["Content-Type"] = "application/json"
     try:
-        body = json.dumps({"url": url}).encode()
-        connection.request("POST", "/v1/fetch", body=body, headers={
-            "Content-Type": "application/json", "Host": f"127.0.0.1:{parts.port or 80}"})
+        connection.request(method, path, body=body or None, headers=headers)
         response = connection.getresponse()
         data = response.read()
+        status, auth = response.status, response.getheader("X-Sandbox-Auth")
     finally:
         connection.close()
+    expected = signing.response_auth(secret, method, path, nonce, status, data)
+    if auth is None or not hmac.compare_digest(auth.strip().lower(), expected):
+        raise UnsignedAnswer("the answer is not signed with the sandbox's secret")
+    return status, data
+
+
+def post_fetch(sandbox: str, secret: bytes, url: str, timeout: float) -> tuple[int, object]:
+    """POST /v1/fetch with {"url": url}; (HTTP status, decoded JSON or the raw text)."""
+    status, data = signed_call(sandbox, secret, "POST", "/v1/fetch",
+                               json.dumps({"url": url}).encode(), timeout)
     try:
-        return response.status, json.loads(data)
+        return status, json.loads(data)
     except ValueError:
-        return response.status, data.decode("utf-8", "replace")[:200]
+        return status, data.decode("utf-8", "replace")[:200]
 
 
-def sandbox_answers(sandbox: str) -> bool:
-    parts = urllib.parse.urlsplit(sandbox)
-    connection = http.client.HTTPConnection(parts.hostname, parts.port or 80, timeout=5)
+def sandbox_answers(sandbox: str, secret: bytes) -> bool:
     try:
-        connection.request("GET", "/health", headers={"Host": f"127.0.0.1:{parts.port or 80}"})
-        response = connection.getresponse()
-        return response.status == 200 and b'"ok"' in response.read()
+        status, data = signed_call(sandbox, secret, "GET", "/health", b"", 5)
+        return status == 200 and b'"ok"' in data
     except (OSError, http.client.HTTPException):
         return False
-    finally:
-        connection.close()
 
 
 def printable(text: str) -> str:
@@ -299,6 +325,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--sandbox", default=DEFAULT_SANDBOX,
                         help=f"the sandbox (default {DEFAULT_SANDBOX}); loopback only")
+    parser.add_argument("--secret-file", default=DEFAULT_SECRET_FILE, metavar="FILE",
+                        help="the sandbox's secret, written by `research_sandbox.sh start` "
+                             "(default: SandSeek/sandbox/secret in Application Support)")
     parser.add_argument("--only", choices=GROUPS, action="append",
                         help="run only this group (repeatable)")
     parser.add_argument("--no-control", action="store_true",
@@ -322,9 +351,17 @@ def main() -> int:
         parser.error("--sandbox must be a loopback address, such as http://127.0.0.1:9100")
     if args.output and os.path.exists(args.output):
         parser.error(f"{args.output} already exists; choose a new --output file")
-    if not sandbox_answers(args.sandbox):
-        print(f"error: the sandbox does not answer at {args.sandbox}; "
-              "start it with Scripts/research_sandbox.sh start", file=sys.stderr)
+    try:
+        with open(args.secret_file, "rb") as handle:
+            secret = handle.read().removesuffix(b"\n")
+    except OSError as error:
+        print(f"error: cannot read the sandbox secret ({error.strerror}); "
+              "start the sandbox with Scripts/research_sandbox.sh start", file=sys.stderr)
+        return 2
+    if not sandbox_answers(args.sandbox, secret):
+        print(f"error: the sandbox does not answer at {args.sandbox}, or its answer is not "
+              "signed with the current secret; start it with Scripts/research_sandbox.sh start",
+              file=sys.stderr)
         return 2
 
     report = Report()
@@ -339,7 +376,7 @@ def main() -> int:
     counts = {"refused": 0, "inconclusive": 0, "FAIL": 0}
     for case in selected:
         try:
-            status, payload = post_fetch(args.sandbox, case.url, args.timeout)
+            status, payload = post_fetch(args.sandbox, secret, case.url, args.timeout)
         except (OSError, http.client.HTTPException) as error:
             report.emit(f"FAIL  {case.group:<8}{printable(case.url)}")
             report.emit(f"        no answer from the sandbox: {error}")
@@ -354,7 +391,7 @@ def main() -> int:
     if not args.no_control:
         report.emit()
         try:
-            status, payload = post_fetch(args.sandbox, CONTROL_URL, args.timeout)
+            status, payload = post_fetch(args.sandbox, secret, CONTROL_URL, args.timeout)
             control_ok = status == 200 and isinstance(payload, dict) and bool(payload.get("text"))
         except (OSError, http.client.HTTPException):
             control_ok = False

@@ -23,8 +23,11 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --require-hashes --no-deps -r /app/requirements.txt \
     && useradd --uid 10001 --no-create-home --home-dir /nonexistent \
-       --shell /usr/sbin/nologin sandbox
+       --shell /usr/sbin/nologin sandbox \
+    && mkdir -p /run/sandseek-sandbox
 
+# /run/sandseek-sandbox is where the launcher mounts the folder with the secret
+# file (read-only); server.py reads it once, as root, before it drops privileges.
 COPY server.py firewall.nft entrypoint.sh default_gateway.py /app/
 
 # Starts as root only to load firewall.nft; server.py then switches to user

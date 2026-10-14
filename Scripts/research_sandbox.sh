@@ -18,11 +18,13 @@
 # server runs as a non-root user with no Linux capabilities. Its port is
 # published to the Mac's loopback address only. See docs/SECURITY.md.
 #
-# Each `start` makes a new random secret, writes it to the file below (mode
-# 0600, in a folder only you can write to) and hands it to the sandbox, which signs its answers
-# with it, so SandSeek can tell the sandbox from another program on the port.
-# `stop` leaves the file, so that program is still told apart when the sandbox
-# is not running.
+# Each `start` makes a new random secret and writes it to a file (mode 0600, in
+# a folder only you can write to). The folder is mounted read-only into the VM,
+# and the sandbox reads the secret from it once, when it starts. Every request
+# to the sandbox must be signed with the secret, and every answer is signed
+# with it too, so SandSeek can tell the sandbox from another program on the
+# port. The secret is in no environment variable and no command line. `stop`
+# deletes the file: no secret means the sandbox is not running.
 
 set -euo pipefail
 # No file name expansion: $dns_servers is split into words below, not matched.
@@ -47,7 +49,12 @@ script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 context="$script_directory/../Sandbox"
 # Where the secret goes. SandSeek reads the same file (ResearchSandboxSecret in
 # Sources/SandSeekCore/ResearchSandboxSigning.swift); change both together.
-secret_file="$HOME/Library/Application Support/TUFF/web-sandbox.secret"
+# The folder, not the file, is mounted into the VM, at the path below.
+secret_folder="$HOME/Library/Application Support/SandSeek/sandbox"
+secret_file="$secret_folder/secret"
+vm_secret_folder="/run/sandseek-sandbox"
+# SandSeek 0.1.0 wrote its secret here, in TUFF's folder; it is not TUFF's.
+old_secret_file="$HOME/Library/Application Support/TUFF/web-sandbox.secret"
 
 # SANDSEEK_SANDBOX_PORT and SANDSEEK_DNS go into `container run` arguments;
 # a typo gives a confusing error from deep inside it, so check the form first.
@@ -81,28 +88,33 @@ require_container() {
   container system status >/dev/null 2>&1 || container system start
 }
 
-# Makes a new secret (32 random bytes as 64 hex characters), writes it to
-# $secret_file and prints it. The file is written to a temporary file in the
-# same folder, given mode 0600 and then renamed over the old one, so a reader
-# sees the old secret or the new one and never half of it. Everything here is a
-# shell builtin or reads /dev/urandom, so the secret is never in a command line.
-new_secret() {
-  local folder modes secret temporary
-  folder="$(dirname -- "$secret_file")"
-  # A missing folder is made with mode 0700. An existing one (TUFF's own, for
-  # example) is never changed: it only has to be yours, not a symlink, and not
-  # writable by group or others, so that nobody else can replace the file.
-  [[ -e "$folder" || -L "$folder" ]] || mkdir -p -m 700 -- "$folder"
-  if [[ -L "$folder" || ! -d "$folder" || ! -O "$folder" ]]; then
-    echo "$folder is not a folder of yours; not writing the sandbox secret" >&2
+# Makes a new secret (32 random bytes as 64 hex characters) and writes it to
+# $secret_file. The file is written to a temporary file in the same folder,
+# given mode 0600 and then renamed over the old one, so a reader sees the old
+# secret or the new one and never half of it. Everything here is a shell
+# builtin or reads /dev/urandom, so the secret is never in a command line. The
+# folder is made with mode 0700; an existing one only has to be yours, not a
+# symlink, and not writable by group or others, so that nobody else can replace
+# the file. Its path goes into `--mount`, which splits on commas, so a comma or
+# a line break in it is refused.
+write_secret() {
+  local modes secret temporary
+  if [[ "$secret_folder" == *,* || "$secret_folder" == *$'\n'* ]]; then
+    echo "the sandbox secret folder's path has a comma or a line break in it; not writing the sandbox secret" >&2
     return 1
   fi
-  modes="$(ls -ld -- "$folder")"
+  [[ -e "$secret_folder" || -L "$secret_folder" ]] || mkdir -p -m 700 -- "$secret_folder"
+  if [[ -L "$secret_folder" || ! -d "$secret_folder" || ! -O "$secret_folder" ]]; then
+    echo "$secret_folder is not a folder of yours; not writing the sandbox secret" >&2
+    return 1
+  fi
+  modes="$(ls -ld -- "$secret_folder")"
   modes="${modes%% *}"
   if [[ "${modes:5:1}" == w || "${modes:8:1}" == [wtT] ]]; then
-    echo "$folder can be written to by others (${modes}); not writing the sandbox secret. Run chmod go-w on it" >&2
+    echo "$secret_folder can be written to by others (${modes}); not writing the sandbox secret. Run chmod go-w on it" >&2
     return 1
   fi
+  chmod 700 "$secret_folder"
   if [[ -d "$secret_file" ]]; then
     echo "$secret_file is a folder; not writing the sandbox secret" >&2
     return 1
@@ -114,7 +126,7 @@ new_secret() {
   fi
   # No `--` after the mode below: macOS chmod reads it as a file name. The
   # path is absolute ($HOME), so it cannot be taken for an option.
-  temporary="$(umask 077 && mktemp -- "$folder/.web-sandbox.secret.XXXXXX")" || return 1
+  temporary="$(umask 077 && mktemp -- "$secret_folder/.secret.XXXXXX")" || return 1
   if ! { printf '%s' "$secret" >"$temporary" \
          && chmod 600 "$temporary" \
          && mv -f -- "$temporary" "$secret_file"; }; then
@@ -122,15 +134,89 @@ new_secret() {
     echo "could not write $secret_file" >&2
     return 1
   fi
-  printf '%s' "$secret"
 }
 
+# Removes the secret and, when nothing else is in it, its folder.
+remove_secret() {
+  rm -f -- "$secret_file"
+  rmdir -- "$secret_folder" 2>/dev/null || true
+}
+
+# The file SandSeek 0.1.0 wrote in TUFF's folder. Only that file, and only a
+# plain file of yours; TUFF's own files are never touched.
+remove_old_secret() {
+  if [[ -f "$old_secret_file" && ! -L "$old_secret_file" && -O "$old_secret_file" ]]; then
+    rm -f -- "$old_secret_file"
+  fi
+}
+
+# A request that is not signed is refused with 401 and the code `unauthorized`.
+# That is the answer a running sandbox gives this script, which cannot sign
+# (it has no tool for that on the Mac); SandSeek checks the real signature
+# before it uses the sandbox.
 health() {
-  curl -fsS --max-time 2 "http://127.0.0.1:$port/health" >/dev/null 2>&1
+  local reply
+  reply="$(curl -sS --max-time 2 -w '\n%{http_code}' "http://127.0.0.1:$port/health" 2>/dev/null)" \
+    || return 1
+  [[ "${reply##*$'\n'}" == 401 && "$reply" == *'"code": "unauthorized"'* ]]
 }
 
-health_json() {
-  curl -fsS --max-time 2 "http://127.0.0.1:$port/health" 2>/dev/null
+# Sends one request signed with the secret from inside the VM, where root can
+# read it, and prints "STATUS signed" or "STATUS unsigned" (the answer's
+# signature was checked), then the answer's body. MODE is `replay` (the same
+# signed request twice; the second answer is printed), `plain` (Content-Type
+# text/plain) or empty.
+#   signed_call METHOD PATH BODY [MODE]
+signed_client='
+import hashlib, hmac, http.client, os, sys, time
+
+method, path, body = sys.argv[1], sys.argv[2], sys.argv[3].encode()
+mode = sys.argv[4] if len(sys.argv) > 4 else ""
+with open("'"$vm_secret_folder"'/secret", "rb") as handle:
+    secret = handle.read().removesuffix(b"\n")
+
+def auth(*fields):
+    return hmac.new(secret, "\n".join(fields).encode(), hashlib.sha256).hexdigest()
+
+nonce = os.urandom(32).hex()
+stamp = str(int(time.time()))
+headers = {
+    "Host": "127.0.0.1:9100",
+    "X-Sandbox-Nonce": nonce,
+    "X-Sandbox-Time": stamp,
+    "X-Sandbox-Auth": auth("sandseek-sandbox-req-v1", method, path, nonce, stamp,
+                           hashlib.sha256(body).hexdigest()),
+}
+if method == "POST":
+    headers["Content-Type"] = "text/plain" if mode == "plain" else "application/json"
+
+def send():
+    connection = http.client.HTTPConnection("127.0.0.1", 9100, timeout=40)
+    connection.request(method, path, body=body or None, headers=headers)
+    response = connection.getresponse()
+    data = response.read()
+    connection.close()
+    return response.status, response.getheader("X-Sandbox-Auth"), data
+
+status, tag, data = send()
+if mode == "replay":
+    status, tag, data = send()
+expected = auth("sandseek-sandbox-resp-v1", method, path, nonce, str(status),
+                hashlib.sha256(data).hexdigest())
+good = tag is not None and hmac.compare_digest(tag.strip().lower(), expected)
+print(status, "signed" if good else "unsigned")
+print(data.decode("utf-8", "replace"))
+'
+
+signed_call() {
+  container exec "$name" python3 -c "$signed_client" "$@" 2>&1
+}
+
+# The first line of a signed_call answer: "200 signed".
+call_status() { printf '%s' "${1%%$'\n'*}"; }
+# The JSON error code in a signed_call answer, or empty.
+call_code() {
+  printf '%s' "${1#*$'\n'}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("error",{}).get("code",""))' 2>/dev/null || true
 }
 
 case "${1:-}" in
@@ -152,8 +238,8 @@ case "${1:-}" in
     exit "$build_status"
     ;;
   start)
-    # A trace would print the secret (`secret=...`, and the `container run`
-    # line with it), so do not run under `bash -x` or `set -x`.
+    # A trace would print the secret (`secret=...` while it is written), so do
+    # not run under `bash -x` or `set -x`.
     if [[ $- == *x* ]]; then
       echo "not starting with xtrace on: the trace would print the sandbox secret" >&2
       exit 1
@@ -165,12 +251,11 @@ case "${1:-}" in
     container delete "$name" >/dev/null 2>&1 || true
     # The entrypoint starts as root with these four capabilities only, to load
     # the firewall; the server then gives them all up and runs as user 10001.
-    # The secret goes in by name only (`--env NAME`, no value): the container
-    # tool takes the value from this script's environment, so it never appears
-    # in a command line, where other users would see it in `ps`.
+    # The secret goes in as a read-only file in a mounted folder, never in the
+    # environment or a command line, where other users would see it in `ps`.
     run_options=(
       --detach --rm --name "$name"
-      --env SANDSEEK_SANDBOX_SECRET
+      --mount "type=bind,source=$secret_folder,target=$vm_secret_folder,readonly"
       --read-only --tmpfs /tmp
       --cap-drop ALL --cap-add NET_ADMIN --cap-add SETUID --cap-add SETGID --cap-add SETPCAP
       --ulimit nproc=512
@@ -183,11 +268,11 @@ case "${1:-}" in
     if [[ -n "${SEARXNG_URL:-}" ]]; then
       run_options+=(--env "SEARXNG_URL=$SEARXNG_URL")
     fi
-    # The file is complete before the sandbox starts listening. The old VM is
-    # gone by now, so nothing is signing with the previous secret.
-    secret="$(new_secret)" || exit 1
-    SANDSEEK_SANDBOX_SECRET="$secret" container run "${run_options[@]}" "$image" >/dev/null
-    unset secret
+    # The file is complete before the sandbox starts, which reads it once. The
+    # old VM is gone by now, so nothing is signing with the previous secret.
+    write_secret || exit 1
+    remove_old_secret
+    container run "${run_options[@]}" "$image" >/dev/null
     # The entrypoint refuses to start when it finds no default gateway (see
     # Sandbox/entrypoint.sh) or cannot load the firewall, and `--rm` deletes the
     # container then, so keep the last non-empty log (a later "not found" error
@@ -201,13 +286,6 @@ case "${1:-}" in
     deadline=$((SECONDS + 120))
     for _ in $(seq 1 50); do
       if health; then
-        reply="$(health_json || true)"
-        if [[ "$reply" != *'"signed": true'* ]]; then
-          echo "the sandbox started but is not signing its answers; the container did not get the secret (see docs/SECURITY.md). Stopping it." >&2
-          container stop "$name" >/dev/null 2>&1 || true
-          container delete "$name" >/dev/null 2>&1 || true
-          exit 1
-        fi
         echo "web research sandbox ready at http://127.0.0.1:$port"
         exit 0
       fi
@@ -253,13 +331,8 @@ case "${1:-}" in
         esac
       done
       debug_command+=" $image"
-      # --env SANDSEEK_SANDBOX_SECRET above carries the name only, never the
-      # value; the container tool takes the value from its own environment.
-      # Printed as a prefix to this one command, so the secret does not stay
-      # exported in the terminal. The value itself is never printed.
-      debug_command="SANDSEEK_SANDBOX_SECRET=\"\$(cat $(printf '%q' "$secret_file"))\" $debug_command"
       echo "the sandbox container exited and was removed (it runs with --rm)." >&2
-      echo "To see why, run it once in the foreground without --rm (the prefix hands it the secret for this one command, so it signs its answers as the real start does): $debug_command" >&2
+      echo "To see why, run it once in the foreground without --rm (the secret file is mounted, so it starts as the real start does): $debug_command" >&2
     else
       echo "sandbox started but did not answer on 127.0.0.1:$port; see: container logs $name" >&2
       if (( firewall_loaded && listening )); then
@@ -278,12 +351,14 @@ case "${1:-}" in
       echo "could not confirm the sandbox was removed; see: container list --all" >&2
       exit 1
     fi
+    # No secret means no sandbox is running.
+    remove_secret
     echo "web research sandbox stopped"
     ;;
   status)
     check_port
     if health; then
-      echo "web research sandbox is answering at http://127.0.0.1:$port"
+      echo "web research sandbox answers at http://127.0.0.1:$port and refuses unsigned requests; SandSeek checks its signature before use"
     else
       echo "web research sandbox is not answering at http://127.0.0.1:$port" >&2
       exit 1
@@ -299,7 +374,7 @@ case "${1:-}" in
 
     echo "Fetches the sandbox must refuse:"
     # The same helper the entrypoint uses for the inbound rule.
-    gateway="$(container exec "$name" env -u SANDSEEK_SANDBOX_SECRET python3 /app/default_gateway.py)" \
+    gateway="$(container exec "$name" python3 /app/default_gateway.py)" \
       || { echo "  FAIL  could not read the VM's default gateway (rebuild the image?)" >&2; exit 1; }
     blocked_urls=(
       "http://$gateway/"
@@ -319,17 +394,21 @@ case "${1:-}" in
       "ftp://example.com/"
     )
     for url in "${blocked_urls[@]}"; do
-      reply="$(curl -sS --max-time 20 -H 'Content-Type: application/json' \
-        --data "{\"url\": \"$url\"}" "http://127.0.0.1:$port/v1/fetch")"
-      code="$(printf '%s' "$reply" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("error",{}).get("code",""))' 2>/dev/null || true)"
+      reply="$(signed_call POST /v1/fetch "{\"url\": \"$url\"}" || true)"
+      code="$(call_code "$reply")"
       case "$code" in
-        blocked_address|blocked_port|invalid_url|dns_error) pass "$url refused ($code)" ;;
+        blocked_address|blocked_port|invalid_url|dns_error)
+          if [[ "$(call_status "$reply")" == *" signed" ]]; then
+            pass "$url refused ($code)"
+          else
+            fail "$url was refused ($code) but the answer was not signed"
+          fi ;;
         *) fail "$url was not refused: ${reply:0:200}" ;;
       esac
     done
 
     echo "The VM's own protection:"
-    if container exec "$name" env -u SANDSEEK_SANDBOX_SECRET nft list table inet sandseek_sandbox >/dev/null 2>&1; then
+    if container exec "$name" nft list table inet sandseek_sandbox >/dev/null 2>&1; then
       pass "the firewall is loaded"
     else
       fail "the firewall is not loaded"
@@ -338,7 +417,7 @@ case "${1:-}" in
     # This reads the loaded rules; it does not send a packet from another
     # address, so it shows that the rule names the gateway, not that other
     # senders are refused.
-    input_rules="$(container exec "$name" env -u SANDSEEK_SANDBOX_SECRET nft -nn list chain inet sandseek_sandbox input 2>/dev/null || true)"
+    input_rules="$(container exec "$name" nft -nn list chain inet sandseek_sandbox input 2>/dev/null || true)"
     if grep -q 'hook input.*policy drop' <<<"$input_rules" \
         && grep -qF "ip saddr $gateway tcp dport 9100 accept" <<<"$input_rules" \
         && [[ "$(grep -c 'dport 9100' <<<"$input_rules")" == 1 ]]; then
@@ -346,7 +425,7 @@ case "${1:-}" in
     else
       fail "the firewall's input chain is missing or not as expected: ${input_rules:0:200}"
     fi
-    privileges="$(container exec "$name" env -u SANDSEEK_SANDBOX_SECRET python3 -c '
+    privileges="$(container exec "$name" python3 -c '
 import glob
 for path in glob.glob("/proc/[0-9]*/cmdline"):
     try:
@@ -370,7 +449,7 @@ for path in glob.glob("/proc/[0-9]*/cmdline"):
     # The Mac's DNS port (53) is the one exception, when the VM uses it.
     for target in "$gateway:8080" "$gateway:22" "$gateway:5000" "$gateway:443" \
                   "192.168.1.1:80" "192.168.0.1:80" "10.0.0.1:80" "169.254.169.254:80"; do
-      if container exec --user 10001:10001 "$name" env -u SANDSEEK_SANDBOX_SECRET python3 -c "
+      if container exec --user 10001:10001 "$name" python3 -c "
 import socket, sys
 host, port = sys.argv[1].rsplit(':', 1)
 try:
@@ -387,7 +466,7 @@ except OSError:
     # Every TCP port on the Mac. DNS (53) may answer when the VM's name server
     # is the Mac, which is the default; nothing else may.
     echo "Every TCP port on the Mac, from inside the VM:"
-    open_ports="$(container exec --user 10001:10001 "$name" env -u SANDSEEK_SANDBOX_SECRET python3 -c '
+    open_ports="$(container exec --user 10001:10001 "$name" python3 -c '
 import socket, sys
 from concurrent.futures import ThreadPoolExecutor
 host = sys.argv[1]
@@ -401,7 +480,7 @@ with ThreadPoolExecutor(64) as pool:
     print(" ".join(str(p) for p in pool.map(probe, range(1, 65536)) if p))
 ' "$gateway" 2>/dev/null)" || open_ports="error"
     mac_dns="no"
-    if container exec "$name" env -u SANDSEEK_SANDBOX_SECRET awk '$1 == "nameserver" { print $2 }' /etc/resolv.conf 2>/dev/null \
+    if container exec "$name" awk '$1 == "nameserver" { print $2 }' /etc/resolv.conf 2>/dev/null \
         | grep -qx "$gateway"; then
       mac_dns="yes"
     fi
@@ -425,40 +504,40 @@ with ThreadPoolExecutor(64) as pool:
       -H 'Content-Type: application/json' --data '{"url":"https://example.com/"}' \
       "http://127.0.0.1:$port/v1/fetch")"
     [[ "$status" == "403" ]] && pass "foreign Host header refused" || fail "foreign Host header answered $status"
-    status="$(curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: text/plain' \
+    status="$(curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' \
       --data '{"url":"https://example.com/"}' "http://127.0.0.1:$port/v1/fetch")"
-    [[ "$status" == "415" ]] && pass "browser-style simple POST refused" || fail "simple POST answered $status"
-
-    echo "The sandbox must sign its answers:"
-    if [[ ! -e "$secret_file" ]]; then
-      if [[ "$(health_json || true)" == *'"signed": true'* ]]; then
-        fail "the sandbox signs its answers but $secret_file does not exist"
-      else
-        echo "  warn  no secret file and an unsigned sandbox: nothing to check"
-      fi
+    [[ "$status" == "401" ]] && pass "unsigned request refused" || fail "unsigned request answered $status"
+    # Signed correctly, so it is the content type that is refused.
+    reply="$(signed_call POST /v1/fetch '{"url":"https://example.com/"}' plain || true)"
+    [[ "$(call_status "$reply")" == "415 signed" ]] \
+      && pass "browser-style simple POST refused" || fail "simple POST answered: ${reply:0:200}"
+    reply="$(signed_call POST /v1/fetch '{"url":"https://example.com/"}' replay || true)"
+    if [[ "$(call_status "$reply")" == "401 signed" && "$(call_code "$reply")" == "replayed_request" ]]; then
+      pass "a request sent twice is refused the second time"
     else
-      # A fresh nonce, the answer's headers and body, and the checker that
-      # knows the formula (Scripts/verify_sandbox_signature.py). It reads the
-      # secret from the file itself; nothing secret is printed or in a command line.
-      # The temporary files hold the public /health answer only.
-      nonce="$(LC_ALL=C od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
-      work="$(mktemp -d)"
-      if [[ "$nonce" =~ ^[0-9a-f]{64}$ ]] \
-          && curl -sS --max-time 5 -H "X-Sandbox-Nonce: $nonce" -D "$work/headers" \
-              -o "$work/body" "http://127.0.0.1:$port/health" \
-          && verdict="$(python3 "$script_directory/verify_sandbox_signature.py" \
-              "$secret_file" "$nonce" - "$work/headers" "$work/body" 2>&1)"; then
-        pass "/health is signed for a fresh nonce ($verdict)"
-      else
-        fail "/health is not signed correctly for a fresh nonce: ${verdict:-no valid answer}"
-      fi
-      rm -rf -- "$work"
-      unset nonce work verdict
+      fail "a repeated request was not refused: ${reply:0:200}"
+    fi
+    reply="$(signed_call PUT /health '' || true)"
+    [[ "$(call_status "$reply")" == "405 signed" ]] \
+      && pass "other methods are refused (after the signature check)" || fail "PUT answered: ${reply:0:200}"
+
+    echo "The sandbox must check requests and sign its answers:"
+    reply="$(signed_call GET /health '' || true)"
+    body="${reply#*$'\n'}"
+    if [[ "$(call_status "$reply")" == "200 signed" && "$body" == *'"status": "ok"'* && "$body" == *'"api": 1'* ]]; then
+      pass "a signed /health request is answered with a signed answer"
+    else
+      fail "a signed /health request was not answered with a signed answer: ${reply:0:200}"
+    fi
+    if [[ -e "$secret_file" ]]; then
+      pass "the secret file exists on the Mac ($secret_file)"
+    else
+      fail "the secret file $secret_file does not exist, so SandSeek cannot use the sandbox"
     fi
 
     echo "A public page must still work:"
-    if curl -fsS --max-time 30 -H 'Content-Type: application/json' \
-        --data '{"url":"https://example.com/"}' "http://127.0.0.1:$port/v1/fetch" | grep -q '"text"'; then
+    reply="$(signed_call POST /v1/fetch '{"url":"https://example.com/"}' || true)"
+    if [[ "$(call_status "$reply")" == "200 signed" && "$reply" == *'"text"'* ]]; then
       pass "https://example.com/ fetched"
     else
       fail "https://example.com/ could not be fetched; check the VM's internet access"

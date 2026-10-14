@@ -193,7 +193,7 @@ private let redirectStatuses = [301, 302, 303, 307, 308]
 
     @Test(arguments: redirectStatuses)
     func theSandboxClientTreatsARedirectAsAnError(status: Int) async {
-        let client = ResearchSandboxClient(baseURL: sandbox, transport: AlwaysRedirects(status: status))
+        let client = ResearchSandboxClient.forTests(baseURL: sandbox, transport: AlwaysRedirects(status: status))
         let expected = ResearchError.redirectRefused(status: status)
         await #expect(throws: expected) { try await client.checkHealth() }
         await #expect(throws: expected) { try await client.checkHealth(requirePassages: true) }
@@ -235,7 +235,7 @@ private let redirectStatuses = [301, 302, 303, 307, 308]
                 choice: .auto, stream: nil, serverURL: modelServer,
                 transport: AlwaysRedirects(status: 404))
         }
-        let notFound = ResearchSandboxClient(baseURL: sandbox, transport: AlwaysRedirects(status: 503))
+        let notFound = ResearchSandboxClient.forTests(baseURL: sandbox, transport: AlwaysRedirects(status: 503))
         await #expect(throws: ResearchError.sandboxUnavailable("health check answered HTTP 503")) {
             try await notFound.checkHealth()
         }
@@ -300,7 +300,8 @@ private let redirectStatuses = [301, 302, 303, 307, 308]
         let transport = URLSessionResearchTransport(timeout: 10)
         let expected = ResearchError.redirectRefused(status: 307)
 
-        let sandbox = ResearchSandboxClient(baseURL: squatter.url, transport: transport)
+        let sandbox = ResearchSandboxClient(
+            baseURL: squatter.url, transport: transport, secretFile: TestSandboxSecret.file)
         await #expect(throws: expected) { try await sandbox.checkHealth() }
         await #expect(throws: expected) { _ = try await sandbox.search(query: "q", maxResults: 3) }
         await #expect(throws: expected) {

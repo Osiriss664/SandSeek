@@ -17,6 +17,12 @@ private final class BusyRunServices: ResearchHTTPTransport, @unchecked Sendable 
         }
         return try await inner.send(method: method, url: url, body: body)
     }
+
+    func send(method: String, url: URL, body: Data?, timeout: TimeInterval?,
+              authorization: String?, headers: [String: String]) async throws -> ResearchHTTPResponse {
+        try await inner.send(method: method, url: url, body: body, timeout: timeout,
+                             authorization: authorization, headers: headers)
+    }
 }
 
 @Suite @MainActor struct ResearchWorkspaceTests {
@@ -50,11 +56,11 @@ private final class BusyRunServices: ResearchHTTPTransport, @unchecked Sendable 
         let runServices = FakeResearchServices(
             modelReplies: Array(repeating: FakeResearchServices.answer("An answer."), count: 4))
         let run = ResearchRunController(
-            store: reports, transport: busyRun ? BusyRunServices(runServices) : runServices)
+            store: reports, transport: busyRun ? BusyRunServices(runServices) : runServices, sandboxSecretFile: TestSandboxSecret.file)
         let sandbox = ResearchSandboxController(
             runner: FakeProcessRunner(), transport: FakeResearchServices(),
             defaults: MemorySettings(), environment: [:], resources: try testResources(),
-            stateDirectory: temporaryDirectory())
+            stateDirectory: temporaryDirectory(), secretFile: TestSandboxSecret.file)
         await sandbox.start()
         let launch = launch ?? testLaunchController()
         let workspace = ResearchWorkspace(
@@ -131,11 +137,11 @@ private final class BusyRunServices: ResearchHTTPTransport, @unchecked Sendable 
         let sandbox = ResearchSandboxController(
             runner: FakeProcessRunner(), transport: FakeResearchServices(),
             defaults: MemorySettings(), environment: [:],
-            resources: try testResources(bundle: bundle), stateDirectory: temporaryDirectory())
+            resources: try testResources(bundle: bundle), stateDirectory: temporaryDirectory(), secretFile: TestSandboxSecret.file)
         await sandbox.start()
         let workspace = ResearchWorkspace(
             sandbox: sandbox, server: server, reports: reports,
-            run: ResearchRunController(store: reports, transport: FakeResearchServices()),
+            run: ResearchRunController(store: reports, transport: FakeResearchServices(), sandboxSecretFile: TestSandboxSecret.file),
             presets: ResearchPresetStore(defaults: MemorySettings()), launch: launch)
 
         // No server of ours: nothing is signalled.
@@ -251,7 +257,7 @@ private final class BusyRunServices: ResearchHTTPTransport, @unchecked Sendable 
         let settings = ResearchPreset.quick.runSettings(model: "m")
         let services = FakeResearchServices(modelReplies: [FakeResearchServices.answer("Done.")])
         let run = ResearchRunController(
-            store: ResearchReportStore(directory: temporaryDirectory()), transport: services)
+            store: ResearchReportStore(directory: temporaryDirectory()), transport: services, sandboxSecretFile: TestSandboxSecret.file)
         var quick = settings
         quick.nudges = false
         quick.autoOpenPages = false

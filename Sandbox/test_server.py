@@ -12,9 +12,12 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import socket
 import struct
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import unicodedata
@@ -166,20 +169,17 @@ def resolver(table):
 
 
 class FakeTransport:
-    """A route is a Response, or an exception to raise. /v1/raw passes the
-    keyword arguments `deadline` and `max_bytes`; they are recorded, and are
-    None for a call that does not pass them (as /v1/fetch's does not)."""
+    """A route is a Response, or an exception to raise. The keyword argument
+    `deadline` is recorded."""
 
     def __init__(self, routes):
         self.routes = routes
         self.calls = []
         self.deadlines = []
-        self.limits = []
 
-    def __call__(self, method, target, headers, body, deadline=None, max_bytes=None):
+    def __call__(self, method, target, headers, body, deadline=None):
         self.calls.append((method, target, headers, body))
         self.deadlines.append(deadline)
-        self.limits.append(max_bytes)
         result = self.routes[target.url]
         if isinstance(result, Exception):
             raise result
@@ -801,15 +801,6 @@ class PdfTests(unittest.TestCase):
                 error = self.refused(make_pdf(["x"]), "unsupported_content", content_type)
                 self.assertIn("not a web page", error.message)
 
-    def test_raw_returns_the_bytes_of_a_pdf_unparsed(self):
-        pdf = make_pdf(["raw text"])
-        transport = FakeTransport({self.URL: Response(200, {"content-type": "application/pdf"}, pdf)})
-        tools = WebTools(resolver=self.resolve, transport=transport, searxng_url="")
-        result = tools.raw(self.URL)
-        self.assertEqual(base64.b64decode(result["body_base64"]), pdf)
-        self.assertEqual(result["content_type"], "application/pdf")
-
-
     def test_a_real_flate_bomb_is_a_clean_error_within_the_time_limit(self):
         bomb = flate_bomb_pdf(300)  # 300 MB of zeros, some 300 KB of PDF
         self.assertLess(len(bomb), 1_000_000)
@@ -971,476 +962,9 @@ class FetchDeadlineTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "fetch_timeout")
 
 
-class RawTests(unittest.TestCase):
-    """WebTools.raw, the code behind POST /v1/raw."""
-
-    def setUp(self):
-        table = resolver({
-            "example.com": ["93.184.216.34"],
-            "other.example": ["93.184.216.35"],
-            "internal.example": ["10.1.2.3"],
-        })
-
-        def resolve(host, port):
-            # Numeric addresses are read as libc reads them, without DNS.
-            try:
-                return table(host, port)
-            except ToolError:
-                return _numeric_only_resolver(host, port)
-        self.resolve = resolve
-
-    def tools(self, routes, **options):
-        self.transport = FakeTransport(routes)
-        return WebTools(resolver=self.resolve, transport=self.transport, searxng_url="",
-                        **options)
-
-    def raw(self, routes, url="https://example.com/a", **arguments):
-        return self.tools(routes).raw(url, **arguments)
-
-    def error(self, tools, url, **arguments):
-        with self.assertRaises(ToolError) as caught:
-            tools.raw(url, **arguments)
-        return caught.exception
-
-    def test_a_page_comes_back_with_its_exact_bytes(self):
-        # Not text: a NUL, bytes that are no UTF-8, a zero-width space and an
-        # escape sequence, none of which may be cleaned or decoded.
-        body = b"\x00\xff<p>\xe2\x80\x8b\x1b[2J caf\xe9</p>\r\n"
-        result = self.raw({"https://example.com/a": Response(
-            200, {"content-type": "text/html; charset=ISO-8859-1"}, body)})
-        self.assertEqual(result, {
-            "final_url": "https://example.com/a",
-            "status": 200,
-            "content_type": "text/html; charset=ISO-8859-1",
-            "content_encoding": None,
-            "body_base64": base64.b64encode(body).decode(),
-        })
-        self.assertEqual(base64.b64decode(result["body_base64"], validate=True), body)
-
-    def test_an_empty_body_and_a_missing_content_type_are_fine(self):
-        result = self.raw({"https://example.com/a": Response(204, {}, b"")})
-        self.assertEqual((result["status"], result["content_type"], result["body_base64"]),
-                         (204, "", ""))
-
-    def test_a_404_is_a_success_with_its_status_and_body(self):
-        result = self.raw({"https://example.com/a": page("not here", status=404)})
-        self.assertEqual((result["status"], base64.b64decode(result["body_base64"])),
-                         (404, b"not here"))
-
-    def test_a_500_is_a_success_too(self):
-        result = self.raw({"https://example.com/a": page("oops", status=500)})
-        self.assertEqual(result["status"], 500)
-
-    def test_the_final_url_is_the_last_hop(self):
-        result = self.raw({
-            "https://example.com/a": redirect("https://other.example/b?q=1"),
-            "https://other.example/b?q=1": page("x")})
-        self.assertEqual(result["final_url"], "https://other.example/b?q=1")
-
-    # --- size -------------------------------------------------------------
-
-    def test_a_body_over_max_bytes_is_an_error_never_a_short_body(self):
-        routes = {"https://example.com/a": page("x" * 11)}
-        error = self.error(self.tools(routes), "https://example.com/a", max_bytes=10)
-        self.assertEqual(error.code, "oversized")
-        self.assertEqual(self.raw(routes, max_bytes=11)["body_base64"],
-                         base64.b64encode(b"x" * 11).decode())
-
-    def test_a_body_the_transport_cut_short_is_oversized(self):
-        routes = {"https://example.com/a": Response(200, {}, b"x" * 10, truncated=True)}
-        error = self.error(self.tools(routes), "https://example.com/a", max_bytes=10)
-        self.assertEqual(error.code, "oversized")
-
-    def test_a_content_length_over_max_bytes_is_oversized(self):
-        routes = {"https://example.com/a": page("small", **{"content-length": "100"})}
-        error = self.error(self.tools(routes), "https://example.com/a", max_bytes=50)
-        self.assertEqual(error.code, "oversized")
-        for announced in ("50", "abc", "-1", ""):
-            routes = {"https://example.com/a": page("small", **{"content-length": announced})}
-            self.assertEqual(self.raw(routes, max_bytes=50)["status"], 200, announced)
-
-    def test_the_limits_are_handed_to_the_transport(self):
-        tools = self.tools({"https://example.com/a": page("x")})
-        tools.raw("https://example.com/a", max_bytes=1234, timeout_seconds=9)
-        self.assertEqual(self.transport.limits, [1234])
-        self.assertEqual(len(self.transport.deadlines), 1)
-        self.assertAlmostEqual(self.transport.deadlines[0], 9, delta=1)
-
-    def test_defaults(self):
-        tools = self.tools({"https://example.com/a": page("x")})
-        tools.raw("https://example.com/a")
-        self.assertEqual(self.transport.limits, [server.MAX_DOWNLOAD_BYTES])
-        self.assertAlmostEqual(self.transport.deadlines[0], 15, delta=1)
-        self.assertEqual(self.transport.calls[0][2]["Accept"],
-                         "text/html,application/xhtml+xml,text/plain;q=0.9,application/pdf;q=0.8")
-
-    # --- redirects ----------------------------------------------------------
-
-    def test_all_five_redirect_statuses_are_followed(self):
-        for status in (301, 302, 303, 307, 308):
-            result = self.raw({
-                "https://example.com/a": redirect("/b", status),
-                "https://example.com/b": page("arrived")})
-            self.assertEqual(result["final_url"], "https://example.com/b", status)
-
-    def test_redirects_may_leave_the_host_and_go_from_http_to_https(self):
-        result = self.raw({
-            "http://example.com/a": redirect("https://other.example/b"),
-            "https://other.example/b": page("arrived")}, url="http://example.com/a")
-        self.assertEqual(result["final_url"], "https://other.example/b")
-
-    def test_a_redirect_from_https_to_http_is_refused(self):
-        for location in ("http://example.com/b", "HTTP://other.example/b"):
-            tools = self.tools({
-                "https://example.com/a": redirect(location),
-                "http://example.com/b": page("never"),
-                "http://other.example/b": page("never")})
-            error = self.error(tools, "https://example.com/a")
-            self.assertEqual(error.code, "insecure_redirect", location)
-            self.assertEqual(len(self.transport.calls), 1, "the http address is not contacted")
-
-    def test_http_to_http_is_allowed(self):
-        result = self.raw({
-            "http://example.com/a": redirect("http://other.example/b"),
-            "http://other.example/b": page("arrived")}, url="http://example.com/a")
-        self.assertEqual(result["final_url"], "http://other.example/b")
-
-    def test_five_redirects_are_followed_and_six_are_refused(self):
-        routes = {f"https://example.com/{n}": redirect(f"/{n + 1}") for n in range(6)}
-        routes["https://example.com/6"] = page("end")
-        self.assertEqual(self.raw(routes, url="https://example.com/1")["final_url"],
-                         "https://example.com/6")
-        tools = self.tools(routes)
-        error = self.error(tools, "https://example.com/0")
-        self.assertEqual(error.code, "too_many_redirects")
-        self.assertEqual(len(self.transport.calls), 6)
-
-    def test_a_redirect_loop_stops(self):
-        tools = self.tools({"https://example.com/a": redirect("/a")})
-        self.assertEqual(self.error(tools, "https://example.com/a").code, "too_many_redirects")
-
-    def test_a_3xx_without_a_location_is_a_success_with_that_status(self):
-        for status, headers in [(301, {}), (302, {"location": ""}), (307, {"location": "  "}),
-                                (300, {"location": "/b"}), (304, {"location": "/b"}),
-                                (305, {"location": "/b"}), (306, {"location": "/b"})]:
-            routes = {"https://example.com/a": Response(status, headers, b"body")}
-            result = self.raw(routes)
-            self.assertEqual((result["status"], result["final_url"]),
-                             (status, "https://example.com/a"), status)
-            self.assertEqual(base64.b64decode(result["body_base64"]), b"body")
-
-    def test_a_redirect_to_another_scheme_is_unsupported(self):
-        tools = self.tools({"https://example.com/a": redirect("ftp://example.com/x")})
-        self.assertEqual(self.error(tools, "https://example.com/a").code, "unsupported_scheme")
-
-    # --- addresses ------------------------------------------------------------
-
-    def test_a_private_address_is_refused_before_anything_is_sent(self):
-        for url in ("http://internal.example/", "http://10.1.2.3/", "http://169.254.169.254/",
-                    "http://192.168.1.1/", "http://[::1]/", "http://127.0.0.1/"):
-            tools = self.tools({})
-            error = self.error(tools, url)
-            self.assertEqual(error.code, "private_address", url)
-            self.assertEqual(error.status, 403)
-            self.assertEqual(self.transport.calls, [], url)
-
-    def test_a_private_address_after_a_redirect_is_refused(self):
-        tools = self.tools({"https://example.com/a": redirect("https://internal.example/")})
-        self.assertEqual(self.error(tools, "https://example.com/a").code, "private_address")
-        self.assertEqual(len(self.transport.calls), 1)
-        tools = self.tools({"http://example.com/a": redirect("http://169.254.169.254/latest")})
-        self.assertEqual(self.error(tools, "http://example.com/a").code, "private_address")
-
-    def test_the_connection_goes_to_the_checked_address(self):
-        tools = self.tools({"https://example.com/a": page("x")})
-        tools.raw("https://example.com/a")
-        self.assertEqual(self.transport.calls[0][1].address, "93.184.216.34")
-
-    # --- the request ------------------------------------------------------------
-
-    def test_a_bad_scheme_is_unsupported(self):
-        for url in ("ftp://example.com/", "file:///etc/passwd", "gopher://example.com/",
-                    "javascript:alert(1)", "data:text/html,x", "wss://example.com/"):
-            error = self.error(self.tools({}), url)
-            self.assertEqual(error.code, "unsupported_scheme", url)
-            self.assertEqual(self.transport.calls, [])
-
-    def test_other_bad_urls_keep_their_codes(self):
-        for url, code in [("example.com/page", "invalid_url"), ("", "invalid_url"),
-                          ("http:///nohost", "invalid_url"), (None, "invalid_url"),
-                          (42, "invalid_url"), ("http://user:pw@example.com/", "invalid_url"),
-                          ("https://example.com/a b", "invalid_url"),
-                          ("https://nowhere.example/", "dns_error")]:
-            self.assertEqual(self.error(self.tools({}), url).code, code, url)
-
-    def test_only_ports_80_and_443_are_allowed(self):
-        for url in ("http://example.com:8080/", "https://example.com:80/",
-                    "http://example.com:443/", "https://example.com:8443/", "http://example.com:22/"):
-            error = self.error(self.tools({}), url)
-            self.assertEqual(error.code, "blocked_port", url)
-            self.assertEqual(self.transport.calls, [])
-        tools = self.tools({"http://example.com/a": page("x")})
-        self.assertEqual(tools.raw("http://example.com:80/a")["status"], 200)
-
-    def test_a_bad_accept_is_refused(self):
-        for accept in ("text/html\r\nCookie: a=b", "text/html\nX: y", "text/html\r", "a" * 513,
-                       "text/hétml", "text/html\ttext/plain", "text/\x00html", "\x7f",
-                       None, 5, ["text/html"], b"text/html"):
-            error = self.error(self.tools({"https://example.com/a": page("x")}),
-                               "https://example.com/a", accept=accept)
-            self.assertEqual(error.code, "invalid_argument", repr(accept))
-            self.assertEqual(self.transport.calls, [])
-
-    def test_a_good_accept_is_sent_as_given(self):
-        for accept in ("application/pdf", "*/*", "text/html;q=0.9, */*;q=0.1", "a" * 512):
-            tools = self.tools({"https://example.com/a": page("x")})
-            tools.raw("https://example.com/a", accept=accept)
-            self.assertEqual(self.transport.calls[0][2]["Accept"], accept)
-
-    def test_an_empty_accept_means_the_default(self):
-        tools = self.tools({"https://example.com/a": page("x")})
-        tools.raw("https://example.com/a", accept="")
-        self.assertEqual(self.transport.calls[0][2]["Accept"], server.RAW_DEFAULT_ACCEPT)
-
-    def test_an_ipv6_literal_keeps_its_brackets_in_host_and_final_url(self):
-        url = "http://[2606:4700:4700::1111]/x"
-        tools = self.tools({url: redirect("/y"), "http://[2606:4700:4700::1111]/y": page("v6")})
-        result = tools.raw(url)
-        self.assertEqual(result["final_url"], "http://[2606:4700:4700::1111]/y")
-        self.assertEqual(self.transport.calls[0][2]["Host"], "[2606:4700:4700::1111]")
-        self.assertEqual(self.transport.calls[0][1].address, "2606:4700:4700::1111")
-        tools.fetch(url)
-        self.assertEqual(self.transport.calls[-1][2]["Host"], "[2606:4700:4700::1111]")
-
-    def test_a_bad_max_bytes_is_refused(self):
-        for value in (0, -1, server.MAX_DOWNLOAD_BYTES + 1, 1.5, 10.0, "10", None, True, [1]):
-            error = self.error(self.tools({"https://example.com/a": page("x")}),
-                               "https://example.com/a", max_bytes=value)
-            self.assertEqual(error.code, "invalid_argument", repr(value))
-            self.assertEqual(self.transport.calls, [])
-        for value in (1, server.MAX_DOWNLOAD_BYTES):
-            self.assertEqual(self.raw({"https://example.com/a": page("x")},
-                                      max_bytes=value)["status"], 200)
-
-    def test_a_bad_timeout_is_refused(self):
-        for value in (0, -1, 0.0, 60.5, 61, 1000, float("nan"), float("inf"), "15", None, True, [15]):
-            error = self.error(self.tools({"https://example.com/a": page("x")}),
-                               "https://example.com/a", timeout_seconds=value)
-            self.assertEqual(error.code, "invalid_argument", repr(value))
-            self.assertEqual(self.transport.calls, [])
-        for value in (0.5, 1, 15, 60, 60.0):
-            self.assertEqual(self.raw({"https://example.com/a": page("x")},
-                                      timeout_seconds=value)["status"], 200)
-
-    def test_only_the_promised_headers_are_sent_and_no_accept_encoding(self):
-        tools = self.tools({
-            "https://example.com/a": redirect("/b", **{"set-cookie": "id=1", "www-authenticate": "x"}),
-            "https://example.com/b": page("x")})
-        tools.raw("https://example.com/a", accept="text/plain")
-        self.assertEqual(len(self.transport.calls), 2)
-        for method, target, headers, body in self.transport.calls:
-            self.assertEqual(method, "GET")
-            self.assertIsNone(body)
-            self.assertEqual(set(headers), {"Host", "User-Agent", "Accept"})
-            self.assertEqual(headers["User-Agent"], server.USER_AGENT)
-            self.assertEqual(headers["Accept"], "text/plain")
-            self.assertEqual(headers["Host"], target.host)
-
-    def test_cookies_are_not_kept_between_hops_or_requests(self):
-        tools = self.tools({
-            "https://example.com/a": redirect("/b", **{"set-cookie": "id=1"}),
-            "https://example.com/b": page("x", **{"set-cookie": "id=2"})})
-        tools.raw("https://example.com/a")
-        tools.raw("https://example.com/a")
-        for call in self.transport.calls:
-            self.assertFalse({"cookie", "authorization"} & {k.lower() for k in call[2]})
-
-    def test_the_cache_is_neither_used_nor_filled(self):
-        tools = self.tools({"https://example.com/a": page("<p>cached text</p>")})
-        tools.raw("https://example.com/a")
-        tools.raw("https://example.com/a")
-        self.assertEqual(len(self.transport.calls), 2)
-        self.assertEqual(len(tools.cache), 0)
-        # A page /v1/fetch has cached is not served to /v1/raw.
-        tools.fetch("https://example.com/a")
-        self.assertEqual(len(self.transport.calls), 3)
-        self.assertEqual(len(tools.cache), 1)
-        tools.raw("https://example.com/a")
-        self.assertEqual(len(self.transport.calls), 4)
-
-    # --- content encoding ---------------------------------------------------------
-
-    def test_a_compressed_body_is_returned_unchanged_with_its_encoding(self):
-        packed = gzip.compress(b"<p>hello</p>")
-        result = self.raw({"https://example.com/a": Response(
-            200, {"content-type": "text/html", "content-encoding": "gzip"}, packed)})
-        self.assertEqual(base64.b64decode(result["body_base64"]), packed)
-        self.assertEqual((result["content_encoding"], result["content_type"]), ("gzip", "text/html"))
-
-    def test_content_encoding_is_reported_whenever_the_header_is_there(self):
-        for value in ("gzip", "br", "identity", "zstd", "gzip, br"):
-            result = self.raw({"https://example.com/a": Response(
-                200, {"content-encoding": value}, b"x")})
-            self.assertEqual(result["content_encoding"], value)
-        # Without the header the field is still there, as null.
-        self.assertIn("content_encoding", self.raw({"https://example.com/a": page("x")}))
-        self.assertIsNone(self.raw({"https://example.com/a": page("x")})["content_encoding"])
-
-    # --- the length of the metadata -------------------------------------------------
-
-    def test_final_url_may_be_2048_characters_and_not_one_more(self):
-        prefix = "https://example.com/"
-        at_limit = prefix + "p" * (server.RAW_MAX_FINAL_URL_CHARS - len(prefix))
-        self.assertEqual(len(at_limit), 2048)
-        result = self.raw({at_limit: page("x")}, url=at_limit)
-        self.assertEqual(result["final_url"], at_limit)
-        too_long = at_limit + "p"
-        tools = self.tools({too_long: page("x")})
-        error = self.error(tools, too_long)
-        self.assertEqual((error.code, error.status), ("fetch_failed", 502))
-        self.assertLess(len(error.message), 200)
-
-    def test_content_type_may_be_256_characters_and_not_one_more(self):
-        start = "text/html; x="
-        at_limit = start + "c" * (server.RAW_MAX_CONTENT_TYPE_CHARS - len(start))
-        self.assertEqual(len(at_limit), 256)
-        result = self.raw({"https://example.com/a": page("x", content_type=at_limit)})
-        self.assertEqual(result["content_type"], at_limit)
-        tools = self.tools({"https://example.com/a": page("x", content_type=at_limit + "c")})
-        error = self.error(tools, "https://example.com/a")
-        self.assertEqual((error.code, error.status), ("fetch_failed", 502))
-        self.assertLess(len(error.message), 200)
-
-    def test_content_encoding_may_be_64_characters_and_not_one_more(self):
-        at_limit = "x" * server.RAW_MAX_CONTENT_ENCODING_CHARS
-        self.assertEqual(len(at_limit), 64)
-        result = self.raw({"https://example.com/a": Response(
-            200, {"content-encoding": at_limit}, b"x")})
-        self.assertEqual(result["content_encoding"], at_limit)
-        tools = self.tools({"https://example.com/a": Response(
-            200, {"content-encoding": at_limit + "x"}, b"x")})
-        error = self.error(tools, "https://example.com/a")
-        self.assertEqual((error.code, error.status), ("fetch_failed", 502))
-        self.assertLess(len(error.message), 200)
-
-    def test_a_redirect_chain_that_ends_on_a_too_long_url_is_refused(self):
-        prefix = "https://other.example/"
-        ok = prefix + "p" * (server.RAW_MAX_FINAL_URL_CHARS - len(prefix))
-        too_long = ok + "p"
-        # Only the last Location makes the address too long; the start is short.
-        routes = {"https://example.com/a": redirect("/b"),
-                  "https://example.com/b": redirect(too_long),
-                  too_long: page("never shown")}
-        error = self.error(self.tools(routes), "https://example.com/a")
-        self.assertEqual((error.code, error.status), ("fetch_failed", 502))
-        # One character less arrives.
-        routes = {"https://example.com/a": redirect("/b"),
-                  "https://example.com/b": redirect(ok), ok: page("arrived")}
-        self.assertEqual(self.raw(routes, url="https://example.com/a")["final_url"], ok)
-
-    def test_a_long_header_on_a_redirect_hop_is_not_a_success_and_not_checked(self):
-        routes = {"https://example.com/a": redirect("/b", **{"content-type": "t" * 1000}),
-                  "https://example.com/b": page("arrived")}
-        self.assertEqual(self.raw(routes, url="https://example.com/a")["status"], 200)
-
-    # --- the deadline ---------------------------------------------------------------
-
-    def test_one_deadline_covers_every_redirect(self):
-        clock = FakeClock()
-        self.transport = ClockedTransport({
-            f"https://example.com/{n}": redirect(f"/{n + 1}") for n in range(5)}, clock, 4)
-        tools = WebTools(resolver=self.resolve, transport=self.transport, searxng_url="",
-                         clock=clock)
-        error = self.error(tools, "https://example.com/0", timeout_seconds=10)
-        self.assertEqual(error.code, "timed_out")
-        self.assertEqual(error.status, 504)
-        # The time left shrinks from hop to hop, and no fourth request is made.
-        self.assertEqual(self.transport.deadlines, [10, 6, 2])
-
-    def test_a_fast_chain_passes_the_remaining_time_each_hop(self):
-        clock = FakeClock()
-        self.transport = ClockedTransport({
-            "https://example.com/0": redirect("/1"),
-            "https://example.com/1": page("done")}, clock, 1.5)
-        tools = WebTools(resolver=self.resolve, transport=self.transport, searxng_url="",
-                         clock=clock)
-        self.assertEqual(tools.raw("https://example.com/0", timeout_seconds=5)["status"], 200)
-        self.assertEqual(self.transport.deadlines, [5, 3.5])
-
-    def test_a_transport_timeout_is_timed_out(self):
-        tools = self.tools({"https://example.com/a": ToolError(
-            "example.com took longer than 3 s", "fetch_timeout", 504)})
-        error = self.error(tools, "https://example.com/a", timeout_seconds=12)
-        self.assertEqual((error.code, error.status), ("timed_out", 504))
-        self.assertIn("12 s", error.message)
-
-    def test_a_name_lookup_that_hangs_is_cut_off_by_the_deadline(self):
-        release = threading.Event()
-        self.addCleanup(release.set)
-
-        def hanging(host, port):
-            release.wait(30)
-            return ["93.184.216.34"]
-        tools = WebTools(resolver=hanging, transport=FakeTransport({}), searxng_url="")
-        started = time.monotonic()
-        error = self.error(tools, "https://example.com/a", timeout_seconds=0.3)
-        self.assertEqual(error.code, "timed_out")
-        self.assertLess(time.monotonic() - started, 5)
-
-    # --- errors -------------------------------------------------------------------
-
-    def test_codes_are_the_names_the_spec_promises(self):
-        cases = [
-            (ToolError("m", "blocked_address", 403), "private_address", 403),
-            (ToolError("m", "fetch_timeout", 504), "timed_out", 504),
-            (ToolError("m", "fetch_failed", 502), "fetch_failed", 502),
-            (ToolError("m", "dns_error", 502), "dns_error", 502),
-        ]
-        for original, code, status in cases:
-            tools = self.tools({"https://example.com/a": original})
-            error = self.error(tools, "https://example.com/a")
-            self.assertEqual((error.code, error.status), (code, status), original.code)
-
-    def test_messages_have_no_control_characters_and_are_short(self):
-        hostile = "bad\x1b[2J\r\nline‮​\x07 end" + "x" * 500
-        tools = self.tools({"https://example.com/a": ToolError(hostile, "fetch_failed", 502)})
-        message = self.error(tools, "https://example.com/a").message
-        self.assertLessEqual(len(message), 200)
-        self.assertTrue(message.startswith("bad[2J line"), message)
-        for character in message:
-            self.assertFalse(unicodedata.category(character).startswith("C"), repr(character))
-
-    def test_fetch_keeps_its_own_error_codes(self):
-        tools = self.tools({"https://example.com/slow": ToolError("slow", "fetch_timeout", 504)})
-        for url, code in [("http://internal.example/", "blocked_address"),
-                          ("ftp://example.com/", "invalid_url"),
-                          ("https://example.com/slow", "fetch_timeout")]:
-            with self.assertRaises(ToolError, msg=url) as caught:
-                tools.fetch(url)
-            self.assertEqual(caught.exception.code, code, url)
-
-    def test_fetch_is_unchanged(self):
-        tools = self.tools({
-            "https://example.com/a": redirect("http://other.example/b"),
-            "http://other.example/b": page(ARTICLE)})
-        # /v1/fetch still follows a redirect from https to http, still asks for
-        # gzip, still sends a language, still caches, and sets no byte limit. Its
-        # deadline is the per-hop one, capped by the whole-request one.
-        self.assertEqual(tools.fetch("https://example.com/a")["url"], "http://other.example/b")
-        headers = self.transport.calls[0][2]
-        self.assertEqual(headers["Accept-Encoding"], "gzip")
-        self.assertIn("Accept-Language", headers)
-        self.assertEqual(self.transport.deadlines, [server.FETCH_DEADLINE] * 2)
-        self.assertEqual(self.transport.limits, [None, None])
-        tools.fetch("https://example.com/a")
-        self.assertEqual(len(self.transport.calls), 2)
-        self.assertEqual(len(tools.cache), 2)
-        self.assertEqual(len(tools.fetch("http://other.example/b", 0, 5)["text"]), 5)
-
-
-class RawTransportTests(unittest.TestCase):
-    """pinned_transport with the byte limit /v1/raw adds, on a real socket on
-    loopback (check_url would refuse it, so the target is built by hand)."""
+class TransportTests(unittest.TestCase):
+    """pinned_transport on a real socket on loopback (check_url would refuse
+    it, so the target is built by hand)."""
 
     seen = []
 
@@ -1449,32 +973,7 @@ class RawTransportTests(unittest.TestCase):
             pass
 
         def do_GET(self):
-            RawTransportTests.seen.append(dict(self.headers))
-            if self.path == "/short":
-                # Announces 1000 bytes, sends 100 and closes.
-                self.send_response(200)
-                self.send_header("Content-Length", "1000")
-                self.end_headers()
-                self.wfile.write(b"s" * 100)
-                return
-            if self.path == "/chunk-cut":
-                self.send_response(200)
-                self.send_header("Transfer-Encoding", "chunked")
-                self.end_headers()
-                self.wfile.write(b"400\r\n" + b"c" * 100)  # a 1024 byte chunk, cut off
-                return
-            if self.path == "/not-modified":
-                self.send_response(304)
-                self.send_header("Content-Length", "500")
-                self.end_headers()
-                return
-            if self.path == "/redirect":
-                self.send_response(302)
-                self.send_header("Location", "/elsewhere")
-                self.send_header("Content-Length", "2000")
-                self.end_headers()
-                self.wfile.write(b"r" * 2000)
-                return
+            TransportTests.seen.append(dict(self.headers))
             if self.path == "/slow-head":
                 # The status line, then one header line every 0.3 s.
                 self.wfile.write(b"HTTP/1.0 200 OK\r\n")
@@ -1525,68 +1024,28 @@ class RawTransportTests(unittest.TestCase):
         # http.client would add `Accept-Encoding: identity` by itself.
         self.seen.clear()
         self.get("/", {"Host": "pinned.invalid", "User-Agent": "u", "Accept": "text/plain"},
-                 deadline=5, max_bytes=5000)
+                 deadline=5)
         self.assertEqual(self.seen, [{"Host": "pinned.invalid", "User-Agent": "u",
                                       "Accept": "text/plain"}])
         self.seen.clear()
         self.get("/", {"Host": "pinned.invalid", "Accept-Encoding": "gzip"}, deadline=5)
         self.assertEqual(self.seen[0]["Accept-Encoding"], "gzip")
 
-    def test_without_a_limit_the_behaviour_is_the_old_one(self):
+    def test_a_plain_body_comes_back_whole(self):
         response = self.get("/", deadline=5)
         self.assertEqual((len(response.body), response.truncated), (2000, False))
 
-    def test_a_body_over_the_limit_is_flagged_and_cut_at_the_limit(self):
-        response = self.get("/unknown-length", deadline=5, max_bytes=1000)
-        self.assertEqual((len(response.body), response.truncated), (1000, True))
-        response = self.get("/unknown-length", deadline=5, max_bytes=2000)
-        self.assertEqual((len(response.body), response.truncated), (2000, False))
-
-    def test_a_content_length_over_the_limit_is_flagged_without_reading(self):
-        response = self.get("/", deadline=5, max_bytes=1999)
-        self.assertEqual((response.body, response.truncated, response.status), (b"", True, 200))
-        response = self.get("/", deadline=5, max_bytes=2000)
-        self.assertEqual((len(response.body), response.truncated), (2000, False))
-
     def test_the_encoding_header_comes_through_and_the_body_is_not_unpacked(self):
-        response = self.get("/encoded", deadline=5, max_bytes=5000)
+        response = self.get("/encoded", deadline=5)
         self.assertEqual(response.headers["content-encoding"], "gzip")
         self.assertEqual(response.body, b"z" * 2000)
 
-    def test_the_limit_cannot_exceed_the_download_cap(self):
+    def test_a_body_over_the_download_cap_is_cut_and_flagged(self):
         with mock.patch.object(server, "MAX_DOWNLOAD_BYTES", 1500):
-            response = self.get("/unknown-length", deadline=5, max_bytes=5000)
+            response = self.get("/unknown-length", deadline=5)
         self.assertEqual((len(response.body), response.truncated), (1500, True))
 
-    def test_a_body_that_ends_before_its_content_length_is_an_error(self):
-        with self.assertRaises(ToolError) as caught:
-            self.get("/short", deadline=5, max_bytes=5000)
-        self.assertEqual(caught.exception.code, "fetch_failed")
-        self.assertIn("100 of 1000", caught.exception.message)
-
-    def test_a_cut_off_chunked_body_is_an_error(self):
-        with self.assertRaises(ToolError) as caught:
-            self.get("/chunk-cut", deadline=5, max_bytes=5000)
-        self.assertEqual(caught.exception.code, "fetch_failed")
-
-    def test_a_status_without_a_body_may_announce_a_length(self):
-        # 304 and the like carry a Content-Length but no body: not a short body.
-        response = self.get("/not-modified", deadline=5, max_bytes=5000)
-        self.assertEqual((response.status, response.body, response.truncated), (304, b"", False))
-
-    def test_the_body_of_a_redirect_is_not_read(self):
-        response = self.get("/redirect", deadline=5, max_bytes=5000)
-        self.assertEqual((response.status, response.body, response.truncated), (302, b"", False))
-        self.assertEqual(response.headers["location"], "/elsewhere")
-        # Without a limit (/v1/fetch) it is read as before.
-        self.assertEqual(len(self.get("/redirect", deadline=5).body), 2000)
-
-    def test_without_a_limit_a_short_body_is_left_as_it_was(self):
-        response = self.get("/short", deadline=5)
-        self.assertEqual((len(response.body), response.truncated), (100, False))
-
-    def test_a_content_length_over_the_cap_is_cut_without_a_limit_as_before(self):
-        # The early return for an announced length is only for /v1/raw.
+    def test_a_content_length_over_the_cap_is_cut(self):
         with mock.patch.object(server, "MAX_DOWNLOAD_BYTES", 1500):
             response = self.get("/", deadline=5)
         self.assertEqual((response.status, len(response.body), response.truncated),
@@ -1604,19 +1063,6 @@ class RawTransportTests(unittest.TestCase):
         started = time.monotonic()
         with mock.patch.object(server._PinnedHTTPConnection, "connect", late_connect):
             with self.assertRaises(ToolError) as caught:
-                self.get("/slow-head", deadline=1, max_bytes=5000)
-        self.assertEqual(caught.exception.code, "fetch_timeout")
-        self.assertLess(time.monotonic() - started, 2.5)
-
-    def test_the_same_holds_without_a_limit(self):
-        real_connect = server._PinnedHTTPConnection.connect
-
-        def late_connect(connection):
-            time.sleep(1.4)
-            real_connect(connection)
-        started = time.monotonic()
-        with mock.patch.object(server._PinnedHTTPConnection, "connect", late_connect):
-            with self.assertRaises(ToolError) as caught:
                 self.get("/slow-head", deadline=1)
         self.assertEqual(caught.exception.code, "fetch_timeout")
         self.assertLess(time.monotonic() - started, 2.5)
@@ -1624,16 +1070,9 @@ class RawTransportTests(unittest.TestCase):
     def test_dripped_response_headers_hit_the_deadline(self):
         started = time.monotonic()
         with self.assertRaises(ToolError) as caught:
-            self.get("/slow-head", deadline=1, max_bytes=5000)
+            self.get("/slow-head", deadline=1)
         self.assertEqual(caught.exception.code, "fetch_timeout")
         self.assertLess(time.monotonic() - started, 2.5)
-
-    def test_the_deadline_applies_with_a_limit_too(self):
-        started = time.monotonic()
-        with self.assertRaises(ToolError) as caught:
-            self.get("/drip", deadline=1, max_bytes=5000)
-        self.assertEqual(caught.exception.code, "fetch_timeout")
-        self.assertLess(time.monotonic() - started, 3)
 
 
 class PassageTests(unittest.TestCase):
@@ -2126,256 +1565,680 @@ class LookalikeMarkerTests(unittest.TestCase):
             self.assertNotIn(marker, self.REAL)
 
 
-class HTTPAPITests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        resolve = resolver({"example.com": ["93.184.216.34"]})
-        transport = FakeTransport({"https://example.com/a": page(ARTICLE)})
+# --- Signing ----------------------------------------------------------------
 
-        class TestHandler(server.Handler):
-            tools = WebTools(resolver=resolve, transport=transport, searxng_url="")
+SECRET = b"unit-test-secret-0123456789abcdef-0123456789abcdef"
+NONCE = "X-Sandbox-Nonce"
+TIME = "X-Sandbox-Time"
+AUTH = "X-Sandbox-Auth"
+AUTO = object()
+START = 1_800_000_000
 
-            def log_message(self, *args):
-                pass
+with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "test-vectors",
+                       "signing.json"), encoding="utf-8") as _handle:
+    VECTORS = json.load(_handle)
+VECTOR_SECRET = VECTORS["secret_utf8"].encode()
 
-        cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), TestHandler)
-        cls.port = cls.httpd.server_address[1]
-        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
 
-    @classmethod
-    def tearDownClass(cls):
-        cls.httpd.shutdown()
-        cls.httpd.server_close()
+def expected_request_auth(secret, method, path, nonce, stamp, body):
+    """The documented formula, written out again here rather than imported from
+    the server, so a mistake in the server's own copy shows up."""
+    text = ("sandseek-sandbox-req-v1\n" + method + "\n" + path + "\n" + nonce + "\n" + stamp
+            + "\n" + hashlib.sha256(body).hexdigest())
+    return hmac.new(secret, text.encode("utf-8"), hashlib.sha256).hexdigest()
 
-    def call(self, method, path, body=None, headers=None):
-        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
-        data = json.dumps(body).encode() if body is not None else None
-        all_headers = {"Content-Type": "application/json"}
-        all_headers.update(headers or {})
-        connection.request(method, path, body=data, headers=all_headers)
-        response = connection.getresponse()
-        payload = json.loads(response.read())
-        connection.close()
-        return response.status, payload
+
+def expected_response_auth(secret, method, path, nonce, status, body):
+    text = ("sandseek-sandbox-resp-v1\n" + method + "\n" + path + "\n" + nonce + "\n"
+            + str(status) + "\n" + hashlib.sha256(body).hexdigest())
+    return hmac.new(secret, text.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def drop(name):
+    return lambda headers: [h for h in headers if h[0].lower() != name.lower()]
+
+
+def add(name, value):
+    return lambda headers: headers + [(name, value)]
+
+
+def replace(name, value):
+    return lambda headers: [(n, value if n.lower() == name.lower() else v) for n, v in headers]
+
+
+class Clock:
+    def __init__(self, value):
+        self.value = float(value)
+
+    def __call__(self):
+        return self.value
+
+
+class Answer:
+    def __init__(self, response, body, method, path, nonce):
+        self.status = response.status
+        self.headers = {k.lower(): v for k, v in response.getheaders()}
+        self.body = body
+        self.method = method
+        self.path = path
+        self.nonce = nonce
+
+    @property
+    def signature(self):
+        return self.headers.get("x-sandbox-auth")
+
+    @property
+    def json(self):
+        return json.loads(self.body)
+
+    @property
+    def code(self):
+        return self.json["error"]["code"]
+
+
+class LiveServer(unittest.TestCase):
+    """A loopback server per test, with the secret and the clock under the
+    test's control, a fresh NonceStore, and a fake resolver and transport."""
+
+    secret = SECRET
+    handler_timeout = None
+
+    def setUp(self):
+        self.clock = Clock(START)
+        self.transport = FakeTransport({"https://example.com/a": page(ARTICLE)})
+        self.log = io.StringIO()
+        tools = WebTools(resolver=resolver({"example.com": ["93.184.216.34"]}),
+                         transport=self.transport, searxng_url="")
+        attributes = {"secret": self.secret, "tools": tools, "nonces": server.NonceStore(),
+                      "now": staticmethod(self.clock)}
+        if self.handler_timeout is not None:
+            attributes["timeout"] = self.handler_timeout
+        self.handler = type("TestHandler", (server.Handler,), {
+            **attributes, "log_message": lambda *args: None})
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), self.handler)
+        self.httpd.daemon_threads = True
+        self.port = self.httpd.server_address[1]
+        self.thread = threading.Thread(target=self.httpd.serve_forever,
+                                       kwargs={"poll_interval": 0.01}, daemon=True)
+        self.thread.start()
+        self.addCleanup(self._stop)
+
+    def _stop(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+        self.thread.join(5)
+
+    def headers_for(self, method, path, body=b"", *, nonce=None, stamp=None, secret=None,
+                    content_type=AUTO, host=AUTO, length=AUTO, sign=None, auth=None):
+        """The headers of a correctly signed request. `sign` replaces parts of
+        what is signed (method, path, body) to make a request that does not
+        match its signature."""
+        nonce = os.urandom(32).hex() if nonce is None else nonce
+        stamp = str(int(self.clock.value)) if stamp is None else str(stamp)
+        secret = self.secret if secret is None else secret
+        signed = {"method": method, "path": path, "body": body, **(sign or {})}
+        if auth is None:
+            auth = expected_request_auth(secret, signed["method"], signed["path"], nonce, stamp,
+                                         signed["body"])
+        headers = []
+        if host is AUTO:
+            host = f"127.0.0.1:{self.port}"
+        if host is not None:
+            headers.append(("Host", host))
+        headers += [(NONCE, nonce), (TIME, stamp), (AUTH, auth)]
+        if content_type is AUTO:
+            content_type = "application/json" if method == "POST" else None
+        if content_type is not None:
+            headers.append(("Content-Type", content_type))
+        if length is AUTO:
+            length = str(len(body)) if (method == "POST" or body) else None
+        if length is not None:
+            headers.append(("Content-Length", length))
+        return nonce, headers
+
+    def send_raw(self, method, path, headers, body=b"", nonce=None, timeout=5):
+        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
+        try:
+            connection.putrequest(method, path, skip_host=True, skip_accept_encoding=True)
+            for name, value in headers:
+                connection.putheader(name, value)
+            connection.endheaders(body or None)
+            response = connection.getresponse()
+            return Answer(response, response.read(), method, path, nonce)
+        finally:
+            connection.close()
+
+    def exchange(self, method, path, body=b"", *, edit=None, timeout=5, **options):
+        nonce, headers = self.headers_for(method, path, body, **options)
+        if edit is not None:
+            headers = edit(headers)
+        return self.send_raw(method, path, headers, body, nonce=nonce, timeout=timeout)
+
+    def post(self, path, payload, **options):
+        return self.exchange("POST", path, json.dumps(payload).encode(), **options)
+
+    def assertSigned(self, answer, body=None, nonce=None):
+        expected = expected_response_auth(
+            self.secret, answer.method, answer.path, answer.nonce if nonce is None else nonce,
+            answer.status, answer.body if body is None else body)
+        self.assertEqual(answer.signature, expected)
+
+    def assertError(self, answer, status, code, signed=True):
+        self.assertEqual((answer.status, answer.code), (status, code), answer.body)
+        if signed:
+            self.assertSigned(answer)
+        else:
+            self.assertIsNone(answer.signature)
+
+
+class VectorTests(unittest.TestCase):
+    def test_the_vector_file_has_the_expected_shape(self):
+        self.assertGreaterEqual(len(VECTORS["request"]), 3)
+        self.assertGreaterEqual(len(VECTORS["response"]), 3)
+        self.assertGreaterEqual(len(VECTOR_SECRET), server.MIN_SECRET_BYTES)
+
+    def test_request_vectors(self):
+        for vector in VECTORS["request"]:
+            with self.subTest(vector["name"]):
+                body = vector["body_utf8"].encode("utf-8")
+                self.assertEqual(hashlib.sha256(body).hexdigest(), vector["body_sha256"])
+                args = (VECTOR_SECRET, vector["method"], vector["path"], vector["nonce"],
+                        vector["time"], body)
+                self.assertEqual(server.request_signature(*args), vector["expected_auth"])
+                self.assertEqual(expected_request_auth(*args), vector["expected_auth"])
+
+    def test_response_vectors(self):
+        for vector in VECTORS["response"]:
+            with self.subTest(vector["name"]):
+                body = vector["body_utf8"].encode("utf-8")
+                self.assertEqual(hashlib.sha256(body).hexdigest(), vector["body_sha256"])
+                args = (VECTOR_SECRET, vector["method"], vector["path"], vector["nonce"],
+                        vector["status"], body)
+                self.assertEqual(server.response_signature(*args), vector["expected_auth"])
+                self.assertEqual(expected_response_auth(*args), vector["expected_auth"])
+
+    def test_every_field_of_a_vector_changes_the_signature(self):
+        vector = VECTORS["request"][1]
+        body = vector["body_utf8"].encode()
+        base = [VECTOR_SECRET, vector["method"], vector["path"], vector["nonce"], vector["time"],
+                body]
+        for index, other in ((0, b"x" * 41), (1, "GET"), (2, "/v1/fetch"), (3, "00" * 32),
+                             (4, "1786000043"), (5, body + b" ")):
+            args = list(base)
+            args[index] = other
+            self.assertNotEqual(server.request_signature(*args), vector["expected_auth"], index)
+
+    def test_the_verify_script_uses_the_same_formulas(self):
+        script = _load_verify_script()
+        for vector in VECTORS["request"]:
+            self.assertEqual(
+                script.request_auth(VECTOR_SECRET, vector["method"], vector["path"],
+                                    vector["nonce"], vector["time"],
+                                    vector["body_utf8"].encode()), vector["expected_auth"])
+        for vector in VECTORS["response"]:
+            self.assertEqual(
+                script.response_auth(VECTOR_SECRET, vector["method"], vector["path"],
+                                     vector["nonce"], vector["status"],
+                                     vector["body_utf8"].encode()), vector["expected_auth"])
+
+
+class VectorServerTests(LiveServer):
+    secret = VECTOR_SECRET
+
+    def test_the_server_accepts_each_vector_request_exactly_as_written(self):
+        # expected_auth comes straight from the JSON file: no code computes it.
+        for vector in VECTORS["request"]:
+            with self.subTest(vector["name"]):
+                self.clock.value = int(vector["time"])
+                answer = self.exchange(
+                    vector["method"], vector["path"], vector["body_utf8"].encode("utf-8"),
+                    nonce=vector["nonce"], stamp=vector["time"], auth=vector["expected_auth"])
+                # The tools behind it are fakes: only the signature check is
+                # being tested, and a refused request would be a 401.
+                self.assertNotEqual(answer.status, 401, answer.body)
+                self.assertSigned(answer)
+
+
+class LoadSecretTests(unittest.TestCase):
+    def setUp(self):
+        self.folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.folder, ignore_errors=True)
+
+    def write(self, content, name="secret"):
+        path = os.path.join(self.folder, name)
+        with open(path, "wb") as handle:
+            handle.write(content)
+        return path
+
+    def refused(self, path):
+        with self.assertRaises(SystemExit) as caught:
+            server.load_secret(path)
+        return str(caught.exception.code)
+
+    def test_a_secret_is_read_whole(self):
+        self.assertEqual(server.load_secret(self.write(SECRET)), SECRET)
+
+    def test_one_trailing_newline_is_removed(self):
+        self.assertEqual(server.load_secret(self.write(SECRET + b"\n")), SECRET)
+        self.assertEqual(server.load_secret(self.write(SECRET + b"\n\n", "two")), SECRET + b"\n")
+
+    def test_a_missing_file_stops_the_start(self):
+        self.assertIn("cannot open", self.refused(os.path.join(self.folder, "nothing")))
+
+    def test_a_symlink_is_refused(self):
+        target = self.write(SECRET)
+        link = os.path.join(self.folder, "link")
+        os.symlink(target, link)
+        self.assertIn("cannot open", self.refused(link))
+
+    def test_a_folder_or_other_non_regular_file_is_refused(self):
+        self.assertIn("not a regular file", self.refused(self.folder))
+        self.assertIn("not a regular file", self.refused("/dev/null"))
+
+    def test_a_short_secret_is_refused_without_printing_it(self):
+        short = b"s" * (server.MIN_SECRET_BYTES - 1)
+        message = self.refused(self.write(short))
+        self.assertIn("shorter than", message)
+        self.assertNotIn(short.decode(), message)
+        self.assertIn("shorter than", self.refused(self.write(b"", "empty")))
+
+    def test_a_long_secret_is_refused_without_printing_it(self):
+        long = b"L" * (server.MAX_SECRET_BYTES + 1)
+        message = self.refused(self.write(long))
+        self.assertIn("longer than", message)
+        self.assertNotIn(long.decode(), message)
+        self.assertEqual(len(server.load_secret(self.write(b"L" * server.MAX_SECRET_BYTES, "max"))),
+                         server.MAX_SECRET_BYTES)
+
+    def test_main_reads_the_secret_before_dropping_privileges_and_needs_it(self):
+        order = []
+        with mock.patch.object(server, "load_secret",
+                               side_effect=lambda path: order.append(("load", path)) or SECRET), \
+                mock.patch.object(server, "drop_privileges",
+                                  side_effect=lambda: order.append(("drop",))), \
+                mock.patch.object(server, "ThreadingHTTPServer", side_effect=SystemExit(0)), \
+                mock.patch.object(server.Handler, "secret", b""), \
+                mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(server.SECRET_FILE_ENV, None)
+            with self.assertRaises(SystemExit):
+                server.main()
+            self.assertEqual(server.Handler.secret, SECRET)
+        self.assertEqual(order, [("load", server.DEFAULT_SECRET_FILE), ("drop",)])
+
+    def test_main_does_not_start_without_a_secret(self):
+        with mock.patch.dict(os.environ, {server.SECRET_FILE_ENV:
+                                          os.path.join(self.folder, "missing")}), \
+                mock.patch.object(server, "ThreadingHTTPServer") as listener:
+            with self.assertRaises(SystemExit) as caught:
+                server.main()
+        self.assertIn("cannot open", str(caught.exception.code))
+        listener.assert_not_called()
+
+    def test_the_secret_path_and_the_old_environment_variable(self):
+        self.assertEqual(server.DEFAULT_SECRET_FILE, "/run/sandseek-sandbox/secret")
+        self.assertFalse(hasattr(server, "load_signing_secret"))
+        self.assertFalse(hasattr(server, "SIGNING_SECRET"))
+
+
+class SignedRoundTripTests(LiveServer):
+    def test_health(self):
+        answer = self.exchange("GET", "/health")
+        self.assertEqual(answer.status, 200)
+        self.assertSigned(answer)
+        self.assertEqual(answer.json, {"status": "ok", "api": 1, "passages": True,
+                                       "pdf": server.PdfReader is not None})
+        self.assertEqual(answer.headers["content-type"], "application/json")
+        self.assertEqual(answer.headers["cache-control"], "no-store")
+
+    def test_fetch_and_search_are_signed(self):
+        answer = self.post("/v1/fetch", {"url": "https://example.com/a"})
+        self.assertEqual(answer.status, 200, answer.body)
+        self.assertSigned(answer)
+        self.assertIn("streams experts", answer.json["text"])
+        answer = self.post("/v1/search", {"query": ""})
+        self.assertEqual(answer.status, 422)
+        self.assertSigned(answer)
+
+    def test_fetch_passages_round_trip(self):
+        answer = self.post("/v1/fetch", {
+            "url": "https://example.com/a", "passages": True, "query": "cache bounded"})
+        self.assertEqual(answer.status, 200)
+        self.assertEqual(answer.json["mode"], "passages")
+        self.assertIn("bounded", answer.json["text"])
+        answer = self.post("/v1/fetch", {"url": "https://example.com/a", "passages": "yes"})
+        self.assertEqual(answer.status, 422)
+
+    def test_tool_errors_are_signed_json(self):
+        answer = self.post("/v1/fetch", {"url": "file:///etc/passwd"})
+        self.assertError(answer, 422, "invalid_url")
+
+    def test_a_non_ascii_body_is_signed_over_its_bytes(self):
+        answer = self.post("/v1/fetch", {"url": "https://example.com/café"})
+        self.assertSigned(answer)
+        self.assertNotEqual(answer.status, 401)
+
+    def test_uppercase_hex_in_the_auth_header_is_accepted(self):
+        nonce, headers = self.headers_for("GET", "/health")
+        headers = [(n, v.upper() if n == AUTH else v) for n, v in headers]
+        answer = self.send_raw("GET", "/health", headers, nonce=nonce)
+        self.assertEqual(answer.status, 200)
+        self.assertSigned(answer)
+
+    def test_a_get_with_a_body_is_signed_over_that_body(self):
+        self.assertEqual(self.exchange("GET", "/health", b"abc").status, 200)
+        bad = self.exchange("GET", "/health", b"abc", sign={"body": b""})
+        self.assertError(bad, 401, "unauthorized")
+
+    def test_the_verify_script_accepts_a_live_answer(self):
+        self.clock.value = time.time()
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "Scripts",
+                              "verify_sandbox_signature.py")
+        with tempfile.TemporaryDirectory() as folder:
+            secret = os.path.join(folder, "secret")
+            with open(secret, "wb") as handle:
+                handle.write(self.secret + b"\n")
+            done = subprocess.run([sys.executable, "-I", script, secret, str(self.port)],
+                                  capture_output=True, text=True, timeout=30)
+            self.assertEqual((done.returncode, done.stdout.strip()),
+                             (0, "status 200 | signature: present | matches: True"))
+            with open(secret, "wb") as handle:
+                handle.write(b"w" * 40)
+            done = subprocess.run([sys.executable, "-I", script, secret, str(self.port)],
+                                  capture_output=True, text=True, timeout=30)
+            self.assertEqual(done.returncode, 1)
+            self.assertNotIn("w" * 40, done.stdout + done.stderr)
+
+
+class AuthenticationTests(LiveServer):
+    def test_an_unsigned_request_gets_an_unsigned_401(self):
+        nonce, headers = self.headers_for("GET", "/health")
+        answer = self.send_raw("GET", "/health", headers[:1], nonce=nonce)
+        self.assertError(answer, 401, "unauthorized", signed=False)
+        answer = self.send_raw("POST", "/v1/fetch", [
+            ("Host", f"127.0.0.1:{self.port}"), ("Content-Type", "application/json"),
+            ("Content-Length", "2")], b"{}")
+        self.assertError(answer, 401, "unauthorized", signed=False)
+
+    def test_a_missing_duplicated_or_malformed_nonce_gets_an_unsigned_401(self):
+        cases = [("missing", drop(NONCE)), ("duplicated", add(NONCE, "ef" * 32))]
+        for value in ("", "ab" * 31, "a" * 63, "a" * 65, "g" + "a" * 63, "ab" * 32 + "!",
+                      "0x" + "a" * 62):
+            cases.append((f"malformed {value!r}", replace(NONCE, value)))
+        for name, edit in cases:
+            with self.subTest(name):
+                self.assertError(self.exchange("GET", "/health", edit=edit),
+                                 401, "unauthorized", signed=False)
+
+    def test_a_missing_duplicated_or_malformed_time_gets_a_signed_401(self):
+        cases = [("missing", drop(TIME)), ("duplicated", add(TIME, str(START)))]
+        for value in ("", "abc", "-5", "1.5", "0x10", "1234567890123", "12 34"):
+            cases.append((f"malformed {value!r}", replace(TIME, value)))
+        for name, edit in cases:
+            with self.subTest(name):
+                self.assertError(self.exchange("GET", "/health", edit=edit), 401, "unauthorized")
+
+    def test_a_missing_duplicated_or_malformed_auth_gets_a_signed_401(self):
+        cases = [("missing", drop(AUTH)), ("duplicated", add(AUTH, "ab" * 32))]
+        for value in ("", "ab" * 31, "a" * 63, "a" * 65, "z" * 64, "ab" * 32 + "!"):
+            cases.append((f"malformed {value!r}", replace(AUTH, value)))
+        for name, edit in cases:
+            with self.subTest(name):
+                self.assertError(self.exchange("GET", "/health", edit=edit), 401, "unauthorized")
+
+    def test_a_wrong_secret_or_one_differing_in_a_byte(self):
+        self.assertError(self.exchange("GET", "/health", secret=b"w" * 40), 401, "unauthorized")
+        self.assertError(self.exchange("GET", "/health", secret=SECRET[:-1] + b"X"),
+                         401, "unauthorized")
+
+    def test_a_body_changed_after_signing(self):
+        signed_body = json.dumps({"url": "https://example.com/a"}).encode()
+        sent_body = json.dumps({"url": "https://example.org/"}).encode()
+        answer = self.exchange("POST", "/v1/fetch", sent_body, sign={"body": signed_body})
+        self.assertError(answer, 401, "unauthorized")
+        self.assertEqual(self.transport.calls, [])
+
+    def test_a_method_or_path_changed_after_signing(self):
+        body = json.dumps({"url": "https://example.com/a"}).encode()
+        for method, path, sign, payload in (
+                ("GET", "/health", {"method": "POST"}, b""),
+                ("POST", "/v1/fetch", {"method": "GET"}, body),
+                ("GET", "/health", {"path": "/v1/fetch"}, b""),
+                ("POST", "/v1/fetch", {"path": "/v1/search"}, body)):
+            with self.subTest(method=method, path=path, sign=sign):
+                self.assertError(self.exchange(method, path, payload, sign=sign),
+                                 401, "unauthorized")
+        self.assertEqual(self.transport.calls, [])
+
+    def test_a_nonce_or_time_changed_after_signing(self):
+        nonce, headers = self.headers_for("GET", "/health")
+        other = "12" * 32
+        answer = self.send_raw("GET", "/health", replace(NONCE, other)(headers), nonce=other)
+        self.assertError(answer, 401, "unauthorized")
+        nonce, headers = self.headers_for("GET", "/health")
+        answer = self.send_raw("GET", "/health", replace(TIME, str(START + 1))(headers),
+                               nonce=nonce)
+        self.assertError(answer, 401, "unauthorized")
+
+    def test_time_more_than_60_seconds_off_is_stale(self):
+        for offset in (61, -61, 3600, -3600):
+            with self.subTest(offset=offset):
+                self.assertError(self.exchange("GET", "/health", stamp=START + offset),
+                                 401, "stale_request")
+
+    def test_time_up_to_60_seconds_off_is_accepted(self):
+        for offset in (60, -60, 59, -59, 0):
+            with self.subTest(offset=offset):
+                answer = self.exchange("GET", "/health", stamp=START + offset)
+                self.assertEqual(answer.status, 200)
+                self.assertSigned(answer)
+
+    def test_the_largest_time_value_is_stale_not_an_error(self):
+        self.assertError(self.exchange("GET", "/health", stamp="999999999999"),
+                         401, "stale_request")
+
+    def test_a_stale_request_does_not_use_up_its_nonce(self):
+        nonce = "5a" * 32
+        self.assertError(self.exchange("GET", "/health", nonce=nonce, stamp=START - 100),
+                         401, "stale_request")
+        self.assertEqual(self.handler.nonces.seen, {})
+        self.assertEqual(self.exchange("GET", "/health", nonce=nonce).status, 200)
+
+    def test_a_request_with_a_wrong_signature_does_not_use_up_its_nonce(self):
+        nonce = "6b" * 32
+        self.assertError(self.exchange("GET", "/health", nonce=nonce, secret=b"w" * 40),
+                         401, "unauthorized")
+        self.assertEqual(self.handler.nonces.seen, {})
+        self.assertEqual(self.exchange("GET", "/health", nonce=nonce).status, 200)
+
+    def test_the_same_request_again_is_a_replay(self):
+        nonce, headers = self.headers_for("GET", "/health")
+        first = self.send_raw("GET", "/health", headers, nonce=nonce)
+        second = self.send_raw("GET", "/health", headers, nonce=nonce)
+        self.assertEqual(first.status, 200)
+        self.assertError(second, 401, "replayed_request")
+
+    def test_a_replayed_post_does_not_run_the_tool_twice(self):
+        body = json.dumps({"url": "https://example.com/a"}).encode()
+        nonce, headers = self.headers_for("POST", "/v1/fetch", body)
+        self.assertEqual(self.send_raw("POST", "/v1/fetch", headers, body, nonce=nonce).status, 200)
+        calls = len(self.transport.calls)
+        self.assertError(self.send_raw("POST", "/v1/fetch", headers, body, nonce=nonce),
+                         401, "replayed_request")
+        self.assertEqual(len(self.transport.calls), calls)
+
+    def test_a_new_signature_over_a_used_nonce_is_a_replay(self):
+        nonce = "7c" * 32
+        self.assertEqual(self.exchange("GET", "/health", nonce=nonce).status, 200)
+        self.clock.value += 5
+        self.assertError(self.exchange("GET", "/health", nonce=nonce), 401, "replayed_request")
+
+    def test_a_nonce_in_the_other_letter_case_is_the_same_nonce(self):
+        nonce = "ab" * 31 + "cd"
+        self.assertEqual(self.exchange("GET", "/health", nonce=nonce).status, 200)
+        self.assertError(self.exchange("GET", "/health", nonce=nonce.upper()),
+                         401, "replayed_request")
+
+    def test_a_nonce_is_forgotten_after_the_window(self):
+        nonce = "9e" * 32
+        self.assertEqual(self.exchange("GET", "/health", nonce=nonce).status, 200)
+        self.clock.value += 30
+        self.assertError(self.exchange("GET", "/health", nonce=nonce), 401, "replayed_request")
+        self.clock.value = START + 62
+        answer = self.exchange("GET", "/health", nonce=nonce)
+        self.assertEqual(answer.status, 200)
+        self.assertSigned(answer)
+
+    def test_a_full_nonce_store_answers_503_busy_and_recovers(self):
+        self.handler.nonces = server.NonceStore(capacity=3)
+        for _ in range(3):
+            self.assertEqual(self.exchange("GET", "/health").status, 200)
+        self.assertError(self.exchange("GET", "/health"), 503, "busy")
+        self.assertEqual(len(self.handler.nonces.seen), 3)
+        self.clock.value += 62
+        self.assertEqual(self.exchange("GET", "/health", stamp=START + 62).status, 200)
+
+    def test_a_caller_without_the_secret_cannot_fill_the_store(self):
+        self.handler.nonces = server.NonceStore(capacity=3)
+        for _ in range(10):
+            self.exchange("GET", "/health", secret=b"w" * 40)
+        self.assertEqual(self.handler.nonces.seen, {})
+        self.assertEqual(self.exchange("GET", "/health").status, 200)
+
+
+class NonceStoreTests(unittest.TestCase):
+    def test_add_remembers_and_expires(self):
+        store = server.NonceStore(window=60, capacity=10)
+        self.assertTrue(store.add("aa" * 32, 1000, 1000.0))
+        self.assertFalse(store.add("AA" * 32, 1000, 1001.0))
+        self.assertTrue(store.add("aa" * 32, 1000, 1062.0))
+
+    def test_capacity(self):
+        store = server.NonceStore(window=60, capacity=2)
+        self.assertTrue(store.add("01" * 32, 1000, 1000.0))
+        self.assertTrue(store.add("02" * 32, 1000, 1000.0))
+        with self.assertRaises(ToolError) as caught:
+            store.add("03" * 32, 1000, 1000.5)
+        self.assertEqual((caught.exception.status, caught.exception.code), (503, "busy"))
+        self.assertFalse(store.add("01" * 32, 1000, 1000.5))
+
+
+class EveryAnswerIsSignedTests(LiveServer):
+    def test_errors_given_at_every_stage_are_signed(self):
+        body = json.dumps({"url": "https://example.com/a"}).encode()
+        cases = [
+            ("not found", self.exchange("GET", "/nothing"), 404, "not_found"),
+            ("unknown POST path", self.post("/v1/shell", {}), 404, "not_found"),
+            ("raw is gone", self.post("/v1/raw", {"url": "https://example.com/a"}),
+             404, "not_found"),
+            ("wrong content type", self.exchange("POST", "/v1/fetch", body,
+                                                 content_type="text/plain"), 415, "invalid_request"),
+            ("no body", self.exchange("POST", "/v1/fetch", b""), 413, "invalid_request"),
+            ("not JSON", self.exchange("POST", "/v1/fetch", b"{nope"), 400, "invalid_request"),
+            ("not an object", self.exchange("POST", "/v1/fetch", b"[1]"), 400, "invalid_request"),
+            ("bad URL", self.post("/v1/fetch", {"url": "ftp://example.com/"}), 422, "invalid_url"),
+            ("host", self.exchange("GET", "/health", host="attacker.example:9100"),
+             403, "forbidden_host"),
+        ]
+        for name, answer, status, code in cases:
+            with self.subTest(name):
+                self.assertError(answer, status, code)
+
+    def test_other_methods_are_signed_405_after_the_checks(self):
+        for method in ("PUT", "DELETE", "PATCH", "OPTIONS"):
+            with self.subTest(method):
+                answer = self.exchange(method, "/health")
+                self.assertError(answer, 405, "method_not_allowed")
+                # Not signed correctly: 401, not 405.
+                self.assertError(self.exchange(method, "/health", secret=b"w" * 40),
+                                 401, "unauthorized")
+
+    def test_head_is_a_signed_405_without_a_body(self):
+        answer = self.exchange("HEAD", "/health")
+        self.assertEqual(answer.status, 405)
+        self.assertEqual(answer.body, b"")
+        # The signature covers the body that would have been sent.
+        data = json.dumps({"error": {"message": "method not allowed",
+                                     "code": "method_not_allowed"}}).encode()
+        self.assertEqual(answer.signature, expected_response_auth(
+            self.secret, "HEAD", "/health", answer.nonce, 405, data))
+        unsigned = self.send_raw("HEAD", "/health", [("Host", f"127.0.0.1:{self.port}")])
+        self.assertEqual(unsigned.status, 401)
+
+    def test_the_host_check_comes_before_the_signature_check(self):
+        answer = self.exchange("GET", "/health", host="attacker.example", secret=b"w" * 40)
+        self.assertError(answer, 403, "forbidden_host")
+        answer = self.send_raw("GET", "/health", [("Host", "attacker.example")])
+        self.assertError(answer, 403, "forbidden_host", signed=False)
+
+    def test_an_answer_is_signed_for_its_own_method_path_and_nonce(self):
+        first = self.exchange("GET", "/health")
+        second = self.exchange("GET", "/health")
+        self.assertNotEqual(first.signature, second.signature)
+        self.assertNotEqual(first.signature, expected_response_auth(
+            self.secret, "POST", "/health", first.nonce, first.status, first.body))
+        self.assertNotEqual(first.signature, expected_response_auth(
+            self.secret, "GET", "/v1/fetch", first.nonce, first.status, first.body))
+        self.assertNotEqual(first.signature, expected_response_auth(
+            self.secret, "GET", "/health", second.nonce, first.status, first.body))
+        self.assertNotEqual(first.signature, expected_response_auth(
+            self.secret, "GET", "/health", first.nonce, 201, first.body))
+        self.assertNotEqual(first.signature, expected_response_auth(
+            self.secret, "GET", "/health", first.nonce, first.status, first.body + b" "))
+
+    def test_the_signature_does_not_depend_on_the_request_body(self):
+        # Two different requests with the same nonce are refused as replays, so
+        # compare the formula directly: only method, path, nonce, status, body.
+        a = server.response_signature(SECRET, "POST", "/v1/fetch", "ab" * 32, 200, b"{}")
+        self.assertEqual(a, expected_response_auth(SECRET, "POST", "/v1/fetch", "ab" * 32, 200, b"{}"))
+
+    def test_a_content_length_that_is_not_a_number_or_too_large(self):
+        for value, status in (("abc", 400), ("-1", 400), ("1" * 30, 413),
+                              (str(server.MAX_REQUEST_BYTES + 1), 413)):
+            with self.subTest(value):
+                nonce, headers = self.headers_for("POST", "/v1/fetch", b"{}", length=value)
+                answer = self.send_raw("POST", "/v1/fetch", headers, b"", nonce=nonce)
+                self.assertEqual(answer.status, status)
+                self.assertSigned(answer)
+
+
+class SilentClientTests(LiveServer):
+    handler_timeout = 0.5
+
+    def test_a_body_that_stops_short_gets_a_signed_408(self):
+        body = b'{"url": "https://example.com/a"}'
+        nonce, headers = self.headers_for("POST", "/v1/fetch", body, length=str(len(body) + 20))
+        started = time.monotonic()
+        with socket.create_connection(("127.0.0.1", self.port), timeout=5) as client:
+            head = "POST /v1/fetch HTTP/1.1\r\n" + "".join(f"{n}: {v}\r\n" for n, v in headers)
+            client.sendall(head.encode() + b"\r\n" + body)
+            data = b""
+            while True:
+                chunk = client.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+        self.assertLess(time.monotonic() - started, 4)
+        head, _, answer = data.partition(b"\r\n\r\n")
+        self.assertTrue(head.startswith(b"HTTP/1.0 408"), head)
+        auth = [line.split(b": ", 1)[1].decode() for line in head.split(b"\r\n")
+                if line.lower().startswith(b"x-sandbox-auth")]
+        self.assertEqual(auth, [expected_response_auth(self.secret, "POST", "/v1/fetch", nonce,
+                                                       408, answer)])
+        self.assertEqual(json.loads(answer)["error"]["code"], "request_timeout")
 
     def test_a_silent_client_is_dropped_after_the_request_timeout(self):
         self.assertEqual(server.Handler.timeout, server.REQUEST_TIMEOUT)
         self.assertTrue(0 < server.REQUEST_TIMEOUT <= 60)
-
-        class QuickHandler(server.Handler):
-            timeout = 0.5
-
-            def log_message(self, *args):
-                pass
-
-        httpd = ThreadingHTTPServer(("127.0.0.1", 0), QuickHandler)
-        self.addCleanup(httpd.server_close)
-        threading.Thread(target=httpd.serve_forever, daemon=True).start()
-        self.addCleanup(httpd.shutdown)
-        port = httpd.server_address[1]
         for sent in (b"", b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n",
                      b"POST /v1/fetch HTTP/1.1\r\nHost: 127.0.0.1\r\n"
                      b"Content-Type: application/json\r\nContent-Length: 50\r\n\r\n{"):
-            with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
+            with socket.create_connection(("127.0.0.1", self.port), timeout=5) as client:
                 started = time.monotonic()
                 client.sendall(sent)
-                # The server gives the connection up; it does not wait for the rest.
                 answer = client.recv(1024)
                 # Nothing for an unfinished head; 408 for a body that stops short.
                 self.assertTrue(answer == b"" or answer.startswith(b"HTTP/1.0 408"), answer)
                 self.assertLess(time.monotonic() - started, 4)
-
-    def test_health(self):
-        self.assertEqual(self.call("GET", "/health"),
-                         (200, {"status": "ok", "passages": True, "pdf": server.PdfReader is not None,
-                                "raw": True, "signed": False}))
-
-    def test_fetch_passages_round_trip(self):
-        status, payload = self.call("POST", "/v1/fetch", {
-            "url": "https://example.com/a", "passages": True, "query": "cache bounded"})
-        self.assertEqual(status, 200)
-        self.assertEqual(payload["mode"], "passages")
-        self.assertIn("bounded", payload["text"])
-        status, payload = self.call("POST", "/v1/fetch", {
-            "url": "https://example.com/a", "passages": "yes"})
-        self.assertEqual(status, 422)
-
-    def test_fetch_round_trip(self):
-        status, payload = self.call("POST", "/v1/fetch", {"url": "https://example.com/a"})
-        self.assertEqual(status, 200)
-        self.assertIn("streams experts", payload["text"])
-
-    def test_tool_errors_are_json(self):
-        status, payload = self.call("POST", "/v1/fetch", {"url": "file:///etc/passwd"})
-        self.assertEqual(status, 422)
-        self.assertEqual(payload["error"]["code"], "invalid_url")
-
-    def test_rebinding_host_is_refused(self):
-        status, payload = self.call("POST", "/v1/fetch", {"url": "https://example.com/a"},
-                                    {"Host": "attacker.example:9100"})
-        self.assertEqual(status, 403)
-        self.assertEqual(payload["error"]["code"], "forbidden_host")
-
-    def test_simple_cross_origin_post_is_refused(self):
-        status, _ = self.call("POST", "/v1/fetch", {"url": "https://example.com/a"},
-                              {"Content-Type": "text/plain"})
-        self.assertEqual(status, 415)
-
-    def test_unknown_path(self):
-        self.assertEqual(self.call("POST", "/v1/shell", {})[0], 404)
-
-
-class RawAPITests(unittest.TestCase):
-    """POST /v1/raw over HTTP, with the same Host, Content-Type and size rules
-    as the other endpoints."""
-
-    @classmethod
-    def setUpClass(cls):
-        table = resolver({"example.com": ["93.184.216.34"], "internal.example": ["10.1.2.3"],
-                          "other.example": ["93.184.216.35"]})
-
-        def resolve(host, port):
-            try:
-                return table(host, port)
-            except ToolError:
-                return _numeric_only_resolver(host, port)
-        cls.body = b"\x00\xff<p>raw</p>\n"
-        cls.transport = FakeTransport({
-            "https://example.com/a": Response(
-                200, {"content-type": "text/html", "content-encoding": "gzip"}, cls.body),
-            "https://example.com/missing": page("gone", status=404),
-            "https://example.com/big": page("x" * 100),
-            "https://example.com/hop": redirect("http://other.example/"),
-            "https://example.com/slow": ToolError("example.com took longer than 1 s",
-                                                  "fetch_timeout", 504),
-            "https://example.com/page": page(ARTICLE),
-        })
-
-        class TestHandler(server.Handler):
-            tools = WebTools(resolver=resolve, transport=cls.transport, searxng_url="")
-
-            def log_message(self, *args):
-                pass
-
-        cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), TestHandler)
-        cls.port = cls.httpd.server_address[1]
-        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.httpd.shutdown()
-        cls.httpd.server_close()
-
-    def call(self, method, path, body=None, headers=None):
-        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
-        data = json.dumps(body).encode() if body is not None else None
-        all_headers = {"Content-Type": "application/json"}
-        all_headers.update(headers or {})
-        connection.request(method, path, body=data, headers=all_headers)
-        response = connection.getresponse()
-        payload = json.loads(response.read())
-        connection.close()
-        return response.status, payload
-
-    def raw(self, **request):
-        return self.call("POST", "/v1/raw", request)
-
-    def test_health_says_raw_is_there(self):
-        status, payload = self.call("GET", "/health")
-        self.assertEqual(status, 200)
-        self.assertIs(payload["raw"], True)
-        self.assertEqual(payload, {"status": "ok", "passages": True, "pdf": server.PdfReader is not None,
-                                   "raw": True, "signed": False})
-
-    def test_a_page_round_trip(self):
-        status, payload = self.raw(url="https://example.com/a", max_bytes=1000,
-                                   timeout_seconds=5, accept="text/html")
-        self.assertEqual(status, 200)
-        self.assertEqual(payload, {
-            "final_url": "https://example.com/a", "status": 200,
-            "content_type": "text/html", "content_encoding": "gzip",
-            "body_base64": base64.b64encode(self.body).decode()})
-
-    def test_content_encoding_is_null_when_the_site_sent_none(self):
-        status, payload = self.raw(url="https://example.com/missing")
-        self.assertEqual(status, 200)
-        self.assertIn("content_encoding", payload)
-        self.assertIsNone(payload["content_encoding"])
-
-    def test_only_a_url_is_needed(self):
-        status, payload = self.raw(url="https://example.com/a")
-        self.assertEqual((status, payload["status"]), (200, 200))
-
-    def test_a_404_is_http_200_with_status_404(self):
-        status, payload = self.raw(url="https://example.com/missing")
-        self.assertEqual((status, payload["status"]), (200, 404))
-        self.assertEqual(base64.b64decode(payload["body_base64"]), b"gone")
-
-    def test_failures_are_json_errors_with_a_code_and_a_message(self):
-        for request, http_status, code in [
-                ({"url": "http://internal.example/"}, 403, "private_address"),
-                ({"url": "http://192.168.1.1/"}, 403, "private_address"),
-                ({"url": "http://169.254.169.254/"}, 403, "private_address"),
-                ({"url": "ftp://example.com/"}, 422, "unsupported_scheme"),
-                ({"url": "https://example.com:8443/"}, 422, "blocked_port"),
-                ({"url": "https://example.com/big", "max_bytes": 10}, 502, "oversized"),
-                ({"url": "https://example.com/hop"}, 502, "insecure_redirect"),
-                ({"url": "https://example.com/slow"}, 504, "timed_out"),
-                ({"url": "not a url"}, 422, "invalid_url"),
-                ({"url": "https://gone.example/"}, 502, "dns_error"),
-                ({"url": "https://example.com/a", "max_bytes": 0}, 422, "invalid_argument"),
-                ({"url": "https://example.com/a", "timeout_seconds": 61}, 422, "invalid_argument"),
-                ({"url": "https://example.com/a", "accept": "a\r\nb: c"}, 422, "invalid_argument"),
-                ({}, 422, "invalid_url")]:
-            status, payload = self.raw(**request)
-            self.assertEqual((status, payload["error"]["code"]), (http_status, code), request)
-            self.assertEqual(set(payload), {"error"})
-            self.assertEqual(set(payload["error"]), {"code", "message"})
-            self.assertLessEqual(len(payload["error"]["message"]), 200)
-
-    def test_a_rebinding_host_is_refused(self):
-        status, payload = self.call("POST", "/v1/raw", {"url": "https://example.com/a"},
-                                    {"Host": "attacker.example:9100"})
-        self.assertEqual((status, payload["error"]["code"]), (403, "forbidden_host"))
-        status, payload = self.call("POST", "/v1/raw", {"url": "https://example.com/a"},
-                                    {"Host": "localhost:9100"})
-        self.assertEqual(status, 200)
-
-    def test_a_cross_origin_style_post_is_refused(self):
-        calls = len(self.transport.calls)
-        status, payload = self.call("POST", "/v1/raw", {"url": "https://example.com/a"},
-                                    {"Content-Type": "text/plain"})
-        self.assertEqual((status, payload["error"]["code"]), (415, "invalid_request"))
-        self.assertEqual(len(self.transport.calls), calls)
-
-    def test_the_request_size_limit_applies(self):
-        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
-        connection.putrequest("POST", "/v1/raw")
-        connection.putheader("Content-Type", "application/json")
-        connection.putheader("Content-Length", str(server.MAX_REQUEST_BYTES + 1))
-        connection.endheaders()
-        response = connection.getresponse()
-        self.assertEqual(response.status, 413)
-        connection.close()
-
-    def test_a_request_that_is_not_a_json_object_is_refused(self):
-        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
-        connection.request("POST", "/v1/raw", body=b'["https://example.com/a"]',
-                           headers={"Content-Type": "application/json"})
-        self.assertEqual(connection.getresponse().status, 400)
-        connection.close()
-
-    def test_fetch_is_not_changed_by_raw(self):
-        status, payload = self.call("POST", "/v1/fetch", {"url": "https://example.com/page"})
-        self.assertEqual(status, 200)
-        self.assertEqual(payload["title"], "Bounded streaming")
-        self.assertNotIn("body_base64", payload)
-        status, payload = self.call("POST", "/v1/fetch", {"url": "http://internal.example/"})
-        self.assertEqual((status, payload["error"]["code"]), (403, "blocked_address"))
-        status, payload = self.call("POST", "/v1/fetch", {"url": "ftp://example.com/"})
-        self.assertEqual((status, payload["error"]["code"]), (422, "invalid_url"))
-        status, payload = self.call("POST", "/v1/fetch", {"url": "https://example.com/slow"})
-        self.assertEqual((status, payload["error"]["code"]), (504, "fetch_timeout"))
 
 
 def _load_address_check():
@@ -2385,6 +2248,16 @@ def _load_address_check():
     spec = importlib.util.spec_from_file_location("research_address_check", path)
     module = importlib.util.module_from_spec(spec)
     sys.modules["research_address_check"] = module  # dataclasses look the module up
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_verify_script():
+    """Scripts/verify_sandbox_signature.py, which is not in a package."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "Scripts",
+                        "verify_sandbox_signature.py")
+    spec = importlib.util.spec_from_file_location("verify_sandbox_signature", path)
+    module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
@@ -2399,296 +2272,6 @@ def _numeric_only_resolver(host, port):
     except UnicodeError:
         raise ToolError("URL has an invalid host name", "invalid_url")
     return [info[4][0] for info in infos]
-
-
-def expected_signature(secret, nonce, request_body, status, response_body):
-    """The documented formula, written out again here rather than imported from
-    the server, so a mistake in the server's own copy shows up."""
-    message = (b"tuff-sandbox-v1\n" + nonce.encode() + b"\n"
-               + hashlib.sha256(request_body).hexdigest().encode() + b"\n"
-               + str(status).encode() + b"\n" + response_body)
-    return hmac.new(secret, message, hashlib.sha256).hexdigest()
-
-
-class SignedAnswerTests(unittest.TestCase):
-    """X-Sandbox-Nonce in, X-Sandbox-Signature out."""
-
-    SECRET = b"0123456789abcdef" * 4
-    NONCE = "ab" * 32
-
-    @classmethod
-    def setUpClass(cls):
-        resolve = resolver({"example.com": ["93.184.216.34"]})
-        transport = FakeTransport({"https://example.com/a": page("<p>signed page</p>")})
-
-        class TestHandler(server.Handler):
-            tools = WebTools(resolver=resolve, transport=transport, searxng_url="")
-
-            def log_message(self, *args):
-                pass
-
-        cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), TestHandler)
-        cls.port = cls.httpd.server_address[1]
-        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.httpd.shutdown()
-        cls.httpd.server_close()
-
-    def setUp(self):
-        patcher = mock.patch.object(server, "SIGNING_SECRET", self.SECRET)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-    def send(self, method, path, body=None, headers=None, nonce=NONCE):
-        """Returns (status, response headers, response body bytes, request body bytes)."""
-        data = json.dumps(body).encode() if body is not None else b""
-        all_headers = {"Content-Type": "application/json"}
-        if nonce is not None:
-            all_headers["X-Sandbox-Nonce"] = nonce
-        all_headers.update(headers or {})
-        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
-        connection.request(method, path, body=data or None, headers=all_headers)
-        response = connection.getresponse()
-        answer = response.read()
-        result = (response.status, response, answer, data)
-        connection.close()
-        return result
-
-    def assert_signed(self, method, path, body=None, expected_status=None, **kwargs):
-        status, response, answer, data = self.send(method, path, body, **kwargs)
-        if expected_status is not None:
-            self.assertEqual(status, expected_status)
-        nonce = kwargs.get("nonce", self.NONCE)
-        self.assertEqual(response.getheader("X-Sandbox-Signature"),
-                         expected_signature(self.SECRET, nonce, data, status, answer))
-        return status, answer
-
-    def test_health_is_signed_over_an_empty_request_body(self):
-        status, answer = self.assert_signed("GET", "/health", expected_status=200)
-        self.assertEqual(json.loads(answer)["signed"], True)
-        # The documented hash of nothing, not a value computed by the server.
-        self.assertEqual(hashlib.sha256(b"").hexdigest(),
-                         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
-
-    def test_a_raw_success_is_signed(self):
-        status, answer = self.assert_signed(
-            "POST", "/v1/raw", {"url": "https://example.com/a"}, expected_status=200)
-        self.assertEqual(json.loads(answer)["final_url"], "https://example.com/a")
-
-    def test_a_fetch_success_is_signed(self):
-        self.assert_signed("POST", "/v1/fetch", {"url": "https://example.com/a"},
-                           expected_status=200)
-
-    def test_a_search_answer_is_signed(self):
-        status, _ = self.assert_signed("POST", "/v1/search", {"query": ""})
-        self.assertGreaterEqual(status, 400)
-
-    def test_error_answers_are_signed(self):
-        status, answer = self.assert_signed(
-            "POST", "/v1/raw", {"url": "file:///etc/passwd"}, expected_status=422)
-        self.assertEqual(json.loads(answer)["error"]["code"], "unsupported_scheme")
-        status, answer = self.assert_signed(
-            "POST", "/v1/fetch", {"url": "file:///etc/passwd"}, expected_status=422)
-        self.assertEqual(json.loads(answer)["error"]["code"], "invalid_url")
-        self.assert_signed("POST", "/v1/shell", {}, expected_status=404)
-        self.assert_signed("GET", "/nothing", expected_status=404)
-
-    def test_errors_given_before_the_body_is_parsed_are_signed_too(self):
-        self.assert_signed("POST", "/v1/raw", {"url": "https://example.com/a"},
-                           expected_status=403, headers={"Host": "attacker.example"})
-        self.assert_signed("GET", "/health", expected_status=403,
-                           headers={"Host": "attacker.example"})
-        self.assert_signed("POST", "/v1/raw", {"url": "https://example.com/a"},
-                           expected_status=415, headers={"Content-Type": "text/plain"})
-
-    def test_the_408_for_a_body_that_stops_short_is_signed_over_an_empty_body(self):
-        class QuickHandler(server.Handler):
-            timeout = 0.5
-            tools = self.httpd.RequestHandlerClass.tools
-
-            def log_message(self, *args):
-                pass
-
-        httpd = ThreadingHTTPServer(("127.0.0.1", 0), QuickHandler)
-        self.addCleanup(httpd.server_close)
-        threading.Thread(target=httpd.serve_forever, daemon=True).start()
-        self.addCleanup(httpd.shutdown)
-        with socket.create_connection(("127.0.0.1", httpd.server_address[1]), timeout=5) as client:
-            client.sendall(b"POST /v1/fetch HTTP/1.1\r\nHost: 127.0.0.1\r\n"
-                           b"Content-Type: application/json\r\nContent-Length: 50\r\n"
-                           b"X-Sandbox-Nonce: " + self.NONCE.encode() + b"\r\n\r\n{")
-            received = b""
-            while chunk := client.recv(4096):
-                received += chunk
-        head, _, answer = received.partition(b"\r\n\r\n")
-        self.assertTrue(head.startswith(b"HTTP/1.0 408"), head)
-        self.assertNotIn(b"Content-Encoding", head)
-        signature = [line.split(b": ", 1)[1].decode() for line in head.split(b"\r\n")
-                     if line.lower().startswith(b"x-sandbox-signature")]
-        self.assertEqual(signature, [expected_signature(self.SECRET, self.NONCE, b"", 408, answer)])
-        self.assertEqual(json.loads(answer)["error"]["code"], "request_timeout")
-
-    def test_no_secret_means_no_signature_and_health_says_so(self):
-        with mock.patch.object(server, "SIGNING_SECRET", None):
-            for method, path, body in (("GET", "/health", None),
-                                       ("POST", "/v1/raw", {"url": "https://example.com/a"}),
-                                       ("POST", "/v1/raw", {"url": "file:///x"})):
-                status, response, answer, _ = self.send(method, path, body)
-                self.assertIsNone(response.getheader("X-Sandbox-Signature"))
-            status, response, answer, _ = self.send("GET", "/health")
-            self.assertEqual(json.loads(answer)["signed"], False)
-
-    def test_no_secret_ignores_even_a_bad_nonce(self):
-        with mock.patch.object(server, "SIGNING_SECRET", None):
-            status, response, _, _ = self.send("GET", "/health", nonce="not hex")
-            self.assertEqual(status, 200)
-            self.assertIsNone(response.getheader("X-Sandbox-Signature"))
-
-    def test_no_nonce_means_no_signature(self):
-        for method, path, body in (("GET", "/health", None),
-                                   ("POST", "/v1/raw", {"url": "https://example.com/a"}),
-                                   ("POST", "/v1/raw", {"url": "file:///x"}),
-                                   ("GET", "/nothing", None)):
-            status, response, answer, _ = self.send(method, path, body, nonce=None)
-            self.assertIsNone(response.getheader("X-Sandbox-Signature"))
-        status, response, answer, _ = self.send("GET", "/health", nonce=None)
-        self.assertEqual(json.loads(answer)["signed"], True)
-
-    def test_a_bad_nonce_is_an_unsigned_400(self):
-        bad = ["", "ab" * 31, "ab" * 33, "ab" * 8, "ab" * 64, "zz" * 32, "ab" * 31 + "a ",
-               "ab" * 31 + "-1", "0x" + "a" * 62]
-        for nonce in bad:
-            for method, path, body in (("GET", "/health", None),
-                                       ("POST", "/v1/raw", {"url": "https://example.com/a"})):
-                status, response, answer, _ = self.send(method, path, body, nonce=nonce)
-                self.assertEqual(status, 400, nonce)
-                self.assertEqual(json.loads(answer)["error"]["code"], "invalid_request")
-                self.assertIsNone(response.getheader("X-Sandbox-Signature"))
-
-    def test_two_nonce_headers_are_a_bad_nonce(self):
-        connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=5)
-        connection.putrequest("GET", "/health")
-        connection.putheader("X-Sandbox-Nonce", self.NONCE)
-        connection.putheader("X-Sandbox-Nonce", self.NONCE)
-        connection.endheaders()
-        response = connection.getresponse()
-        response.read()
-        connection.close()
-        self.assertEqual(response.status, 400)
-        self.assertIsNone(response.getheader("X-Sandbox-Signature"))
-
-    def test_the_host_check_still_comes_before_the_nonce_check(self):
-        status, response, answer, _ = self.send(
-            "GET", "/health", nonce="bad", headers={"Host": "attacker.example"})
-        self.assertEqual((status, json.loads(answer)["error"]["code"]), (403, "forbidden_host"))
-
-    def test_the_signature_changes_with_everything_it_covers(self):
-        base = expected_signature(self.SECRET, self.NONCE, b"{}", 200, b"{}")
-        self.assertEqual(len(base), 64)
-        self.assertNotEqual(base, expected_signature(self.SECRET, "cd" * 32, b"{}", 200, b"{}"))
-        self.assertNotEqual(base, expected_signature(self.SECRET, self.NONCE, b'{"a":1}', 200, b"{}"))
-        self.assertNotEqual(base, expected_signature(self.SECRET, self.NONCE, b"{}", 404, b"{}"))
-        self.assertNotEqual(base, expected_signature(self.SECRET, self.NONCE, b"{}", 200, b"{ }"))
-        self.assertNotEqual(base, expected_signature(b"x" * 64, self.NONCE, b"{}", 200, b"{}"))
-        # The server's own function agrees with the test's, for each of them.
-        for args in ((self.NONCE, b"{}", 200, b"{}"), ("cd" * 32, b"{}", 200, b"{}"),
-                     (self.NONCE, b'{"a":1}', 200, b"{}"), (self.NONCE, b"{}", 404, b"{}"),
-                     (self.NONCE, b"{}", 200, b"{ }")):
-            self.assertEqual(server.response_signature(self.SECRET, *args),
-                             expected_signature(self.SECRET, *args))
-
-    def test_the_nonce_changes_the_signature_the_server_sends(self):
-        first = self.send("GET", "/health", nonce="11" * 32)[1].getheader("X-Sandbox-Signature")
-        second = self.send("GET", "/health", nonce="22" * 32)[1].getheader("X-Sandbox-Signature")
-        again = self.send("GET", "/health", nonce="11" * 32)[1].getheader("X-Sandbox-Signature")
-        self.assertNotEqual(first, second)
-        self.assertEqual(first, again)
-
-    def test_a_signature_for_one_request_body_does_not_verify_for_another(self):
-        # Same nonce, two different requests (and so two different answers).
-        a_status, a_response, a_answer, a_data = self.send(
-            "POST", "/v1/raw", {"url": "https://example.com/a"})
-        b_status, b_response, b_answer, b_data = self.send(
-            "POST", "/v1/raw", {"url": "file:///etc/passwd"})
-        self.assertNotEqual(a_data, b_data)
-        a_signature = a_response.getheader("X-Sandbox-Signature")
-        b_signature = b_response.getheader("X-Sandbox-Signature")
-        self.assertNotEqual(a_signature, b_signature)
-        # A's answer, presented as the answer to B's request: it must not verify.
-        self.assertNotEqual(a_signature, expected_signature(
-            self.SECRET, self.NONCE, b_data, a_status, a_answer))
-        # Even with B's own answer swapped in, only the request it answered fits.
-        self.assertNotEqual(a_signature, expected_signature(
-            self.SECRET, self.NONCE, a_data, b_status, b_answer))
-        self.assertEqual(b_signature, expected_signature(
-            self.SECRET, self.NONCE, b_data, b_status, b_answer))
-
-    def test_the_mac_test_script_agrees_with_the_server(self):
-        import subprocess
-        import tempfile
-        script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                              "..", "Scripts", "verify_sandbox_signature.py")
-        request = {"url": "file:///etc/passwd"}
-        status, response, answer, data = self.send("POST", "/v1/raw", request)
-        with tempfile.TemporaryDirectory() as folder:
-            def write(name, content):
-                path = os.path.join(folder, name)
-                with open(path, "wb") as handle:
-                    handle.write(content)
-                return path
-            secret = write("secret", self.SECRET)
-            headers = write("headers", (f"HTTP/1.0 {status} X\r\nX-Sandbox-Signature: "
-                                        f"{response.getheader('X-Sandbox-Signature')}\r\n").encode())
-            body = write("body", answer)
-            sent = write("request", data)
-
-            def check(nonce, request_file):
-                return subprocess.run(
-                    [sys.executable, "-I", script, secret, nonce, request_file, headers, body],
-                    capture_output=True, text=True)
-            good = check(self.NONCE, sent)
-            self.assertEqual((good.returncode, good.stdout.strip()),
-                             (0, "status 422 | signature: present | matches: True"))
-            self.assertEqual(check("cd" * 32, sent).returncode, 1)
-            self.assertEqual(check(self.NONCE, "-").returncode, 1)
-
-    def test_a_trailing_newline_on_the_secret_is_not_part_of_the_key(self):
-        environ = {server.SECRET_ENV: self.SECRET.decode() + "\n"}
-        self.assertEqual(server.load_signing_secret(environ), self.SECRET)
-
-    def test_the_secret_is_removed_from_the_environment(self):
-        with mock.patch.dict(os.environ, {server.SECRET_ENV: self.SECRET.decode()}):
-            self.assertEqual(server.load_signing_secret(), self.SECRET)
-            self.assertNotIn(server.SECRET_ENV, os.environ)
-
-    def test_main_loads_the_secret_and_removes_it_before_serving(self):
-        fake_httpd = mock.MagicMock()
-        with mock.patch.dict(os.environ, {server.SECRET_ENV: self.SECRET.decode()}), \
-                mock.patch.object(server, "SIGNING_SECRET", None), \
-                mock.patch.object(server, "drop_privileges"), \
-                mock.patch.object(server, "ThreadingHTTPServer", return_value=fake_httpd), \
-                mock.patch.object(server, "stop_on_sigterm"), \
-                contextlib.redirect_stderr(io.StringIO()) as log:
-            with self.assertRaises(SystemExit) as context:
-                server.main()
-            self.assertEqual(context.exception.code, 0)
-            self.assertNotIn(server.SECRET_ENV, os.environ)
-            self.assertEqual(server.SIGNING_SECRET, self.SECRET)
-        self.assertIn("signing answers", log.getvalue())
-        self.assertNotIn(self.SECRET.decode(), log.getvalue())
-
-    def test_a_missing_or_empty_secret_means_no_signing(self):
-        self.assertIsNone(server.load_signing_secret({}))
-        self.assertIsNone(server.load_signing_secret({server.SECRET_ENV: ""}))
-
-    def test_a_secret_that_is_too_short_stops_the_start_without_printing_it(self):
-        environ = {server.SECRET_ENV: "short-secret-value"}
-        with self.assertRaises(SystemExit) as context:
-            server.load_signing_secret(environ)
-        self.assertNotIn("short-secret-value", str(context.exception.code))
-        self.assertNotIn(server.SECRET_ENV, environ)
 
 
 class AddressCheckScriptTests(unittest.TestCase):
@@ -2759,25 +2342,49 @@ class AddressCheckScriptTests(unittest.TestCase):
         self.assertEqual(classify(resolves, 502, {"error": {"code": "dns_error"}})[0], "inconclusive")
         self.assertEqual(classify(resolves, 422, {"error": {"code": "invalid_url"}})[0], "FAIL")
 
-    def run_script(self, resolver, transport, *extra):
+    def secret_file(self):
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        path = os.path.join(folder.name, "secret")
+        with open(path, "wb") as handle:
+            handle.write(SECRET + b"\n")
+        return path
+
+    def run_script(self, resolver, transport, *extra, secret=SECRET):
         class Handler(server.Handler):
             tools = WebTools(resolver=resolver, transport=transport, searxng_url="")
 
             def log_message(self, *args):
                 pass
 
+        Handler.secret = secret
+        Handler.nonces = server.NonceStore()
         httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
         output = io.StringIO()
         try:
             argv = ["research_address_check.py", "--sandbox",
-                    f"http://127.0.0.1:{httpd.server_address[1]}", "--timeout", "10", *extra]
-            with mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(output):
+                    f"http://127.0.0.1:{httpd.server_address[1]}", "--timeout", "10",
+                    "--secret-file", self.secret_file(), *extra]
+            with mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(output), \
+                    contextlib.redirect_stderr(output):
                 code = self.check.main()
         finally:
             httpd.shutdown()
             httpd.server_close()
         return code, output.getvalue()
+
+    def test_a_sandbox_with_another_secret_is_not_trusted(self):
+        code, text = self.run_script(
+            lambda host, port: ["93.184.216.34"], FakeTransport({}), secret=b"o" * 40)
+        self.assertEqual(code, 2, text)
+        self.assertIn("not signed with the current secret", text)
+
+    def test_a_missing_secret_file_is_reported(self):
+        argv = ["research_address_check.py", "--secret-file", "/nonexistent/secret"]
+        with mock.patch.object(sys, "argv", argv), contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(self.check.main(), 2)
+        self.assertIn("cannot read the sandbox secret", err.getvalue())
 
     def test_a_sandbox_that_refuses_everything_passes(self):
         def resolver(host, port):
@@ -2825,7 +2432,8 @@ class AddressCheckScriptTests(unittest.TestCase):
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             free = probe.getsockname()[1]
-        argv = ["research_address_check.py", "--sandbox", f"http://127.0.0.1:{free}"]
+        argv = ["research_address_check.py", "--sandbox", f"http://127.0.0.1:{free}",
+                "--secret-file", self.secret_file()]
         with mock.patch.object(sys, "argv", argv), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(self.check.main(), 2)
         argv = ["research_address_check.py", "--sandbox", "http://192.168.1.5:9100"]
@@ -3086,17 +2694,36 @@ class SigtermTests(unittest.TestCase):
         import subprocess
         code = ("import server; server.drop_privileges = lambda: None; "
                 "server.PORT = 0; server.main()")
-        process = subprocess.Popen(
-            [sys.executable, "-c", code], cwd=os.path.dirname(os.path.abspath(__file__)),
-            stderr=subprocess.PIPE, text=True)
-        try:
-            self.assertIn("listening", process.stderr.readline())
-            process.send_signal(signal.SIGTERM)
-            self.assertEqual(process.wait(timeout=10), 0)
-        finally:
-            if process.poll() is None:
-                process.kill()
-            process.stderr.close()
+        with tempfile.TemporaryDirectory() as folder:
+            secret = os.path.join(folder, "secret")
+            with open(secret, "wb") as handle:
+                handle.write(SECRET)
+            process = subprocess.Popen(
+                [sys.executable, "-c", code], cwd=os.path.dirname(os.path.abspath(__file__)),
+                env={**os.environ, server.SECRET_FILE_ENV: secret},
+                stderr=subprocess.PIPE, text=True)
+            try:
+                line = process.stderr.readline()
+                self.assertIn("listening", line)
+                self.assertNotIn("sign", line)
+                self.assertNotIn(SECRET.decode(), line)
+                process.send_signal(signal.SIGTERM)
+                self.assertEqual(process.wait(timeout=10), 0)
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                process.stderr.close()
+
+    def test_the_server_does_not_start_without_a_secret(self):
+        import subprocess
+        code = "import server; server.drop_privileges = lambda: None; server.PORT = 0; server.main()"
+        with tempfile.TemporaryDirectory() as folder:
+            done = subprocess.run(
+                [sys.executable, "-c", code], cwd=os.path.dirname(os.path.abspath(__file__)),
+                env={**os.environ, server.SECRET_FILE_ENV: os.path.join(folder, "missing")},
+                capture_output=True, text=True, timeout=20)
+        self.assertNotEqual(done.returncode, 0)
+        self.assertNotIn("listening", done.stderr)
 
 
 if __name__ == "__main__":

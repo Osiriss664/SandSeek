@@ -1,0 +1,68 @@
+{
+  "description": "Fixed examples for the sandbox's request and answer signatures. Both the server (Sandbox/server.py) and the app (Sources/SandSeekCore/ResearchSandboxSigning.swift) must reproduce every expected_auth value. The secret is the UTF-8 text below. body_utf8 is the exact request or answer body as UTF-8; time is the X-Sandbox-Time value as sent. Signing strings are the fields joined with LF: sandseek-sandbox-req-v1, method, path, nonce, time, hex(SHA256(request body)) for a request; sandseek-sandbox-resp-v1, method, path, nonce, status, hex(SHA256(answer body)) for an answer. Values were produced with openssl and checked against Python's hmac.",
+  "secret_utf8": "sandseek-sandbox-test-secret-0123456789abcdef",
+  "request": [
+    {
+      "name": "health",
+      "method": "GET",
+      "path": "/health",
+      "nonce": "0000000000000000000000000000000000000000000000000000000000000000",
+      "time": "1786000000",
+      "body_utf8": "",
+      "body_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "expected_auth": "8a61a72176fd0a1ee7b8c2f5346e2586da48955b22f62a8b9f782181bb22fd5a"
+    },
+    {
+      "name": "search",
+      "method": "POST",
+      "path": "/v1/search",
+      "nonce": "abababababababababababababababababababababababababababababababab",
+      "time": "1786000042",
+      "body_utf8": "{\"query\":\"glacier retreat 2024\",\"max_results\":6}",
+      "body_sha256": "0c3b4574482db48d55774b95bd896443faaead3deb59800a163197bdb0c3d6a7",
+      "expected_auth": "a70561a39feea63f4a3f5da0f29ed13ce21c473aac25b7c5742beb7e6f942cd3"
+    },
+    {
+      "name": "fetch-unicode",
+      "method": "POST",
+      "path": "/v1/fetch",
+      "nonce": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "time": "1786000100",
+      "body_utf8": "{\"url\":\"https://example.com/café\",\"passages\":true,\"query\":\"naïve café – 日本\"}",
+      "body_sha256": "e5141dde3022e0ed4313097b3af805ca488941461679a1c1ca40363f9a5b04d0",
+      "expected_auth": "f517228609ac3ea0658e8ab9903f4ff746a0d24dab37f0c87f2a8aefe37b3634"
+    }
+  ],
+  "response": [
+    {
+      "name": "health-ok",
+      "method": "GET",
+      "path": "/health",
+      "nonce": "0000000000000000000000000000000000000000000000000000000000000000",
+      "status": 200,
+      "body_utf8": "{\"status\": \"ok\", \"api\": 1, \"passages\": true, \"pdf\": true}",
+      "body_sha256": "2bbc05d3a7a6d0125e03c2b250e13b37babb8d1eeba323f75fa97b1be1f395e2",
+      "expected_auth": "603f306a1ffba8ba767e761e8aa42fed86e0ed91957747fd6f6bd370c039d534"
+    },
+    {
+      "name": "unauthorized",
+      "method": "POST",
+      "path": "/v1/search",
+      "nonce": "abababababababababababababababababababababababababababababababab",
+      "status": 401,
+      "body_utf8": "{\"error\": {\"message\": \"the request is not signed correctly\", \"code\": \"unauthorized\"}}",
+      "body_sha256": "e99c3adfc21becc7aa808274e6eb07028b56fc22c19b68c71afa4813ffd44d3e",
+      "expected_auth": "07d38cddd494b945223fd67bdb4888da83fbce2ae1423acaeb13c7f34f8334c4"
+    },
+    {
+      "name": "fetch-unicode-ok",
+      "method": "POST",
+      "path": "/v1/fetch",
+      "nonce": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "status": 200,
+      "body_utf8": "{\"url\": \"https://example.com/caf\\u00e9\", \"title\": \"Café – 日本\", \"text\": \"naïve café\"}",
+      "body_sha256": "fda3400de10d3a45982c62ff3f53843103cf88e103f7731d7379a53f6f22b51a",
+      "expected_auth": "2d13bf70ad5e4586b272bc40e671989cf9aed2ab48bc279f7699b11f2ad0b1f1"
+    }
+  ]
+}

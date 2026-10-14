@@ -1,46 +1,72 @@
 #!/usr/bin/env python3
-"""Checks the signature of one sandbox answer, for the Mac test steps.
+"""Sends one signed request to the sandbox and checks the signature of the
+answer, for the Mac test steps.
 
-  verify_sandbox_signature.py SECRET_FILE NONCE REQUEST_BODY_FILE HEADERS_FILE BODY_FILE
+  verify_sandbox_signature.py SECRET_FILE [PORT]
 
-REQUEST_BODY_FILE is the file that was sent as the request body, or - for a GET.
-HEADERS_FILE is `curl -D` output (the status line and the headers) and BODY_FILE
-the answer's body. The secret is read from SECRET_FILE and never printed or
-taken from an argument, so it does not appear in `ps`. The formula is the one in
-Sandbox/server.py. Prints one line; exits 0 when the signature is present and
-right, 1 otherwise.
+Sends GET /health to 127.0.0.1:PORT (default 9100), signed with the secret in
+SECRET_FILE, and checks that the answer is signed with the same secret for that
+request. The secret is read from the file and never printed or taken from an
+argument, so it does not appear in `ps`. The formulas are the ones in
+Sandbox/server.py. Prints one line; exits 0 when the answer is a signed 200 that
+matches, 1 otherwise.
 """
 
 import hashlib
 import hmac
+import http.client
+import os
 import sys
+import time
+
+REQUEST_LABEL = "sandseek-sandbox-req-v1"
+RESPONSE_LABEL = "sandseek-sandbox-resp-v1"
+
+
+def request_auth(secret: bytes, method: str, path: str, nonce: str, timestamp: str,
+                 body: bytes) -> str:
+    text = "\n".join((REQUEST_LABEL, method, path, nonce, timestamp,
+                      hashlib.sha256(body).hexdigest()))
+    return hmac.new(secret, text.encode(), hashlib.sha256).hexdigest()
+
+
+def response_auth(secret: bytes, method: str, path: str, nonce: str, status: int,
+                  body: bytes) -> str:
+    text = "\n".join((RESPONSE_LABEL, method, path, nonce, str(status),
+                      hashlib.sha256(body).hexdigest()))
+    return hmac.new(secret, text.encode(), hashlib.sha256).hexdigest()
 
 
 def main(argv):
-    if len(argv) != 6:
+    if len(argv) not in (2, 3):
         sys.exit(__doc__)
-    secret_path, nonce, request_path, header_path, body_path = argv[1:]
-    with open(secret_path, "rb") as handle:
+    with open(argv[1], "rb") as handle:
         secret = handle.read().removesuffix(b"\n")
-    request = b""
-    if request_path != "-":
-        with open(request_path, "rb") as handle:
-            request = handle.read()
-    with open(header_path, encoding="latin-1") as handle:
-        lines = handle.read().splitlines()
-    with open(body_path, "rb") as handle:
-        body = handle.read()
-    status = int(lines[0].split()[1])
-    signature = next((line.split(":", 1)[1].strip() for line in lines
-                      if line.lower().startswith("x-sandbox-signature:")), None)
-    message = (b"tuff-sandbox-v1\n" + nonce.encode() + b"\n"
-               + hashlib.sha256(request).hexdigest().encode() + b"\n"
-               + str(status).encode() + b"\n" + body)
-    expected = hmac.new(secret, message, hashlib.sha256).hexdigest()
+    port = int(argv[2]) if len(argv) == 3 else 9100
+    method, path = "GET", "/health"
+    nonce = os.urandom(32).hex()
+    stamp = str(int(time.time()))
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    try:
+        connection.request(method, path, headers={
+            "X-Sandbox-Nonce": nonce,
+            "X-Sandbox-Time": stamp,
+            "X-Sandbox-Auth": request_auth(secret, method, path, nonce, stamp, b""),
+        })
+        response = connection.getresponse()
+        body = response.read()
+        status = response.status
+        signature = response.getheader("X-Sandbox-Auth")
+    except (OSError, http.client.HTTPException) as error:
+        print(f"no answer: {type(error).__name__}")
+        return 1
+    finally:
+        connection.close()
+    expected = response_auth(secret, method, path, nonce, status, body)
     matches = signature is not None and hmac.compare_digest(signature.lower(), expected)
     print(f"status {status} | signature: {'missing' if signature is None else 'present'}"
           f" | matches: {matches}")
-    return 0 if matches else 1
+    return 0 if matches and status == 200 else 1
 
 
 if __name__ == "__main__":

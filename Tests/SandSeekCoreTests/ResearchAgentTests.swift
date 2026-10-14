@@ -93,7 +93,7 @@ private final class FakeServices: ResearchHTTPTransport, @unchecked Sendable {
     @Sendable static func webPages(_ path: String, _ body: ResearchJSON?) -> ResearchHTTPResponse {
         switch path {
         case "/health":
-            return json(200, .object(["status": .string("ok")]))
+            return json(200, .object(["status": .string("ok"), "api": .integer(1)]))
         case "/v1/search":
             return json(200, .object(["query": body?["query"] ?? .null, "results": .array([
                 .object([
@@ -139,7 +139,7 @@ private func agent(_ services: FakeServices,
             maxTokens: 512,
             enableThinking: enableThinking,
             transport: transport ?? services),
-        sandbox: ResearchSandboxClient(
+        sandbox: ResearchSandboxClient.forTests(
             baseURL: URL(string: "http://127.0.0.1:9100")!, transport: services),
         options: seenOptions(options, onlySeenURLs),
         onEvent: { event in events?.append(event) })
@@ -329,7 +329,7 @@ private func continuationWindow(_ page: String, contextTokens: Int,
         chat: ResearchChatClient(
             serverURL: URL(string: "http://127.0.0.1:8080")!, model: "default",
             maxTokens: 4_096, enableThinking: false, transport: services),
-        sandbox: ResearchSandboxClient(
+        sandbox: ResearchSandboxClient.forTests(
             baseURL: URL(string: "http://127.0.0.1:9100")!, transport: services),
         options: seenOptions(options, false),
         onEvent: { events?.append($0) })
@@ -3555,7 +3555,7 @@ struct ResearchAgentTests {
             maxTokens: 8_192, enableThinking: true, transport: FakeServices(modelReplies: []))
         let agent = ResearchAgent(
             chat: chat,
-            sandbox: ResearchSandboxClient(
+            sandbox: ResearchSandboxClient.forTests(
                 baseURL: URL(string: "http://127.0.0.1:9100")!,
                 transport: FakeServices(modelReplies: [])))
         var state = ResearchAgent.State(question: "q")
@@ -3731,7 +3731,7 @@ struct ResearchAgentTests {
             chat: ResearchChatClient(
                 serverURL: URL(string: "http://127.0.0.1:8080")!, model: "default",
                 maxTokens: 8_192, enableThinking: true, transport: slow),
-            sandbox: ResearchSandboxClient(
+            sandbox: ResearchSandboxClient.forTests(
                 baseURL: URL(string: "http://127.0.0.1:9100")!, transport: services),
             options: seenOptions(ResearchOptions(), false),
             onEvent: { log.append($0) }).run(question: "q")
@@ -3792,7 +3792,7 @@ struct ResearchAgentTests {
                 chat: ResearchChatClient(
                     serverURL: URL(string: "http://127.0.0.1:8080")!, model: "default",
                     maxTokens: 8_192, enableThinking: thinking, transport: recorder),
-                sandbox: ResearchSandboxClient(
+                sandbox: ResearchSandboxClient.forTests(
                     baseURL: URL(string: "http://127.0.0.1:9100")!, transport: services),
                 options: seenOptions(options, false)).run(question: "q")
             return recorder.modelLimits
@@ -3821,7 +3821,7 @@ struct ResearchAgentTests {
             chat: ResearchChatClient(
                 serverURL: URL(string: "http://127.0.0.1:8080")!, model: "default",
                 maxTokens: 8_192, enableThinking: true, transport: slow),
-            sandbox: ResearchSandboxClient(
+            sandbox: ResearchSandboxClient.forTests(
                 baseURL: URL(string: "http://127.0.0.1:9100")!, transport: services),
             options: seenOptions(ResearchOptions(), false),
             onEvent: { log.append($0) }).run(question: "q")
@@ -3847,7 +3847,7 @@ struct ResearchAgentTests {
             chat: ResearchChatClient(
                 serverURL: URL(string: "http://127.0.0.1:8080")!, model: "default",
                 maxTokens: 8_192, enableThinking: true, transport: services),
-            sandbox: ResearchSandboxClient(
+            sandbox: ResearchSandboxClient.forTests(
                 baseURL: URL(string: "http://127.0.0.1:9100")!, transport: services),
             options: seenOptions(ResearchOptions(), false),
             onEvent: { log.append($0) }).run(question: "q")
@@ -3876,7 +3876,7 @@ struct ResearchAgentTests {
             chat: ResearchChatClient(
                 serverURL: URL(string: "http://127.0.0.1:8080")!, model: "default",
                 maxTokens: 8_192, enableThinking: true, transport: refused),
-            sandbox: ResearchSandboxClient(
+            sandbox: ResearchSandboxClient.forTests(
                 baseURL: URL(string: "http://127.0.0.1:9100")!, transport: refused),
             options: seenOptions(ResearchOptions(), false),
             onEvent: { refusedLog.append($0) }).run(question: "q")
@@ -3942,7 +3942,7 @@ struct ResearchAgentTests {
             chat: ResearchChatClient(
                 serverURL: URL(string: "http://127.0.0.1:8080")!, model: "default",
                 maxTokens: 8_192, enableThinking: true, transport: services),
-            sandbox: ResearchSandboxClient(
+            sandbox: ResearchSandboxClient.forTests(
                 baseURL: URL(string: "http://127.0.0.1:9100")!, transport: services),
             options: seenOptions(ResearchOptions(), false),
             onEvent: { log.append($0) })
@@ -5194,7 +5194,7 @@ struct ResearchRequestedSourcesLoopTests {
             chat: ResearchChatClient(
                 serverURL: URL(string: "http://127.0.0.1:8080")!, model: "default",
                 maxTokens: 8_192, enableThinking: false, transport: services),
-            sandbox: ResearchSandboxClient(
+            sandbox: ResearchSandboxClient.forTests(
                 baseURL: URL(string: "http://127.0.0.1:9100")!, transport: services),
             options: seenOptions(options, false),
             onEvent: { events.append($0) })
@@ -5306,7 +5306,7 @@ struct ResearchPassagesTests {
 
     // A sandbox new enough to rank passages says so on /health.
     private static let passageHealth = FakeServices.json(
-        200, .object(["status": .string("ok"), "passages": .bool(true)]))
+        200, .object(["status": .string("ok"), "api": .integer(1), "passages": .bool(true)]))
 
     private static func fetchBodies(_ services: FakeServices) -> [ResearchJSON] {
         services.requests.filter { $0.url.path == "/v1/fetch" }.compactMap(\.body)
@@ -5367,7 +5367,7 @@ struct ResearchPassagesTests {
 
     @Test func clientSendsPassageFieldsOnlyWhenAsked() async throws {
         let services = FakeServices(modelReplies: [], sandbox: Self.sandbox)
-        let client = ResearchSandboxClient(
+        let client = ResearchSandboxClient.forTests(
             baseURL: URL(string: "http://127.0.0.1:9100")!, transport: services)
         let slice = try await client.fetch(
             url: "https://example.com/p", offset: 2, maxCharacters: 2_000,
@@ -5382,7 +5382,7 @@ struct ResearchPassagesTests {
         #expect(slice.nextOffset == nil)
 
         let plain = FakeServices(modelReplies: [])
-        let plainClient = ResearchSandboxClient(
+        let plainClient = ResearchSandboxClient.forTests(
             baseURL: URL(string: "http://127.0.0.1:9100")!, transport: plain)
         let characters = try await plainClient.fetch(
             url: "https://example.com/p", offset: 0, maxCharacters: 3_000)
@@ -5548,16 +5548,17 @@ struct ResearchPassagesTests {
 
     @Test func healthMustSayPassagesWhenTheyAreOn() async throws {
         let old = FakeServices(modelReplies: [])
-        let client = ResearchSandboxClient(
+        let client = ResearchSandboxClient.forTests(
             baseURL: URL(string: "http://127.0.0.1:9100")!, transport: old)
         try await client.checkHealth()
         await #expect(throws: ResearchError.sandboxCannotRankPassages) {
             try await client.checkHealth(requirePassages: true)
         }
         let current = FakeServices(modelReplies: [], sandbox: { path, _ in
-            FakeServices.json(200, .object(["status": .string("ok"), "passages": .bool(true)]))
+            FakeServices.json(200, .object([
+                "status": .string("ok"), "api": .integer(1), "passages": .bool(true)]))
         })
-        let newer = ResearchSandboxClient(
+        let newer = ResearchSandboxClient.forTests(
             baseURL: URL(string: "http://127.0.0.1:9100")!, transport: current)
         try await newer.checkHealth(requirePassages: true)
         #expect(ResearchError.sandboxCannotRankPassages.description
@@ -6535,20 +6536,20 @@ struct ResearchSandboxAddressTests {
     @Test func aPageAddressThatIsNotHttpOrHttpsIsRefused() async throws {
         for address in ["javascript:alert(1)", "file:///etc/passwd", "data:text/html,x",
                         "ftp://example.com/a", " https://example.com/a", "//example.com/a"] {
-            let client = ResearchSandboxClient(baseURL: sandbox, transport: CannedSandboxReply(
+            let client = ResearchSandboxClient.forTests(baseURL: sandbox, transport: CannedSandboxReply(
                 reply: #"{"url":"\#(address)","text":"hi","title":"T","offset":0,"total_chars":2}"#))
             await #expect(throws: ResearchToolFailure.self) {
                 _ = try await client.fetch(url: "https://example.com/", offset: 0, maxCharacters: 100)
             }
         }
-        let good = ResearchSandboxClient(baseURL: sandbox, transport: CannedSandboxReply(
+        let good = ResearchSandboxClient.forTests(baseURL: sandbox, transport: CannedSandboxReply(
             reply: #"{"url":"HTTPS://example.com/a","text":"hi","title":"T","offset":0,"total_chars":2}"#))
         let slice = try await good.fetch(url: "https://example.com/", offset: 0, maxCharacters: 100)
         #expect(slice.url == "HTTPS://example.com/a")
     }
 
     @Test func searchResultsWithoutAWebAddressAreDropped() async throws {
-        let client = ResearchSandboxClient(baseURL: sandbox, transport: CannedSandboxReply(reply: """
+        let client = ResearchSandboxClient.forTests(baseURL: sandbox, transport: CannedSandboxReply(reply: """
             {"results":[
               {"title":"a","url":"javascript:alert(1)","snippet":"x"},
               {"title":"b","url":"https://b.example/","snippet":"s"},
