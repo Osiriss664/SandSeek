@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.2.0 (unreleased)
+
+Only SandSeek may use the sandbox.
+
+- Every request to the sandbox is signed (HMAC with a secret only your Mac
+  user can read) and carries a fresh number and the time. A request that is
+  not signed correctly, is more than a minute old, or repeats an earlier one
+  is refused. Every answer is signed too, whatever its status, and SandSeek
+  uses it only if the signature fits the request it sent.
+- The sandbox does not start without a secret.
+- The secret is a read-only file in a folder that is mounted into the sandbox,
+  no longer an environment variable. It lives in
+  `~/Library/Application Support/SandSeek/sandbox` and is deleted when the
+  sandbox is stopped, so no secret means the sandbox is not running. The file
+  the first version left in TUFF's folder is removed on the next start.
+- SandSeek checks the sandbox's identity again, with a signed health check,
+  before a search or a page read that follows a pause of more than 5 seconds.
+- `/health` now says `api` 1, and SandSeek refuses a sandbox that does not.
+  Rebuild the sandbox image (`Scripts/research_sandbox.sh build`) after
+  updating; a sandbox from the first version is not accepted.
+- `POST /v1/raw` is removed. SandSeek never used it.
+- `Scripts/verify_sandbox_signature.py` and `Scripts/research_address_check.py`
+  sign their requests; the address check reads the secret file (`--secret-file`
+  to name another).
+
 ## 0.1.0 (unreleased)
 
 First release. SandSeek lets a local model research the web from a sandbox

@@ -43,15 +43,21 @@ search.
 for running Linux containers on Apple silicon. Unlike tools that share one VM
 between all containers, it gives each container its own lightweight virtual
 machine, with its own kernel, memory and network address, and nothing of the
-Mac's files unless a folder is mounted. The sandbox mounts none. That fits the
+Mac's files unless a folder is mounted. The sandbox mounts one, read-only, with
+nothing in it but its secret file. That fits the
 one job that handles hostile input: downloading and parsing web pages. The model
 itself cannot run in the VM (it has no GPU), and does not need to.
 
 The VM has a read-only root filesystem, 1 GB of memory, a process limit and a
 firewall of its own, and it is replaced by a fresh one before each question
-after the first. Each start also makes a new random secret, which the sandbox
-uses to sign its answers, so SandSeek can tell the real sandbox from another
-program on the same port (see `docs/SECURITY.md`).
+after the first. Each start also makes a new random secret and puts it in a
+read-only file that the sandbox reads once when it starts; it does not start
+without it, and stopping the sandbox deletes the file. Every request to the
+sandbox is signed with the secret and every answer is signed with it too, a
+repeated request is refused, and SandSeek checks the sandbox's identity again
+before a request that follows a pause. So the sandbox only serves SandSeek, and
+SandSeek can tell the real sandbox from another program on the same port (see
+`docs/SECURITY.md`).
 
 ## What happens when you ask a question
 

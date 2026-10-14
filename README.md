@@ -242,7 +242,8 @@ To record real streams from a running server for test fixtures, use
 
 ## Security in short
 
-- The VM has a read-only root filesystem, no Mac folders, a firewall that
+- The VM has a read-only root filesystem, no Mac folders (only a read-only
+  folder with its secret), a firewall that
   refuses the Mac, the local network and cloud metadata addresses, and a
   server running as an unprivileged user with no Linux capabilities.
 - Fetches are limited to public addresses on ports 80 and 443; every DNS
@@ -250,6 +251,9 @@ To record real streams from a running server for test fixtures, use
 - Page text reaches the model wrapped in markers it is told to treat as
   information only; terminal escape codes and invisible Unicode are removed.
 - Both services stay on loopback; the sandbox refuses foreign `Host` headers.
+  Every request to the sandbox is signed with a secret that only SandSeek can
+  read, a repeated request is refused, and the sandbox does not start without
+  its secret.
 - Prompt-injection test pages are in `Sandbox/fixtures/injection`
   (`Scripts/research_injection_check.py`). A pass is evidence, not proof.
 - TUFF 8.3.1 and llama.cpp have no `Host` check; llama.cpp is used only with
