@@ -549,6 +549,9 @@ public enum ResearchError: Error, Equatable, CustomStringConvertible {
     case sandboxNotStarted
     /// The sandbox answered, signed, but is not this version's API.
     case sandboxWrongVersion
+    /// The sandbox answered, signed, that the request's time is too far from
+    /// its own clock (its code is `stale_request`).
+    case sandboxClockOff
     /// The sandbox's secret file exists but cannot be used (see
     /// `ResearchSandboxSecret`). The message says what is wrong with it, and
     /// never holds the secret.
@@ -586,8 +589,11 @@ public enum ResearchError: Error, Equatable, CustomStringConvertible {
                 + "refuses. It never follows redirects from the sandbox or the model server, "
                 + "and neither of them redirects, so another program may be using the port."
         case .sandboxNotStarted:
-            "No sandbox secret: start the sandbox (Scripts/research_sandbox.sh start, or the "
+            "no sandbox secret: start the sandbox (Scripts/research_sandbox.sh start, or the "
                 + "app's Start button)."
+        case .sandboxClockOff:
+            "the sandbox's clock is more than a minute off from this Mac's, so it refuses every "
+                + "request. Restart the sandbox (Scripts/research_sandbox.sh stop, then start)."
         case .sandboxWrongVersion:
             "the web sandbox is a different version from this SandSeek (its health check does not "
                 + "report API 1). Rebuild it (Scripts/research_sandbox.sh build) and start it again."

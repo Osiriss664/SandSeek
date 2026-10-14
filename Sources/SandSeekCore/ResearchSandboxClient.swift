@@ -273,7 +273,30 @@ public struct ResearchSandboxClient: Sendable {
             proof.forget()
             throw ResearchError.sandboxNotSigned(address: address)
         }
+        if let refusal = Self.sandboxRefusal(response) { throw refusal }
         return response
+    }
+
+    /// The sandbox's own refusal of a request that failed its checks: a signed
+    /// 401 (`unauthorized`, `stale_request`, `replayed_request`) or 503
+    /// (`busy`). It says something about the sandbox or the clocks, not about a
+    /// site, so it ends the run with a clear message and is never a tool
+    /// failure counted against a site.
+    private static func sandboxRefusal(_ response: ResearchHTTPResponse) -> ResearchError? {
+        guard response.status == 401 || response.status == 503,
+              let reply = try? ResearchJSON.decode(response.body),
+              let code = reply["error"]?["code"]?.stringValue else { return nil }
+        switch code {
+        case "stale_request":
+            return .sandboxClockOff
+        case "unauthorized":
+            return .sandboxUnavailable(
+                "the sandbox does not accept this SandSeek's secret (unauthorized); restart the sandbox")
+        case "replayed_request", "busy":
+            return .sandboxUnavailable("the sandbox refused the request (\(code)); try again")
+        default:
+            return nil
+        }
     }
 
     /// The sandbox's host and port for a message, such as `127.0.0.1:9100`.

@@ -352,11 +352,10 @@ def main() -> int:
     if args.output and os.path.exists(args.output):
         parser.error(f"{args.output} already exists; choose a new --output file")
     try:
-        with open(args.secret_file, "rb") as handle:
-            secret = handle.read().removesuffix(b"\n")
-    except OSError as error:
-        print(f"error: cannot read the sandbox secret ({error.strerror}); "
-              "start the sandbox with Scripts/research_sandbox.sh start", file=sys.stderr)
+        secret = signing.read_secret(args.secret_file)
+    except signing.SecretFileError as error:
+        print(f"error: {error}; start the sandbox with Scripts/research_sandbox.sh start",
+              file=sys.stderr)
         return 2
     if not sandbox_answers(args.sandbox, secret):
         print(f"error: the sandbox does not answer at {args.sandbox}, or its answer is not "

@@ -191,6 +191,7 @@ private let redirectStatuses = [301, 302, 303, 307, 308]
         #expect(text.contains("another program may be using the port"))
     }
 
+#if canImport(CryptoKit)
     @Test(arguments: redirectStatuses)
     func theSandboxClientTreatsARedirectAsAnError(status: Int) async {
         let client = ResearchSandboxClient.forTests(baseURL: sandbox, transport: AlwaysRedirects(status: status))
@@ -202,6 +203,7 @@ private let redirectStatuses = [301, 302, 303, 307, 308]
             _ = try await client.fetch(url: "https://example.com", offset: 0, maxCharacters: 100)
         }
     }
+#endif
 
     @Test(arguments: redirectStatuses)
     func theChatClientTreatsARedirectAsAnErrorStreamingOrNot(status: Int) async {
@@ -228,6 +230,7 @@ private let redirectStatuses = [301, 302, 303, 307, 308]
         }
     }
 
+#if canImport(CryptoKit)
     @Test func otherAnswersAreUnchanged() async throws {
         // A 404 from the status route is still "not TUFF", not a redirect.
         await #expect(throws: ResearchError.self) {
@@ -240,6 +243,7 @@ private let redirectStatuses = [301, 302, 303, 307, 308]
             try await notFound.checkHealth()
         }
     }
+#endif
 }
 
 #if canImport(Darwin)
@@ -291,6 +295,7 @@ private let redirectStatuses = [301, 302, 303, 307, 308]
         #expect(squatter.requestCount >= 3)
     }
 
+#if canImport(CryptoKit)
     @Test func theCallersFailAndTheTargetIsNeverContacted() async throws {
         let (squatter, target) = try servers(status: 307)
         defer {
@@ -325,6 +330,7 @@ private let redirectStatuses = [301, 302, 303, 307, 308]
         #expect(target.requestCount == 0, "the redirect target was contacted")
         #expect(squatter.requestCount >= 6)
     }
+#endif
 
     @Test func aServerThatDoesNotRedirectStillWorks() async throws {
         // The delegate must not get in the way of an ordinary answer.

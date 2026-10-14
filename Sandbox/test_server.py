@@ -1782,6 +1782,72 @@ class VectorTests(unittest.TestCase):
                                      vector["body_utf8"].encode()), vector["expected_auth"])
 
 
+class ToolSecretReadTests(unittest.TestCase):
+    """Scripts/verify_sandbox_signature.read_secret, used by the Mac test tools."""
+
+    def setUp(self):
+        self.script = _load_verify_script()
+        self.folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.folder, True)
+
+    def write(self, data=SECRET, name="secret", mode=0o600):
+        path = os.path.join(self.folder, name)
+        with open(path, "wb") as handle:
+            handle.write(data)
+        os.chmod(path, mode)
+        return path
+
+    def refused(self, path):
+        with self.assertRaises(self.script.SecretFileError) as caught:
+            self.script.read_secret(path)
+        return str(caught.exception)
+
+    def test_a_good_file_is_read_without_one_newline(self):
+        self.assertEqual(self.script.read_secret(self.write()), SECRET)
+        self.assertEqual(self.script.read_secret(self.write(SECRET + b"\n", "n")), SECRET)
+
+    def test_a_symlink_is_refused(self):
+        target = self.write()
+        link = os.path.join(self.folder, "link")
+        os.symlink(target, link)
+        self.assertIn("cannot open", self.refused(link))
+
+    def test_a_folder_and_a_missing_file_are_refused(self):
+        self.assertIn("not a regular file", self.refused(self.folder))
+        self.assertIn("cannot open", self.refused(os.path.join(self.folder, "missing")))
+
+    def test_group_or_other_permission_bits_are_refused(self):
+        for mode in (0o640, 0o604, 0o660, 0o644, 0o602):
+            with self.subTest(oct(mode)):
+                self.assertIn("others", self.refused(self.write(mode=mode)))
+
+    def test_a_file_of_another_user_is_refused(self):
+        path = self.write()
+        with mock.patch.object(self.script.os, "geteuid", return_value=os.geteuid() + 1):
+            self.assertIn("not owned by you", self.refused(path))
+
+    def test_size_bounds_and_the_message_never_holds_the_secret(self):
+        short = b"S" * (self.script.MIN_SECRET_BYTES - 1)
+        long = b"L" * (self.script.MAX_SECRET_BYTES + 1)
+        for data in (short, long, b""):
+            with self.subTest(len(data)):
+                message = self.refused(self.write(data))
+                self.assertIn("bytes long", message)
+                if data:
+                    self.assertNotIn(data.decode(), message)
+        self.assertEqual(len(self.script.read_secret(
+            self.write(b"L" * self.script.MAX_SECRET_BYTES, "max"))), self.script.MAX_SECRET_BYTES)
+
+    def test_the_address_check_refuses_a_group_readable_secret(self):
+        check = _load_address_check()
+        path = self.write(mode=0o640)
+        argv = ["research_address_check.py", "--secret-file", path]
+        with mock.patch.object(sys, "argv", argv), contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(check.main(), 2)
+        self.assertIn("others", err.getvalue())
+        self.assertNotIn(SECRET.decode(), err.getvalue())
+
+
 class VectorServerTests(LiveServer):
     secret = VECTOR_SECRET
 
@@ -1857,20 +1923,16 @@ class LoadSecretTests(unittest.TestCase):
                 mock.patch.object(server, "drop_privileges",
                                   side_effect=lambda: order.append(("drop",))), \
                 mock.patch.object(server, "ThreadingHTTPServer", side_effect=SystemExit(0)), \
-                mock.patch.object(server.Handler, "secret", b""), \
-                mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop(server.SECRET_FILE_ENV, None)
+                mock.patch.object(server.Handler, "secret", b""):
             with self.assertRaises(SystemExit):
                 server.main()
             self.assertEqual(server.Handler.secret, SECRET)
         self.assertEqual(order, [("load", server.DEFAULT_SECRET_FILE), ("drop",)])
 
     def test_main_does_not_start_without_a_secret(self):
-        with mock.patch.dict(os.environ, {server.SECRET_FILE_ENV:
-                                          os.path.join(self.folder, "missing")}), \
-                mock.patch.object(server, "ThreadingHTTPServer") as listener:
+        with mock.patch.object(server, "ThreadingHTTPServer") as listener:
             with self.assertRaises(SystemExit) as caught:
-                server.main()
+                server.main(os.path.join(self.folder, "missing"))
         self.assertIn("cannot open", str(caught.exception.code))
         listener.assert_not_called()
 
@@ -1878,6 +1940,10 @@ class LoadSecretTests(unittest.TestCase):
         self.assertEqual(server.DEFAULT_SECRET_FILE, "/run/sandseek-sandbox/secret")
         self.assertFalse(hasattr(server, "load_signing_secret"))
         self.assertFalse(hasattr(server, "SIGNING_SECRET"))
+        # The production server cannot be pointed at another file by the environment.
+        self.assertFalse(hasattr(server, "SECRET_FILE_ENV"))
+        with open(server.__file__, encoding="utf-8") as source:
+            self.assertNotIn("SANDSEEK_SANDBOX_SECRET_FILE", source.read())
 
 
 class SignedRoundTripTests(LiveServer):
@@ -1937,6 +2003,7 @@ class SignedRoundTripTests(LiveServer):
             secret = os.path.join(folder, "secret")
             with open(secret, "wb") as handle:
                 handle.write(self.secret + b"\n")
+            os.chmod(secret, 0o600)
             done = subprocess.run([sys.executable, "-I", script, secret, str(self.port)],
                                   capture_output=True, text=True, timeout=30)
             self.assertEqual((done.returncode, done.stdout.strip()),
@@ -2200,6 +2267,44 @@ class EveryAnswerIsSignedTests(LiveServer):
                 self.assertEqual(answer.status, status)
                 self.assertSigned(answer)
 
+    def test_a_transfer_encoding_is_refused_with_a_signed_400(self):
+        body = b"{}"
+        nonce, headers = self.headers_for("POST", "/v1/fetch", body)
+        headers.append(("Transfer-Encoding", "chunked"))
+        answer = self.send_raw("POST", "/v1/fetch", headers, body, nonce=nonce)
+        self.assertError(answer, 400, "invalid_request")
+        self.assertIn("chunked", answer.body.decode())
+
+    def test_a_post_without_a_content_length_gets_a_signed_411(self):
+        nonce, headers = self.headers_for("POST", "/v1/fetch", b"{}", length=None)
+        answer = self.send_raw("POST", "/v1/fetch", headers, b"", nonce=nonce)
+        self.assertError(answer, 411, "invalid_request")
+
+    def test_a_get_needs_no_content_length(self):
+        self.assertEqual(self.exchange("GET", "/health").status, 200)
+
+    def test_a_content_length_must_be_plain_digits(self):
+        for value in ("+2", "2.0", " 0x2", "\u0662", "2 2"):
+            with self.subTest(value):
+                nonce, headers = self.headers_for("POST", "/v1/fetch", b"{}", length=value)
+                try:
+                    answer = self.send_raw("POST", "/v1/fetch", headers, b"", nonce=nonce)
+                except (ValueError, UnicodeEncodeError):
+                    continue  # The test client cannot even send it.
+                self.assertError(answer, 400, "invalid_request")
+
+    def test_an_unexpected_error_logs_only_the_exception_type(self):
+        class Boom(Exception):
+            pass
+        with mock.patch.object(self.handler.tools, "fetch",
+                               side_effect=Boom("https://secret.example/?token=hunter2")), \
+                mock.patch.object(sys, "stderr", io.StringIO()) as log:
+            answer = self.post("/v1/fetch", {"url": "https://example.com/a"})
+        self.assertError(answer, 500, "internal_error")
+        self.assertIn("internal error: Boom", log.getvalue())
+        self.assertNotIn("hunter2", log.getvalue())
+        self.assertNotIn("secret.example", log.getvalue())
+
 
 class SilentClientTests(LiveServer):
     handler_timeout = 0.5
@@ -2348,6 +2453,7 @@ class AddressCheckScriptTests(unittest.TestCase):
         path = os.path.join(folder.name, "secret")
         with open(path, "wb") as handle:
             handle.write(SECRET + b"\n")
+        os.chmod(path, 0o600)
         return path
 
     def run_script(self, resolver, transport, *extra, secret=SECRET):
@@ -2384,7 +2490,7 @@ class AddressCheckScriptTests(unittest.TestCase):
         argv = ["research_address_check.py", "--secret-file", "/nonexistent/secret"]
         with mock.patch.object(sys, "argv", argv), contextlib.redirect_stderr(io.StringIO()) as err:
             self.assertEqual(self.check.main(), 2)
-        self.assertIn("cannot read the sandbox secret", err.getvalue())
+        self.assertIn("cannot open the secret file", err.getvalue())
 
     def test_a_sandbox_that_refuses_everything_passes(self):
         def resolver(host, port):
@@ -2688,19 +2794,130 @@ class EntrypointTests(unittest.TestCase):
         self.assertNotIn("server.py", calls)
 
 
+class LauncherTests(unittest.TestCase):
+    """Scripts/research_sandbox.sh start and status, with `container` and `curl`
+    replaced by small stubs and HOME in a temporary folder."""
+
+    SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "Scripts",
+                          "research_sandbox.sh")
+    UNSIGNED = '{"error": {"message": "not signed", "code": "unauthorized"}}'
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.home, True)
+        self.bin = os.path.join(self.home, "bin")
+        os.mkdir(self.bin)
+        self.calls = os.path.join(self.home, "calls")
+        open(self.calls, "w").close()
+        self.write_stub("container", '''#!/bin/bash
+echo "$*" >> "$FAKE_CALLS"
+case "$1" in
+  run) exit "${FAKE_RUN_EXIT:-0}" ;;
+  list) case "$*" in *--all*) printf '%s' "$FAKE_ALL_LIST" ;; *) printf '%s' "$FAKE_LIST" ;; esac ;;
+  logs) printf '%s' "$FAKE_LOGS" ;;
+esac
+exit 0
+''')
+        self.write_stub("curl", '''#!/bin/bash
+[[ -n "$FAKE_CODE" ]] || exit 7
+printf '%s\\n%s' "$FAKE_BODY" "$FAKE_CODE"
+''')
+        self.secret = os.path.join(self.home, "Library", "Application Support", "SandSeek",
+                                   "sandbox", "secret")
+
+    def write_stub(self, name, text):
+        path = os.path.join(self.bin, name)
+        with open(path, "w") as handle:
+            handle.write(text)
+        os.chmod(path, 0o755)
+
+    def run_script(self, *args, **fake):
+        env = {"PATH": self.bin + os.pathsep + os.environ["PATH"], "HOME": self.home,
+               "FAKE_CALLS": self.calls, "FAKE_ALL_LIST": "sandseek-sandbox\n",
+               "FAKE_LIST": "sandseek-sandbox\n", "FAKE_LOGS": "", "FAKE_BODY": "",
+               "FAKE_CODE": "", **fake}
+        return subprocess.run(["bash", self.SCRIPT, *args], env=env, capture_output=True,
+                              text=True, timeout=60, stdin=subprocess.DEVNULL)
+
+    def container_calls(self):
+        with open(self.calls) as handle:
+            return handle.read().splitlines()
+
+    def test_a_start_that_answers_keeps_the_secret(self):
+        done = self.run_script("start", FAKE_CODE="401", FAKE_BODY=self.UNSIGNED)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("ready", done.stdout)
+        with open(self.secret) as handle:
+            self.assertEqual(len(handle.read()), 64)
+        self.assertEqual(os.stat(self.secret).st_mode & 0o777, 0o600)
+
+    def test_a_health_body_without_spaces_after_the_colon_still_counts(self):
+        done = self.run_script("status", FAKE_CODE="401",
+                               FAKE_BODY='{"error":{"code":"unauthorized"}}')
+        self.assertEqual(done.returncode, 0, done.stderr)
+
+    def test_a_container_that_does_not_start_leaves_no_secret(self):
+        done = self.run_script("start", FAKE_RUN_EXIT="1")
+        self.assertEqual(done.returncode, 1)
+        self.assertFalse(os.path.exists(self.secret))
+
+    def test_a_sandbox_that_never_answers_is_stopped_and_its_secret_deleted(self):
+        done = self.run_script("start", FAKE_LOGS="SandSeek sandbox listening on :9100\n")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("did not answer", done.stderr)
+        self.assertFalse(os.path.exists(self.secret))
+        calls = self.container_calls()
+        run_at = max(i for i, c in enumerate(calls) if c.startswith("run "))
+        self.assertTrue(any(c.startswith("stop") for c in calls[run_at:]), calls)
+        self.assertTrue(any(c.startswith("delete") for c in calls[run_at:]), calls)
+
+    def test_an_exited_container_leaves_no_secret(self):
+        done = self.run_script("start", FAKE_ALL_LIST="", FAKE_LIST="")
+        self.assertEqual(done.returncode, 1)
+        self.assertFalse(os.path.exists(self.secret))
+
+    def test_the_401_of_something_else_on_the_port_is_not_ready(self):
+        # The port gives the unsigned 401, but the container is not running.
+        done = self.run_script("start", FAKE_CODE="401", FAKE_BODY=self.UNSIGNED, FAKE_LIST="")
+        self.assertEqual(done.returncode, 1)
+        self.assertNotIn("ready", done.stdout)
+        self.assertFalse(os.path.exists(self.secret))
+
+    def test_an_old_image_is_named_in_start_and_status(self):
+        old = '{"status": "ok", "raw": true}'
+        done = self.run_script("start", FAKE_CODE="200", FAKE_BODY=old)
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("older than this SandSeek", done.stderr)
+        self.assertIn("rebuild", done.stderr)
+        self.assertFalse(os.path.exists(self.secret))
+        done = self.run_script("status", FAKE_CODE="200", FAKE_BODY=old)
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("older than this SandSeek", done.stderr)
+
+    def test_nothing_listening_is_not_answering(self):
+        done = self.run_script("status")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("not answering", done.stderr)
+
+    def test_the_script_has_no_ansi_c_newline_inside_a_pattern(self):
+        with open(self.SCRIPT, encoding="utf-8") as handle:
+            text = handle.read()
+        self.assertNotIn("$\'\\n\'}", text.replace("nl=$\'\\n\'", ""))
+        self.assertNotRegex(text.replace("nl=$\'\\n\'", ""), r"\$\{[^}]*\$\'\\n\'")
+
+
 class SigtermTests(unittest.TestCase):
     def test_sigterm_shuts_the_server_down_cleanly_with_exit_0(self):
         import signal
         import subprocess
         code = ("import server; server.drop_privileges = lambda: None; "
-                "server.PORT = 0; server.main()")
+                "import sys; server.PORT = 0; server.main(sys.argv[1])")
         with tempfile.TemporaryDirectory() as folder:
             secret = os.path.join(folder, "secret")
             with open(secret, "wb") as handle:
                 handle.write(SECRET)
             process = subprocess.Popen(
-                [sys.executable, "-c", code], cwd=os.path.dirname(os.path.abspath(__file__)),
-                env={**os.environ, server.SECRET_FILE_ENV: secret},
+                [sys.executable, "-c", code, secret], cwd=os.path.dirname(os.path.abspath(__file__)),
                 stderr=subprocess.PIPE, text=True)
             try:
                 line = process.stderr.readline()
@@ -2716,11 +2933,12 @@ class SigtermTests(unittest.TestCase):
 
     def test_the_server_does_not_start_without_a_secret(self):
         import subprocess
-        code = "import server; server.drop_privileges = lambda: None; server.PORT = 0; server.main()"
+        code = ("import sys, server; server.drop_privileges = lambda: None; "
+                "server.PORT = 0; server.main(sys.argv[1])")
         with tempfile.TemporaryDirectory() as folder:
             done = subprocess.run(
-                [sys.executable, "-c", code], cwd=os.path.dirname(os.path.abspath(__file__)),
-                env={**os.environ, server.SECRET_FILE_ENV: os.path.join(folder, "missing")},
+                [sys.executable, "-c", code, os.path.join(folder, "missing")],
+                cwd=os.path.dirname(os.path.abspath(__file__)),
                 capture_output=True, text=True, timeout=20)
         self.assertNotEqual(done.returncode, 0)
         self.assertNotIn("listening", done.stderr)

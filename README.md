@@ -251,8 +251,9 @@ To record real streams from a running server for test fixtures, use
 - Page text reaches the model wrapped in markers it is told to treat as
   information only; terminal escape codes and invisible Unicode are removed.
 - Both services stay on loopback; the sandbox refuses foreign `Host` headers.
-  Every request to the sandbox is signed with a secret that only SandSeek can
-  read, a repeated request is refused, and the sandbox does not start without
+  Every request to the sandbox is signed with a secret kept in a file only
+  your Mac user can read (so any program running as you can read it, and root
+  inside the VM can read the mounted file), a repeated request is refused, and the sandbox does not start without
   its secret.
 - Prompt-injection test pages are in `Sandbox/fixtures/injection`
   (`Scripts/research_injection_check.py`). A pass is evidence, not proof.

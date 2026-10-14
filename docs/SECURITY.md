@@ -177,8 +177,10 @@ These hold as long as the design is intact and the VM boundary holds.
   or whose path has a comma or a line break in it). That folder is mounted
   **read-only** into the VM, and the sandbox reads the file once, as root,
   before it gives up root. The secret is in no environment variable and no
-  command line, so it does not show in `ps`, `container inspect` or a process
-  started in the VM. The sandbox does not start without it: no secret, no
+  command line, so it does not show in `ps` or `container inspect`, and is in
+  no process's environment. Root in the VM (`container exec`) can read the
+  mounted file for as long as the VM runs; that is how the self-test signs its
+  requests. The sandbox does not start without it: no secret, no
   server. `stop` deletes the file, so a missing file means "not running", and
   `start` also removes the file the first version (0.1.0) left in TUFF's folder
   (only that one file, and only if it is a plain file of yours).
@@ -476,7 +478,7 @@ Durations are estimates from earlier runs on a 16 GB MacBook Air.
 
 | Test | What it checks | How to run | Expect | Time |
 | --- | --- | --- | --- | --- |
-| Sandbox self-test | the sandbox refuses the Mac, loopback, private ranges, metadata addresses, odd ports and schemes; the firewall is loaded and drops inbound connections except to port 9100 from the VM's gateway (rule text only); the server runs as user 10001 with no capabilities; raw connections from inside the VM to the Mac, the router addresses and the metadata address fail; every TCP port on the Mac is tried (only DNS may answer); a foreign `Host`, an unsigned request, a browser-style POST (signed, so it is the content type that is refused) and a repeated request are refused; a signed `/health` request gets a signed answer; a public page loads | `Scripts/research_sandbox.sh selftest` (also the app's **Security check**) | `all sandbox checks passed` | about 1 min |
+| Sandbox self-test | the sandbox refuses the Mac, loopback, private ranges, metadata addresses, odd ports and schemes; the firewall is loaded and drops inbound connections except to port 9100 from the VM's gateway (rule text only); the server runs as user 10001 with no capabilities; raw connections from inside the VM to the Mac, the router addresses and the metadata address fail; every TCP port on the Mac is tried (only DNS may answer); a foreign `Host`, an unsigned request, a browser-style POST (signed, so it is the content type that is refused), a repeated request and a signed `PUT` (405, after the signature check) are refused; the secret folder is mounted read-only in the VM; a signed `/health` request gets a signed answer; a public page loads | `Scripts/research_sandbox.sh selftest` (also the app's **Security check**) | `all sandbox checks passed` | about 1 min |
 | Address check | 98 addresses (private, loopback, link-local, IPv6 forms, numeric spellings, `localhost`, names that resolve to private addresses, bad schemes and ports) are refused, sent straight to the sandbox with no model; a public page still loads | `python3 Scripts/research_address_check.py` | `RESULT: pass`, exit 0 | 1 to 3 min |
 | Sandbox unit tests | the address policy, fetching, redirects, extraction, cleaning, the HTTP API, and the address check's list against the real policy; no network | `cd Sandbox && python3 -m unittest test_server` | `OK` | seconds |
 | Swift tests | the research loop with fake services, the command, the app logic, streaming, the exposure check | `swift test` | all pass | minutes |

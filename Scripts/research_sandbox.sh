@@ -30,6 +30,10 @@ set -euo pipefail
 # No file name expansion: $dns_servers is split into words below, not matched.
 set -f
 
+# A line break for ${...} patterns below: bash 3.2 (macOS /bin/bash) is not
+# reliable with $'\n' written inside them.
+nl=$'\n'
+
 # The old TUFF_RESEARCH_ names are ignored now; say so instead of silently
 # using the defaults. This does not stop the script.
 for old_name in TUFF_RESEARCH_SANDBOX_PORT TUFF_RESEARCH_DNS; do
@@ -99,7 +103,7 @@ require_container() {
 # a line break in it is refused.
 write_secret() {
   local modes secret temporary
-  if [[ "$secret_folder" == *,* || "$secret_folder" == *$'\n'* ]]; then
+  if [[ "$secret_folder" == *,* || "$secret_folder" == *"$nl"* ]]; then
     echo "the sandbox secret folder's path has a comma or a line break in it; not writing the sandbox secret" >&2
     return 1
   fi
@@ -153,22 +157,34 @@ remove_old_secret() {
 # A request that is not signed is refused with 401 and the code `unauthorized`.
 # That is the answer a running sandbox gives this script, which cannot sign
 # (it has no tool for that on the Mac); SandSeek checks the real signature
-# before it uses the sandbox.
-health() {
+# before it uses the sandbox. An image from before signed requests answers an
+# unsigned /health with 200 instead. `probe` sets $health_state to `ok` (the
+# 401), `old` (an unsigned 200) or `none`, and succeeds for `ok` only.
+health_state=none
+probe() {
   local reply
+  health_state=none
   reply="$(curl -sS --max-time 2 -w '\n%{http_code}' "http://127.0.0.1:$port/health" 2>/dev/null)" \
     || return 1
-  [[ "${reply##*$'\n'}" == 401 && "$reply" == *'"code": "unauthorized"'* ]]
+  if [[ "${reply##*$nl}" == 401 && "$reply" == *'"unauthorized"'* ]]; then
+    health_state=ok
+  elif [[ "${reply##*$nl}" == 200 ]]; then
+    health_state=old
+  fi
+  [[ "$health_state" == ok ]]
 }
+
+old_image_message="the sandbox image is older than this SandSeek and does not check signatures; rebuild it with: $0 build"
 
 # Sends one request signed with the secret from inside the VM, where root can
 # read it, and prints "STATUS signed" or "STATUS unsigned" (the answer's
-# signature was checked), then the answer's body. MODE is `replay` (the same
+# signature was checked), the answer's error code on a line of its own (empty
+# when it has none), then the answer's body. MODE is `replay` (the same
 # signed request twice; the second answer is printed), `plain` (Content-Type
 # text/plain) or empty.
 #   signed_call METHOD PATH BODY [MODE]
 signed_client='
-import hashlib, hmac, http.client, os, sys, time
+import hashlib, hmac, http.client, json, os, sys, time
 
 method, path, body = sys.argv[1], sys.argv[2], sys.argv[3].encode()
 mode = sys.argv[4] if len(sys.argv) > 4 else ""
@@ -204,8 +220,14 @@ if mode == "replay":
 expected = auth("sandseek-sandbox-resp-v1", method, path, nonce, str(status),
                 hashlib.sha256(data).hexdigest())
 good = tag is not None and hmac.compare_digest(tag.strip().lower(), expected)
+text = data.decode("utf-8", "replace")
+try:
+    code = json.loads(text).get("error", {}).get("code", "")
+except (ValueError, AttributeError):
+    code = ""
 print(status, "signed" if good else "unsigned")
-print(data.decode("utf-8", "replace"))
+print(code if isinstance(code, str) else "")
+print(text)
 '
 
 signed_call() {
@@ -213,10 +235,16 @@ signed_call() {
 }
 
 # The first line of a signed_call answer: "200 signed".
-call_status() { printf '%s' "${1%%$'\n'*}"; }
-# The JSON error code in a signed_call answer, or empty.
+call_status() { printf '%s' "${1%%$nl*}"; }
+# The second line: the JSON error code in the answer, or empty.
 call_code() {
-  printf '%s' "${1#*$'\n'}" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("error",{}).get("code",""))' 2>/dev/null || true
+  local rest="${1#*$nl}"
+  printf '%s' "${rest%%$nl*}"
+}
+# Everything after the second line: the answer's body.
+call_body() {
+  local rest="${1#*$nl}"
+  printf '%s' "${rest#*$nl}"
 }
 
 case "${1:-}" in
@@ -270,6 +298,14 @@ case "${1:-}" in
     fi
     # The file is complete before the sandbox starts, which reads it once. The
     # old VM is gone by now, so nothing is signing with the previous secret.
+    # From here on, every way out but success deletes the new secret and any
+    # VM that was started, so a missing secret still means "not running".
+    cleanup_failed_start() {
+      container stop "$name" >/dev/null 2>&1 || true
+      container delete "$name" >/dev/null 2>&1 || true
+      remove_secret
+    }
+    trap cleanup_failed_start EXIT
     write_secret || exit 1
     remove_old_secret
     container run "${run_options[@]}" "$image" >/dev/null
@@ -281,13 +317,22 @@ case "${1:-}" in
     startup_log=""
     refused=0 firewall_loaded=0 listening=0 gone=0 firewall_line=""
     polls_after_listening=0
+    old_image=0
     # A hung curl or `container` call must not outlast the app's start timeout
     # (180 s), so the poll counts below also sit under an overall deadline.
     deadline=$((SECONDS + 120))
     for _ in $(seq 1 50); do
-      if health; then
-        echo "web research sandbox ready at http://127.0.0.1:$port"
-        exit 0
+      # Ready needs the container to be running as well as the port to give
+      # the unsigned 401: something else on the port must not pass for it.
+      if probe; then
+        if running="$(container list --quiet 2>/dev/null)" && grep -qxF "$name" <<<"$running"; then
+          trap - EXIT
+          echo "web research sandbox ready at http://127.0.0.1:$port"
+          exit 0
+        fi
+      elif [[ "$health_state" == old ]]; then
+        old_image=1
+        break
       fi
       if out="$(container logs "$name" 2>/dev/null)" && [[ -n "$out" ]]; then
         startup_log="$(tail -n 5 <<<"$out")"
@@ -319,7 +364,9 @@ case "${1:-}" in
       echo "sandbox log:" >&2
       printf '%s\n' "$startup_log" >&2
     fi
-    if (( refused || gone )); then
+    if (( old_image )); then
+      echo "$old_image_message" >&2
+    elif (( refused || gone )); then
       # `--rm` has deleted the container, so `container logs` has nothing.
       debug_command="container run"
       for option in "${run_options[@]}"; do
@@ -334,7 +381,7 @@ case "${1:-}" in
       echo "the sandbox container exited and was removed (it runs with --rm)." >&2
       echo "To see why, run it once in the foreground without --rm (the secret file is mounted, so it starts as the real start does): $debug_command" >&2
     else
-      echo "sandbox started but did not answer on 127.0.0.1:$port; see: container logs $name" >&2
+      echo "sandbox started but did not answer on 127.0.0.1:$port; it was stopped and its secret deleted (the log is above)" >&2
       if (( firewall_loaded && listening )); then
         echo "the server is listening, and the log said: $firewall_line" >&2
         echo "(if the published port connects from another address than that gateway, the server is unreachable; see docs/SECURITY.md)" >&2
@@ -357,8 +404,12 @@ case "${1:-}" in
     ;;
   status)
     check_port
-    if health; then
+    probe || true
+    if [[ "$health_state" == ok ]]; then
       echo "web research sandbox answers at http://127.0.0.1:$port and refuses unsigned requests; SandSeek checks its signature before use"
+    elif [[ "$health_state" == old ]]; then
+      echo "$old_image_message" >&2
+      exit 1
     else
       echo "web research sandbox is not answering at http://127.0.0.1:$port" >&2
       exit 1
@@ -367,7 +418,12 @@ case "${1:-}" in
   selftest)
     check_port
     require_container
-    health || { echo "start the sandbox first: $0 start" >&2; exit 1; }
+    probe || true
+    if [[ "$health_state" == old ]]; then
+      echo "$old_image_message" >&2
+      exit 1
+    fi
+    [[ "$health_state" == ok ]] || { echo "start the sandbox first: $0 start" >&2; exit 1; }
     failures=0
     pass() { echo "  ok    $1"; }
     fail() { echo "  FAIL  $1" >&2; failures=$((failures + 1)); }
@@ -523,12 +579,20 @@ with ThreadPoolExecutor(64) as pool:
 
     echo "The sandbox must check requests and sign its answers:"
     reply="$(signed_call GET /health '' || true)"
-    body="${reply#*$'\n'}"
+    body="$(call_body "$reply")"
     if [[ "$(call_status "$reply")" == "200 signed" && "$body" == *'"status": "ok"'* && "$body" == *'"api": 1'* ]]; then
       pass "a signed /health request is answered with a signed answer"
     else
       fail "a signed /health request was not answered with a signed answer: ${reply:0:200}"
     fi
+    # The folder is mounted read-only; /proc/mounts in the VM shows whether
+    # Apple container did that.
+    mount_options="$(container exec "$name" awk -v dir="$vm_secret_folder" \
+      '$2 == dir { print $4 }' /proc/mounts 2>/dev/null || true)"
+    case ",$mount_options," in
+      *,ro,*) pass "the secret folder is mounted read-only in the VM" ;;
+      *) fail "the secret folder is not mounted read-only in the VM (mount options: ${mount_options:-none})" ;;
+    esac
     if [[ -e "$secret_file" ]]; then
       pass "the secret file exists on the Mac ($secret_file)"
     else

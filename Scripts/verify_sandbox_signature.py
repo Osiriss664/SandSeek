@@ -16,11 +16,53 @@ import hashlib
 import hmac
 import http.client
 import os
+import stat
 import sys
 import time
 
 REQUEST_LABEL = "sandseek-sandbox-req-v1"
 RESPONSE_LABEL = "sandseek-sandbox-resp-v1"
+MIN_SECRET_BYTES = 32
+MAX_SECRET_BYTES = 4096
+
+
+class SecretFileError(Exception):
+    """The secret file cannot be used; the message never holds the secret."""
+
+
+def read_secret(path: str) -> bytes:
+    """The secret in a file, without one trailing newline. The file is opened
+    without following a symlink and must be a regular file that is yours, with
+    no group or other permission bits, and 32 to 4096 bytes long (the checks
+    SandSeek itself makes), so a planted file cannot make this tool sign with a
+    key of someone else's choosing."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                             | getattr(os, "O_NONBLOCK", 0))
+    except OSError as error:
+        raise SecretFileError(f"cannot open the secret file: {error.strerror}") from None
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise SecretFileError("the secret file is not a regular file")
+        if info.st_uid != os.geteuid():
+            raise SecretFileError("the secret file is not owned by you")
+        if info.st_mode & 0o077:
+            raise SecretFileError("the secret file can be read or written by others; "
+                                  "run chmod 600 on it")
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = -1
+            value = handle.read(MAX_SECRET_BYTES + 2)
+    except OSError as error:
+        raise SecretFileError(f"cannot read the secret file: {error.strerror}") from None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    value = value.removesuffix(b"\n")
+    if not MIN_SECRET_BYTES <= len(value) <= MAX_SECRET_BYTES:
+        raise SecretFileError(
+            f"the secret must be {MIN_SECRET_BYTES} to {MAX_SECRET_BYTES} bytes long")
+    return value
 
 
 def request_auth(secret: bytes, method: str, path: str, nonce: str, timestamp: str,
@@ -40,8 +82,11 @@ def response_auth(secret: bytes, method: str, path: str, nonce: str, status: int
 def main(argv):
     if len(argv) not in (2, 3):
         sys.exit(__doc__)
-    with open(argv[1], "rb") as handle:
-        secret = handle.read().removesuffix(b"\n")
+    try:
+        secret = read_secret(argv[1])
+    except SecretFileError as error:
+        print(f"error: {error}")
+        return 1
     port = int(argv[2]) if len(argv) == 3 else 9100
     method, path = "GET", "/health"
     nonce = os.urandom(32).hex()

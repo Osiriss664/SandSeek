@@ -211,9 +211,11 @@ private func problem(with file: URL) -> String? {
         #expect(ResearchError.sandboxSecretUnusable("/x/secret is a symbolic link").description
             == "the sandbox's secret file cannot be used: /x/secret is a symbolic link")
         #expect(ResearchError.sandboxNotStarted.description
-            == "No sandbox secret: start the sandbox (Scripts/research_sandbox.sh start, or the "
+            == "no sandbox secret: start the sandbox (Scripts/research_sandbox.sh start, or the "
             + "app's Start button).")
         #expect(ResearchError.sandboxWrongVersion.description.contains("Scripts/research_sandbox.sh build"))
+        #expect(ResearchError.sandboxClockOff.description.contains("more than a minute"))
+        #expect(ResearchError.sandboxClockOff.description.contains("Restart the sandbox"))
     }
 }
 
@@ -417,6 +419,9 @@ private struct FakeSandbox: ResearchHTTPTransport {
         case malformedSignature(String)
         /// A correctly signed answer with this status and the usual body.
         case signedStatus(Int)
+        /// A correctly signed refusal by the sandbox itself, such as a 401
+        /// `stale_request` or a 503 `busy`.
+        case signedError(status: Int, code: String)
         case redirect
         /// A 408, as the real server answers a body that stopped short, with
         /// the signature over this body (empty or not).
@@ -508,6 +513,10 @@ private struct FakeSandbox: ResearchHTTPTransport {
             return signed(sign(status: status + 1))
         case .signedStatus(let code):
             return signed(sign(status: code), status: code)
+        case .signedError(let code, let errorCode):
+            let refusal = Data(
+                #"{"error":{"code":"\#(errorCode)","message":"refused"}}"#.utf8)
+            return signed(sign(status: code, body: refusal), status: code, body: refusal)
         case .malformedSignature(let text):
             return signed(text)
         case .redirect:
@@ -758,6 +767,42 @@ private func everyCall(_ client: ResearchSandboxClient, expecting error: Researc
         // Genuine, but not healthy.
         await #expect(throws: ResearchError.sandboxUnavailable("health check answered HTTP 503")) {
             try await client(FakeSandbox(behaviour: .signedStatus(503))).checkHealth()
+        }
+    }
+
+    @Test func theSandboxsOwnSignedRefusalsAreRunErrorsNotToolFailures() async {
+        // The sandbox refusing the request says nothing about a site, so it
+        // must never become a ResearchToolFailure (which the run counts
+        // against the site it was reading).
+        let clock = ClockBox()
+        let cases: [(Int, String, ResearchError)] = [
+            (401, "stale_request", .sandboxClockOff),
+            (401, "unauthorized", .sandboxUnavailable(
+                "the sandbox does not accept this SandSeek's secret (unauthorized); restart the sandbox")),
+            (401, "replayed_request", .sandboxUnavailable(
+                "the sandbox refused the request (replayed_request); try again")),
+            (503, "busy", .sandboxUnavailable("the sandbox refused the request (busy); try again")),
+        ]
+        for (status, code, expected) in cases {
+            let fake = FakeSandbox(behaviour: .signedError(status: status, code: code))
+            await everyCall(client(fake, clock: clock), expecting: expected)
+            // And with no health check in the last seconds, so the search
+            // starts with one and meets the refusal there.
+            await #expect(throws: expected) {
+                _ = try await client(fake, clock: clock, proved: false)
+                    .search(query: "q", maxResults: 3)
+            }
+        }
+    }
+
+    @Test func aRefusalCodeFromAnythingButTheSandboxsOwnChecksStaysAToolFailure() async {
+        // A 401 with another code, or a 404 `stale_request`, is not one of
+        // the sandbox's own refusals of the request.
+        for (status, code) in [(401, "something_else"), (404, "stale_request"), (502, "busy")] {
+            let sandbox = client(FakeSandbox(behaviour: .signedError(status: status, code: code)))
+            await #expect(throws: ResearchToolFailure.self) {
+                _ = try await sandbox.search(query: "q", maxResults: 3)
+            }
         }
     }
 

@@ -338,6 +338,7 @@ private func continuationWindow(_ page: String, contextTokens: Int,
 
 @Suite("Web research loop")
 struct ResearchAgentTests {
+#if canImport(CryptoKit)
     @Test func searchesReadsAndAnswersWithNumberedSources() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([
@@ -397,7 +398,9 @@ struct ResearchAgentTests {
         let firstSearch = history[3]["content"]?.stringValue ?? ""
         #expect(!firstSearch.contains("Research so far"))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func reasoningIsShownAndSentBackWithItsTurn() async throws {
         let thought = FakeServices.json(200, .object(["choices": .array([.object([
             "message": .object([
@@ -433,6 +436,7 @@ struct ResearchAgentTests {
         #expect(turn["reasoning_content"] == .string("  I should search first.\n"))
         #expect(history.filter { $0["reasoning_content"] != nil }.count == 1)
     }
+#endif
 
     @Test func pagesCannotRebuildTheMarkers() {
         let close = ResearchAgent.untrustedClose
@@ -683,6 +687,7 @@ struct ResearchAgentTests {
         #expect(formatted.contains("Characters 10-15 of 15."))
     }
 
+#if canImport(CryptoKit)
     @Test func rereadingAPageKeepsItsNumber() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
@@ -703,6 +708,7 @@ struct ResearchAgentTests {
         #expect(report.markdown.contains(
             "The answer cited [2], which is not a page the research read; the citation was removed."))
     }
+#endif
 
     @Test func unreadCitationsAreRemovedFromTheText() {
         func removing(_ numbers: Set<Int>, _ text: String) -> String {
@@ -748,6 +754,7 @@ struct ResearchAgentTests {
         #expect(!report("All good [1].", sources: 1).markdown.contains("not a page"))
     }
 
+#if canImport(CryptoKit)
     @Test func requestsUseOnlyFieldsTheTUFFServerAccepts() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.answer("done"), FakeServices.answer("done"),
@@ -764,6 +771,7 @@ struct ResearchAgentTests {
         #expect(names == ["web_search", "open_page"])
         #expect(services.requests.first?.url.absoluteString == "http://127.0.0.1:9100/health")
     }
+#endif
 
     @Test func thinkingIsSentOnlyWhenChosen() throws {
         let client = ResearchChatClient(
@@ -831,6 +839,7 @@ struct ResearchAgentTests {
         ]
     }
 
+#if canImport(CryptoKit)
     @Test func aRunWithGemmaAndThinkingOffNeverSendsPreserveThinking() async throws {
         let services = FakeServices(modelReplies: longRunReplies())
         _ = try await agent(services, enableThinking: false, model: "gemma-4-e2b-it").run(question: "q")
@@ -840,7 +849,9 @@ struct ResearchAgentTests {
             #expect(request["enable_thinking"] == .bool(false))
         }
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func preserveThinkingNeverChangesWithinARun() async throws {
         // Qwen with thinking off: sent from the first request on, though
         // there is no reasoning in the history yet.
@@ -868,7 +879,9 @@ struct ResearchAgentTests {
             .run(question: "q")
         #expect(off.modelRequests.allSatisfy { $0["preserve_thinking"] == nil })
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func defaultModelUsesTheOnlyListedModelForItsFamily() async throws {
         func listing(_ id: String) -> FakeServices {
             FakeServices(modelReplies: longRunReplies(), sandbox: { path, body in
@@ -885,6 +898,7 @@ struct ResearchAgentTests {
         _ = try await agent(qwen, enableThinking: false).run(question: "q")
         #expect(qwen.modelRequests.allSatisfy { $0["preserve_thinking"] == .bool(true) })
     }
+#endif
 
     @Test func theEnvironmentOverridesPreserveThinking() throws {
         let name = ResearchArguments.preserveThinkingVariable
@@ -917,6 +931,7 @@ struct ResearchAgentTests {
         #expect(ResearchAgent.displayedReasoning(nil) == nil)
     }
 
+#if canImport(CryptoKit)
     @Test func answersFromSnippetsAloneAreSentBackOnce() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "web_search", #"{"query":"apple container"}"#)]),
@@ -977,7 +992,9 @@ struct ResearchAgentTests {
         #expect(accepted.markdown.contains("cites [1], [2], which are not pages the research read."))
         #expect(blocked.requests.filter { $0.url.path == "/v1/fetch" }.count == 1)
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func theLoopOpensThreePagesFromAllSearches() async throws {
         // Each search finds two pages of its own.
         let services = FakeServices(modelReplies: [
@@ -1009,7 +1026,9 @@ struct ResearchAgentTests {
         #expect(pages.hasPrefix(ResearchAgent.topResultsRequest + "\n\nSource [1]: "))
         #expect(pages.contains("Source [3]: "))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func anAnswerCitingUnreadPagesIsRewrittenOnce() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "web_search", #"{"query":"apple container"}"#)]),
@@ -1082,7 +1101,9 @@ struct ResearchAgentTests {
         #expect(memory.answer == "Still from memory [1].")
         #expect(!unreadLog.events.contains(.revisingUnreadCitations))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aCutOffAnswerIsContinuedAndJoined() async throws {
         var options = ResearchOptions()
         options.nudges = false
@@ -1123,7 +1144,9 @@ struct ResearchAgentTests {
         #expect(ResearchAgent.joined("Intro text\n", "- one") == "Intro text\n- one")
         #expect(ResearchAgent.joined("Intro text.", " Next") == "Intro text. Next")
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aBlankContinuationKeepsThePartialAnswer() async throws {
         var options = ResearchOptions()
         options.nudges = false
@@ -1139,7 +1162,9 @@ struct ResearchAgentTests {
         #expect(log.events.filter { $0 == .continuingCutOffAnswer }.count == 1)
         #expect(report.markdown.contains("reached the model's token limit and may be cut off"))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func pageTextsAreKeptForTheReportOnlyWhenAsked() async throws {
         var options = ResearchOptions()
         options.nudges = false
@@ -1162,7 +1187,9 @@ struct ResearchAgentTests {
         #expect(saved.pages.first?.url == "https://github.com/apple/container")
         #expect(saved.pages.first?.text.contains("350 Sitze") == true)
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func theToolsClosedTurnsAreKeptWholeWithTheirReasoningWhenThePromptIsOverBudget() async throws {
         var options = ResearchOptions()
         options.maxSteps = 1
@@ -1184,7 +1211,9 @@ struct ResearchAgentTests {
         let reasoning = last.compactMap { $0["reasoning_content"]?.stringValue }
         #expect(reasoning == ["first reasoning", "second reasoning"])
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func anEmptyReplyAfterTheToolsClosedTurnIsAskedAgainOnTheSameHistory() async throws {
         var options = ResearchOptions()
         options.maxSteps = 1
@@ -1202,7 +1231,9 @@ struct ResearchAgentTests {
         let retry = messages(services.modelRequests[3])
         #expect(retry.last?["content"]?.stringValue == ResearchAgent.answerNowRequest)
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aCutOffReplyAfterTheToolsClosedTurnIsContinuedOnTheSameHistory() async throws {
         var options = ResearchOptions()
         options.maxSteps = 1
@@ -1220,7 +1251,9 @@ struct ResearchAgentTests {
         let continued = messages(services.modelRequests[3])
         #expect(continued.last?["content"]?.stringValue == ResearchAgent.continueCutOffRequest)
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aCutOffAnswerThatDoesNotFitIsNotContinued() async throws {
         var options = ResearchOptions()
         options.nudges = false
@@ -1242,7 +1275,9 @@ struct ResearchAgentTests {
         #expect(log.events.contains(.keepingCutOffAnswerNoRoom))
         #expect(!log.events.contains(.continuingCutOffAnswer))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aCutOffAnswerThatFitsIsContinuedWithoutShorteningTheHistory() async throws {
         var options = ResearchOptions()
         options.nudges = false
@@ -1266,7 +1301,9 @@ struct ResearchAgentTests {
         let reasoning = messages(requests[2]).compactMap { $0["reasoning_content"]?.stringValue }
         #expect(reasoning == ["first reasoning"])
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aContextOverflowDuringTheContinuationNeverShortensTheCutOffAnswer() async throws {
         var options = ResearchOptions()
         options.nudges = false
@@ -1290,6 +1327,7 @@ struct ResearchAgentTests {
             .filter { $0["role"] == .string("assistant") }.last
         #expect(cutOff?["content"]?.stringValue == longAnswer)
     }
+#endif
 
     /// A cut-off answer long enough that the continuation request is far larger
     /// than the system prompt and the tools around it.
@@ -1337,6 +1375,7 @@ struct ResearchAgentTests {
         Int(Double(size) / 2.5 * share) + 4_096 + ResearchAgent.templateReserveTokens
     }
 
+#if canImport(CryptoKit)
     @Test func aContinuationBetweenTheMarginedAndTheFullLimitIsSent() async throws {
         let sizes = try await requestSizes()
         // The limit with the margin is below the request, the one without is above.
@@ -1354,7 +1393,9 @@ struct ResearchAgentTests {
         #expect(!log.events.contains(.keepingCutOffAnswerNoRoom))
         #expect(!log.events.contains(.shortenedOlderResults))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aContinuationFarAboveTheLimitIsStillNotSent() async throws {
         let sizes = try await requestSizes()
         let tokens = window(forLimit: 0.5, of: sizes.continuation)
@@ -1371,7 +1412,9 @@ struct ResearchAgentTests {
         #expect(log.events.contains(.keepingCutOffAnswerNoRoom))
         #expect(!log.events.contains(.continuingCutOffAnswer))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aContinuationTheServerRefusesKeepsTheWholeCutOffAnswer() async throws {
         let sizes = try await requestSizes()
         let tokens = window(forLimit: 1.03, of: sizes.continuation)
@@ -1399,7 +1442,9 @@ struct ResearchAgentTests {
             #expect(sent.last?["content"]?.stringValue == ResearchAgent.continueCutOffRequest)
         }
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aContinuationThatStartsOverIsDropped() async throws {
         var options = ResearchOptions()
         options.nudges = false
@@ -1416,6 +1461,7 @@ struct ResearchAgentTests {
         #expect(report.answerCutOff)
         #expect(log.events.contains(.droppingRestartedContinuation))
     }
+#endif
 
     @Test func aContinuationIsTakenAsARestartOnlyWhenItsFirstLineRepeatsTheAnswers() {
         #expect(ResearchAgent.startsOver("# Titel\nText", with: "\n\n#  titel\nText"))
@@ -1426,6 +1472,7 @@ struct ResearchAgentTests {
         #expect(!ResearchAgent.startsOver("Titel", with: " \n "))
     }
 
+#if canImport(CryptoKit)
     @Test func eachStepReportsWhatItAddedToTheConversation() async throws {
         var options = ResearchOptions()
         options.nudges = false
@@ -1460,12 +1507,14 @@ struct ResearchAgentTests {
         #expect(added.assistant == 3 + 64)
         #expect(added.tool == 5 + 64)
     }
+#endif
 
     private static let uncitedAnswer = "Sumar kommt auf 12 Prozent der Stimmen. "
         + "Die Beteiligung lag bei 66 Prozent. Es gab 350 Sitze."
     private static let spainPage = "Sumar 12 Prozent der Stimmen, Beteiligung 66 Prozent, "
         + "350 Sitze im Parlament."
 
+#if canImport(CryptoKit)
     @Test func anAnswerWithUncitedFiguresIsAskedForCitationsOnce() async throws {
         var options = ResearchOptions()
         options.nudges = false
@@ -1513,7 +1562,9 @@ struct ResearchAgentTests {
         #expect(!fineLog.events.contains(.askingForCitations))
         #expect(fine.modelRequests.count == 2)
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aRevisionThatRemovesCitationsIsRejected() async throws {
         var options = ResearchOptions()
         options.nudges = false
@@ -1534,7 +1585,9 @@ struct ResearchAgentTests {
             #expect(services.modelRequests.count == 3)
         }
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func anAnswerInTheWrongLanguageIsRewrittenOnce() async throws {
         var options = ResearchOptions()
         options.nudges = false
@@ -1583,7 +1636,9 @@ struct ResearchAgentTests {
         #expect(unchanged.answerLanguageMismatch)
         #expect(off.modelRequests.count == 2)
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func allProblemsOfTheAnswerGoIntoOneRequest() async throws {
         var options = ResearchOptions()
         options.nudges = false
@@ -1613,6 +1668,7 @@ struct ResearchAgentTests {
         #expect(request.contains(ResearchAgent.missingCitationsRequest(read: [1])))
         #expect(request.contains(ResearchAgent.answerLanguageRequest(1)))
     }
+#endif
 
     @Test func topResultsTakeTheFirstHitOfEverySearchFirst() {
         var state = ResearchAgent.State(question: "q")
@@ -1626,6 +1682,7 @@ struct ResearchAgentTests {
         ])
     }
 
+#if canImport(CryptoKit)
     @Test func theModelIsAskedForTheConfiguredNumberOfPages() {
         #expect(agent(FakeServices(modelReplies: [])).systemPrompt()
             .contains("Read at least three independent sources before you answer."))
@@ -1637,7 +1694,9 @@ struct ResearchAgentTests {
         #expect(agent(FakeServices(modelReplies: []), options: options).systemPrompt()
             .contains("Read at least one source before you answer."))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func safetyNetsCanBeTurnedOff() async throws {
         // Without nudges, an answer from memory is taken as it is.
         var quiet = ResearchOptions()
@@ -1709,7 +1768,9 @@ struct ResearchAgentTests {
         #expect(!citedLog.events.contains(.revisingUnreadCitations))
         #expect(cited.modelRequests.count == 4)
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func theLoopOpensTheConfiguredNumberOfPages() async throws {
         var options = ResearchOptions()
         options.minimumPagesRead = 2
@@ -1736,14 +1797,18 @@ struct ResearchAgentTests {
         let search = services.requests.first { $0.url.path == "/v1/search" }
         #expect(search?.body?["max_results"] == .integer(3))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func theModelIsToldThatTodaysPagesAreReal() {
         let prompt = agent(FakeServices(modelReplies: [])).systemPrompt()
         #expect(prompt.contains("Pages dated up to today are real, current pages"))
         #expect(prompt.contains("never call them simulated"))
         #expect(prompt.contains("Being real does not make them right"))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func answersFromMemoryAreSentToSearchOnce() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.answer("From memory: the CDU won."),
@@ -1782,7 +1847,9 @@ struct ResearchAgentTests {
         let single = FakeServices(modelReplies: [FakeServices.answer("Memory.")])
         #expect(try await agent(single, options: options).run(question: "q").answer == "Memory.")
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func toolFailuresGoBackToTheModel() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([
@@ -1813,7 +1880,9 @@ struct ResearchAgentTests {
         // Only the one http URL reached the sandbox.
         #expect(services.requests.filter { $0.url.path == "/v1/fetch" }.count == 1)
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func extraCallsInOneTurnAreSkipped() async throws {
         var options = ResearchOptions()
         options.maxToolCallsPerTurn = 1
@@ -1832,7 +1901,9 @@ struct ResearchAgentTests {
         #expect(last?.hasPrefix("Skipped: at most 1 tool calls per turn.\n\nResearch so far: "
             + "1 search (\"one\")") == true)
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func anEmptyAnswerIsAskedForOnceWithoutThinking() async throws {
         // On the last step: a turn cut off earlier lets the research go on.
         var options = ResearchOptions()
@@ -1866,7 +1937,9 @@ struct ResearchAgentTests {
             #expect(ended.partial.sources.count == 1)
         }
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aRetryRefusedForEnableThinkingIsSentWithoutIt() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
@@ -1886,7 +1959,9 @@ struct ResearchAgentTests {
         #expect(last["enable_thinking"] == nil)
         #expect(last["tool_choice"] == .string("auto"))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func anAnswerAtTheTokenLimitIsMarkedAsCutOff() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
@@ -1908,7 +1983,9 @@ struct ResearchAgentTests {
         #expect(!done.answerCutOff)
         #expect(!done.markdown.contains("cut off"))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func theFinalRequestKeepsTheToolsWithToolChoiceAuto() async throws {
         var options = ResearchOptions()
         options.maxSteps = 2
@@ -1926,7 +2003,9 @@ struct ResearchAgentTests {
         #expect(final["tools"] == first["tools"])
         #expect(final["tools"]?.arrayValue?.isEmpty == false)
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aFinalReplyWithOnlyToolCallsIsToldTheToolsAreClosed() async throws {
         var options = ResearchOptions()
         options.maxSteps = 2
@@ -1958,7 +2037,9 @@ struct ResearchAgentTests {
         #expect(result["tool_call_id"] == .string("b"))
         #expect(result["content"]?.stringValue == ResearchAgent.toolsClosedNote)
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aSecondToolCallGetsAUserMessageBeforeTheNoneRequest() async throws {
         var options = ResearchOptions()
         options.maxSteps = 2
@@ -1987,7 +2068,9 @@ struct ResearchAgentTests {
         #expect(closed["role"] == .string("tool"))
         #expect(closed["tool_call_id"] == .string("d"))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aThirdToolCallIsClosedAndAskedWithNone() async throws {
         var options = ResearchOptions()
         options.maxSteps = 2
@@ -2009,7 +2092,9 @@ struct ResearchAgentTests {
         #expect(last.last?["role"] == .string("tool"))
         #expect(last.last?["tool_call_id"] == .string("e"))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aRefusedNoneRequestIsNotSentAgain() async throws {
         var options = ResearchOptions()
         options.maxSteps = 2
@@ -2040,7 +2125,9 @@ struct ResearchAgentTests {
         #expect(services.modelRequests.count == 6)
         #expect(!log.events.contains(.retryingAfterModelErrorAgain))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aFinalReplyWithContentAndToolCallsIsToldTheToolsAreClosed() async throws {
         var options = ResearchOptions()
         options.maxSteps = 2
@@ -2069,7 +2156,9 @@ struct ResearchAgentTests {
         #expect(history.last?["role"] == .string("tool"))
         #expect(history.last?["tool_call_id"] == .string("b"))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func theHistoryOnlyGrowsOnTheToolsClosedPathAndTheRevisionAfterIt() async throws {
         var options = ResearchOptions()
         options.maxSteps = 1
@@ -2105,7 +2194,9 @@ struct ResearchAgentTests {
         #expect(last[last.count - 2]["content"] == .string(Self.uncitedAnswer))
         #expect(last.last?["role"] == .string("user"))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func spentBudgetAsksForTheFinalAnswerOnce() async throws {
         var options = ResearchOptions()
         options.maxSteps = 2
@@ -2142,7 +2233,9 @@ struct ResearchAgentTests {
         #expect(messages(readFinal).last?["content"]
             == .string(ResearchAgent.budgetUsedUpRequest))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func contextOverflowRetriesOnce() async throws {
         let overflow = FakeServices.json(400, .object(["error": .object([
             "message": .string("effective prompt exceeds the configured context"),
@@ -2174,7 +2267,9 @@ struct ResearchAgentTests {
             _ = try await agent(failing).run(question: "q")
         }
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func anAnswerFromOneSearchIsAskedOnceToLookWider() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "web_search", #"{"query":"apple container"}"#)]),
@@ -2221,7 +2316,9 @@ struct ResearchAgentTests {
         #expect(onePage.searchQueries.isEmpty)
         #expect(!onePage.markdown.contains("## Searches"))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func repeatedQueriesDoNotReachTheSearchEngine() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "web_search", #"{"query":"Apple  Container"}"#)]),
@@ -2259,7 +2356,9 @@ struct ResearchAgentTests {
         #expect(log.events.contains(.askingToSearchMore))
         #expect(report.markdown.contains("Only one search was run"))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func repeatedSearchesWithNothingReadOpenTheTopResults() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "web_search", #"{"query":"berlin"}"#)]),
@@ -2295,6 +2394,7 @@ struct ResearchAgentTests {
             ResearchAgent.repeatedSearchesRequest + "\n\nSource [1]: \"apple/container"))
         #expect(pages.hasSuffix(ResearchAgent.untrustedClose))
     }
+#endif
 
     /// Each search finds two pages of its own.
     @Sendable private static func twoHitsPerSearch(_ path: String, _ body: ResearchJSON?)
@@ -2311,6 +2411,7 @@ struct ResearchAgentTests {
             })]))
     }
 
+#if canImport(CryptoKit)
     @Test func aModelThatOnlySearchesIsAskedToReadThenGetsPagesOpened() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "web_search", #"{"query":"one"}"#)]),
@@ -2342,7 +2443,9 @@ struct ResearchAgentTests {
         #expect(report.sources.count == 3)
         #expect(Self.fetches(services) == 3)
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func withoutNudgesTheTopResultsAreOpenedAfterThreeSearchOnlySteps() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "web_search", #"{"query":"one"}"#)]),
@@ -2375,7 +2478,9 @@ struct ResearchAgentTests {
         #expect(!quietLog.events.contains(.openingTopResults))
         #expect(Self.fetches(quiet) == 0)
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func searchStepsAfterAPageWasReadChangeNothing() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "web_search", #"{"query":"one"}"#)]),
@@ -2390,7 +2495,9 @@ struct ResearchAgentTests {
         #expect(!log.events.contains(.askingToReadPages))
         #expect(!log.events.contains(.openingTopResults))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func stepsOfOnlyRefusedSearchesEndTheResearch() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "web_search", #"{"query":"one"}"#)]),
@@ -2417,7 +2524,9 @@ struct ResearchAgentTests {
             + ResearchAgent.topUpNote + "\n\nSource [2]: "))
         #expect(services.modelRequests[4]["tool_choice"] == .string("auto"))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aStepWithANewSearchOrPageStartsTheCountAgain() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "web_search", #"{"query":"one"}"#)]),
@@ -2441,7 +2550,9 @@ struct ResearchAgentTests {
         #expect(log.events.filter { $0 == .stoppingRepeatedSearches }.count == 1)
         #expect(log.events.filter { $0 == .repeatedSearchRefused("one") }.count == 3)
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func refusedSearchesOnTheLastStepsRunOutTheBudgetAsBefore() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "web_search", #"{"query":"one"}"#)]),
@@ -2460,11 +2571,13 @@ struct ResearchAgentTests {
         let final = messages(services.modelRequests[4]).last?["content"]?.stringValue ?? ""
         #expect(final.hasPrefix(ResearchAgent.budgetUsedUpRequest))
     }
+#endif
 
     private static func fetches(_ services: FakeServices) -> Int {
         services.requests.filter { $0.url.path == "/v1/fetch" }.count
     }
 
+#if canImport(CryptoKit)
     @Test func aPartOfAPageAlreadyReadIsNotFetchedAgain() async throws {
         let url = "https://github.com/apple/container"
         let services = FakeServices(modelReplies: [
@@ -2485,7 +2598,9 @@ struct ResearchAgentTests {
             + "said, open it with a different offset for more of it, open a different page, "
             + "or answer.")
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func pageAddressesDifferingOnlyInFormAreTheSamePart() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([
@@ -2516,6 +2631,7 @@ struct ResearchAgentTests {
         _ = try await agent(redirected).run(question: "q")
         #expect(Self.fetches(redirected) == 1)
     }
+#endif
 
     @Test func redirectsOfAddressesTheModelMadeUp() {
         let same = ResearchAgent.Redirect.same
@@ -2550,6 +2666,7 @@ struct ResearchAgentTests {
         #expect(ResearchAgent.redirect(from: page, to: "") == same)
     }
 
+#if canImport(CryptoKit)
     @Test func aMadeUpAddressThatRedirectsElsewhereIsNoSource() async throws {
         var options = ResearchOptions()
         options.nudges = false
@@ -2598,7 +2715,9 @@ struct ResearchAgentTests {
         #expect(homeResult.contains("home page"))
         #expect(homeResult.contains("not found"))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aRejectedAddressAskedAgainGetsTheSameAnswer() async throws {
         var options = ResearchOptions()
         options.nudges = false
@@ -2623,7 +2742,9 @@ struct ResearchAgentTests {
         #expect(results[1].contains("does not match"))
         #expect(!results[1].contains("already read"))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aRejectedPageDoesNotBlockTheRealPageLater() async throws {
         var options = ResearchOptions()
         options.nudges = false
@@ -2646,7 +2767,9 @@ struct ResearchAgentTests {
         #expect(report.sources.map(\.url) == ["https://real.example/y"])
         #expect(report.sources.map(\.number) == [1])
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func addressesFromSearchResultsOrPageTextKeepTheirRedirects() async throws {
         var options = ResearchOptions()
         options.nudges = false
@@ -2692,6 +2815,7 @@ struct ResearchAgentTests {
         asked.pageTexts = [:]
         #expect(!asked.hasSeen(url: "https://fromquestion.example/doc2"))
     }
+#endif
 
     // MARK: Only addresses the research showed the model
 
@@ -2702,6 +2826,7 @@ struct ResearchAgentTests {
         return options
     }
 
+#if canImport(CryptoKit)
     @Test func aMadeUpAddressIsNotFetched() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "web_search", #"{"query":"apple container"}"#)]),
@@ -2721,7 +2846,9 @@ struct ResearchAgentTests {
         // It searched before, so there is no hint to search first.
         #expect(!refused.contains("Search first"))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func theFirstRefusalWithoutASearchSaysToSearchFirst() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "open_page", #"{"url":"https://guess.example/page"}"#)]),
@@ -2735,7 +2862,9 @@ struct ResearchAgentTests {
         #expect(refused.hasPrefix(ResearchAgent.unseenURLRefusal))
         #expect(refused.contains("Search first with web_search."))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func anAddressFromASearchResultIsOpened() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "web_search", #"{"query":"koeln"}"#)]),
@@ -2758,7 +2887,9 @@ struct ResearchAgentTests {
         #expect(Self.fetches(services) == 1)
         #expect(!log.events.contains { if case .unseenURLRefused = $0 { true } else { false } })
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func theAddressOpenedIsTheOneTheResearchShowedNotTheModelsSpelling() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "web_search", #"{"query":"koeln"}"#)]),
@@ -2781,6 +2912,7 @@ struct ResearchAgentTests {
             .compactMap { $0.body?["url"]?.stringValue }
         #expect(fetched == ["https://de.wikipedia.org/wiki/K%C3%B6ln?utm_source=x"])
     }
+#endif
 
     @Test func seenAddressesComeBackInTheSpellingTheyWereShown() {
         var state = ResearchAgent.State(question: "Lies https://q.example/Doc%7Ea bitte")
@@ -2801,6 +2933,7 @@ struct ResearchAgentTests {
         #expect(state.seenAddress(for: "http://www.r.example/p/") == "https://r.example/p?utm=1")
     }
 
+#if canImport(CryptoKit)
     @Test func anAddressRefusedBeforeCanBeOpenedOnceASearchShowsIt() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "open_page", #"{"url":"https://later.example/a"}"#)]),
@@ -2820,6 +2953,7 @@ struct ResearchAgentTests {
         #expect(Self.fetches(services) == 1)
         #expect(report.sources.map(\.url) == ["https://later.example/a"])
     }
+#endif
 
     @Test func addressesNotInTheResearchAreMatchedExactly() {
         var state = ResearchAgent.State(question: "q")
@@ -2907,6 +3041,7 @@ struct ResearchAgentTests {
         }
     }
 
+#if canImport(CryptoKit)
     @Test func anAddressOnlyInPageTextIsRefusedByDefault() async throws {
         let services = pageLinkServices()
         let log = EventLog()
@@ -2921,7 +3056,9 @@ struct ResearchAgentTests {
         #expect(!refused.contains("or from pages you read"))
         #expect(!ResearchOptions().pageLinks)
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func anAddressOnlyInPageTextIsOpenedWithPageLinksOn() async throws {
         let services = pageLinkServices()
         var options = gateOptions()
@@ -2932,7 +3069,9 @@ struct ResearchAgentTests {
         #expect(Self.fetches(services) == 2)
         #expect(!log.events.contains { if case .unseenURLRefused = $0 { true } else { false } })
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func anAddressInTheQuestionIsOpenedByDefault() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "open_page", #"{"url":"https://asked.example/Doc"}"#)]),
@@ -2944,7 +3083,9 @@ struct ResearchAgentTests {
         #expect(Self.fetches(services) == 1)
         #expect(!log.events.contains { if case .unseenURLRefused = $0 { true } else { false } })
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func stepsOfOnlyMadeUpAddressesStopTheRunLikeRepeats() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "web_search", #"{"query":"one"}"#)]),
@@ -2979,7 +3120,9 @@ struct ResearchAgentTests {
             $0 == .unseenURLRefused("https://guess.example/1") }.count == 3)
         #expect(Self.fetches(again) == 0)
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func withTheGateOffAnyAddressIsOpened() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "open_page", #"{"url":"https://guess.example/page"}"#)]),
@@ -2992,6 +3135,7 @@ struct ResearchAgentTests {
         #expect(!log.events.contains { if case .unseenURLRefused = $0 { true } else { false } })
         #expect(ResearchOptions().onlySeenURLs)
     }
+#endif
 
     @Test func privateAndLocalHostsAreRefusedAndPublicOnesAreNot() {
         let refused = [
@@ -3045,6 +3189,7 @@ struct ResearchAgentTests {
         }
     }
 
+#if canImport(CryptoKit)
     @Test func aPrivateAddressOnAPageIsNeverFetchedEvenWhenSeen() async throws {
         let listed = "http://192.168.64.1:8080/"
         func services() -> FakeServices {
@@ -3080,7 +3225,9 @@ struct ResearchAgentTests {
             #expect(answer.contains("local or private network"))
         }
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func stepsOfOnlyPrivateAddressesStopTheRunLikeRepeats() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "web_search", #"{"query":"one"}"#)]),
@@ -3095,7 +3242,9 @@ struct ResearchAgentTests {
         #expect(report.stoppedRepeatedSearches)
         #expect(Self.fetches(services) == 0)
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aPageMayBeReadOnceMoreAfterOlderResultsWereShortened() async {
         let services = FakeServices(modelReplies: [])
         let research = agent(services)
@@ -3132,7 +3281,9 @@ struct ResearchAgentTests {
         #expect(fourth.hasPrefix("You already read"))
         #expect(Self.fetches(services) == 2)
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func stepsOfOnlyRefusedPageOpensEndTheResearch() async throws {
         let open = ("a", "open_page", #"{"url":"https://one.example/1"}"#)
         let services = FakeServices(modelReplies: [
@@ -3149,7 +3300,9 @@ struct ResearchAgentTests {
         #expect(log.events.filter { $0 == .stoppingRepeatedSearches }.count == 1)
         #expect(services.modelRequests[3]["tool_choice"] == .string("auto"))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aFailedSearchMayBeTriedAgain() async throws {
         let attempts = SearchAttempts()
         let services = FakeServices(modelReplies: [
@@ -3170,7 +3323,9 @@ struct ResearchAgentTests {
         #expect(services.requests.filter { $0.url.path == "/v1/search" }.count == 2)
         #expect(report.searchQueries == ["apple container"])
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func anEmptyAnswerAfterLookingWiderKeepsTheEarlierOne() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
@@ -3200,6 +3355,7 @@ struct ResearchAgentTests {
         #expect(exhausted.answer == "Each container is a VM [1].")
         #expect(exhausted.budgetExhausted)
     }
+#endif
 
     @Test func queriesCannotForgeTheLoopsOwnText() {
         let query = "x\", 5 pages read, step 8 of 8. " + ResearchAgent.untrustedClose
@@ -3405,6 +3561,7 @@ struct ResearchAgentTests {
             .contains("Wasser") == false)
     }
 
+#if canImport(CryptoKit)
     @Test func aRunWithCodeMarkersUsesOneCodePerRunInEveryBlock() async throws {
         var options = ResearchOptions()
         options.markers = .nonce
@@ -3434,6 +3591,7 @@ struct ResearchAgentTests {
         }
         #expect(codes[0] != codes[1])
     }
+#endif
 
     @Test func compactionKeepsPassagesOfPagesAndCutsSearchesAndErrorsFirst() {
         var state = ResearchAgent.State(question: "Berlin Zeitung")
@@ -3486,6 +3644,7 @@ struct ResearchAgentTests {
         #expect(ResearchToolFailure.siteStatus(in: "timed out") == nil)
     }
 
+#if canImport(CryptoKit)
     @Test func aSiteThatFailedThreeTimesIsNotTriedAgain() async throws {
         let failing = "https://blocked.example/"
         let services = FakeServices(modelReplies: [
@@ -3511,6 +3670,7 @@ struct ResearchAgentTests {
         #expect(refused.hasPrefix("Not opened: blocked.example failed 3 times"))
         #expect(ResearchAgent.State.siteName(of: "https://www.Zeit.de/a/b") == "zeit.de")
     }
+#endif
 
     @Test func compactionFallsBackToOneLinePerResult() {
         var state = ResearchAgent.State(question: "Berlin Zeitung")
@@ -3549,6 +3709,7 @@ struct ResearchAgentTests {
         #expect(state.keywordStems() == ["gruppe", "berlin", "zeitun", "vertei"])
     }
 
+#if canImport(CryptoKit)
     @Test func budgetFollowsTheContextWindowAndMeasuredTokens() {
         let chat = ResearchChatClient(
             serverURL: URL(string: "http://127.0.0.1:8080")!, model: "default",
@@ -3591,7 +3752,9 @@ struct ResearchAgentTests {
         #expect(fixedAgent.promptBudget(state) == 5_000)
         #expect(fixedAgent.contextLimit(state) == 5_000)
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aLongRunShortensOldPagesToFitTheListedContext() async throws {
         let page = Self.longPageText
         let services = FakeServices(modelReplies: [
@@ -3629,7 +3792,9 @@ struct ResearchAgentTests {
         #expect(tools[0].contains("verteilt in Berlin jeden Samstag eine Zeitung"))
         #expect(tools[1].contains(page))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aTurnCutOffWhileThinkingContinuesTheResearch() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
@@ -3682,7 +3847,9 @@ struct ResearchAgentTests {
         #expect(gptOss.modelRequests.count == 5)
         #expect(gptOss.modelRequests[4]["enable_thinking"] == nil)
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aContextThatStillOverflowsShortensTheNewestResultsToo() async throws {
         let page = Self.longPageText
         let overflow = FakeServices.json(400, .object(["error": .object([
@@ -3717,7 +3884,9 @@ struct ResearchAgentTests {
         #expect(shortened.hasPrefix("Source [1]: \"Gruppe\" (title as the page gives it)\n"))
         #expect(!shortened.contains("Lorem ipsum"))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aStepThatTimesOutIsAskedAgainWithoutThinking() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.answer("Without searching."),
@@ -3743,7 +3912,9 @@ struct ResearchAgentTests {
         #expect(services.modelRequests[2]["enable_thinking"] == .bool(false))
         #expect(services.modelRequests[0]["enable_thinking"] == .bool(true))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aTimedOutStepWithoutThinkingIsShortenedAndAskedOnce() async throws {
         func replies(_ final: [ResearchHTTPResponse]) -> FakeServices {
             FakeServices(modelReplies: [
@@ -3782,7 +3953,9 @@ struct ResearchAgentTests {
         }
         #expect(failingLog.events.filter { $0 == .retryingAfterTimeoutShorter }.count == 1)
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func stepsWithThinkingGetTheThinkingLimit() async throws {
         func limits(thinking: Bool?, options: ResearchOptions = ResearchOptions(),
                     replies: [ResearchHTTPResponse]) async throws -> [TimeInterval?] {
@@ -3829,7 +4002,9 @@ struct ResearchAgentTests {
         #expect(log.events.filter { $0 == .retryingAfterTimeout }.count == 1)
         #expect(services.modelRequests.allSatisfy { $0["enable_thinking"] == .bool(false) })
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aServerErrorWhileThinkingIsAskedAgainWithoutThinking() async throws {
         let failure = FakeServices.json(500, .object(["error": .object([
             "message": .string("generation failed; see TUFFServer stderr"),
@@ -3883,6 +4058,7 @@ struct ResearchAgentTests {
         #expect(!refusedLog.events.contains(.retryingAfterModelError))
         #expect(refused.modelRequests.count == 1)
     }
+#endif
 
     private static let structuredOutputFailure = FakeServices.json(500, .object(["error": .object([
         "message": .string("structured_output_failure: malformed tool call"),
@@ -3890,6 +4066,7 @@ struct ResearchAgentTests {
         "type": .string("server_error"),
     ])]))
 
+#if canImport(CryptoKit)
     @Test func aServerErrorWithThinkingOffIsAskedOnceMore() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "open_page", #"{"url":"https://a.example/"}"#)]),
@@ -3929,7 +4106,9 @@ struct ResearchAgentTests {
         #expect(failing.modelRequests.count == 3)
         #expect(failingLog.events.filter { $0 == .retryingAfterModelErrorAgain }.count == 1)
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aThinkingStepGetsNoThirdAttempt() async {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "open_page", #"{"url":"https://a.example/"}"#)]),
@@ -3954,7 +4133,9 @@ struct ResearchAgentTests {
         #expect(log.events.filter { $0 == .retryingAfterModelError }.count == 1)
         #expect(!log.events.contains(.retryingAfterModelErrorAgain))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aRunThatEndsEarlyKeepsWhatItRead() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([
@@ -3987,7 +4168,9 @@ struct ResearchAgentTests {
             question: "q", answer: "A.", sources: [], modelTurns: 1, budgetExhausted: false)
         #expect(!finished.markdown.contains("ended early"))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aRunThatEndsBeforeReadingAnythingHasNoPartialReport() async {
         let services = FakeServices(modelReplies: [
             Self.structuredOutputFailure, Self.structuredOutputFailure,
@@ -4000,7 +4183,9 @@ struct ResearchAgentTests {
             #expect(!(error is ResearchRunEndedEarly))
         }
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aStoppedRunKeepsWhatItRead() async {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "open_page", #"{"url":"https://a.example/"}"#)]),
@@ -4019,6 +4204,7 @@ struct ResearchAgentTests {
             Issue.record("unexpected error \(error)")
         }
     }
+#endif
 
     @Test func theContextWindowIsReadFromTheModelList() async {
         let models = FakeServices(modelReplies: []) { path, _ in
@@ -4049,6 +4235,7 @@ struct ResearchAgentTests {
             enableThinking: nil, transport: silent).contextTokens() == nil)
     }
 
+#if canImport(CryptoKit)
     @Test func unreachableSandboxStopsBeforeTheModelRuns() async {
         let services = FakeServices(modelReplies: [FakeServices.answer("never")]) { _, _ in
             FakeServices.json(503, .object([:]))
@@ -4058,6 +4245,7 @@ struct ResearchAgentTests {
         }
         #expect(services.modelRequests.isEmpty)
     }
+#endif
 }
 
 @Suite("Web research arguments")
@@ -4330,6 +4518,7 @@ struct ResearchFigureCheckTests {
         #expect(check("Am 15. Februar um 12:30 Uhr [1]", [1: "nothing"]).isEmpty)
     }
 
+#if canImport(CryptoKit)
     @Test func aRunWithAFigureNotOnItsPageIsFlaggedInTheReport() async throws {
         var options = ResearchOptions()
         options.nudges = false
@@ -4364,6 +4553,7 @@ struct ResearchFigureCheckTests {
         #expect(!found.markdown.contains("Figure check"))
         #expect(!foundLog.events.contains(.unverifiedFigures(1)))
     }
+#endif
 
     @Test func aDateNextToSomethingElseOnThePageIsFlagged() {
         let answer = "Die Bibliotheca Albertina ist seit dem 11.09.2026 dauerhaft geschlossen [4]"
@@ -4466,6 +4656,7 @@ struct ResearchFigureCheckTests {
         #expect(check("Kündigungsfristen sind kurz. [1]", [1: "Wien ist groß."]).isEmpty)
     }
 
+#if canImport(CryptoKit)
     @Test func theReportListsFiguresContextAndNamesSeparately() async throws {
         var options = ResearchOptions()
         options.nudges = false
@@ -4497,6 +4688,7 @@ struct ResearchFigureCheckTests {
         #expect(markdown.contains("but not next to what the sentence names"))
         #expect(markdown.contains("These names were not found"))
     }
+#endif
 
     private let german = "Die Stadt ist nicht groß und hat ein Haus für die Leute, mit Garten "
         + "und von Bäumen. Stand 2026."
@@ -5065,6 +5257,7 @@ struct ResearchSourceCountTests {
 
 @Suite("Web research requested sources in the loop")
 struct ResearchRequestedSourcesLoopTests {
+#if canImport(CryptoKit)
     @Test func aQuestionWithASourceCountMarksEveryPageAndRemindsOnce() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "open_page", #"{"url":"https://github.com/apple/container"}"#)]),
@@ -5088,7 +5281,9 @@ struct ResearchRequestedSourcesLoopTests {
         #expect(report.markdown.contains(
             "The question asked for at least 3 sources; 1 was read."))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func noRemindersWithoutNudgesAndNoNoteWhenReached() async throws {
         var options = ResearchOptions()
         options.nudges = false
@@ -5123,7 +5318,9 @@ struct ResearchRequestedSourcesLoopTests {
         #expect(!messages(plain.modelRequests[1]).compactMap { $0["content"]?.stringValue }
             .contains { $0.contains("requested.") })
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aLargeContextWindowKeepsTheStepsWholeAboveTheSpeedCap() async throws {
         let page = String(repeating: "Wasser fließt bergab und trägt Sand. ", count: 1_200)
         var options = ResearchOptions()
@@ -5160,6 +5357,7 @@ struct ResearchRequestedSourcesLoopTests {
         #expect(tools.count == 2)
         #expect(tools.allSatisfy { $0.contains(page) })
     }
+#endif
 
     /// A 16,384 token server with 8,192 tokens for a reply: the steps are held
     /// to 19,840 characters (`promptBudget`), a request for the answer to
@@ -5206,6 +5404,7 @@ struct ResearchRequestedSourcesLoopTests {
             .compactMap { $0["content"]?.stringValue }
     }
 
+#if canImport(CryptoKit)
     @Test func anAnswerRequestBetweenTheBudgetAndTheAnswerLimitIsSentWhole() async throws {
         // 2 pages x 240 x 37 = 17,760 characters; with the system prompt, tools and
         // requests (several thousand) the request is over the step budget of 19,840
@@ -5224,7 +5423,9 @@ struct ResearchRequestedSourcesLoopTests {
         #expect(tools.count == 2)
         #expect(tools.allSatisfy { $0.contains(page) })
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func anAnswerRequestAboveTheAnswerLimitIsShortened() async throws {
         let page = String(repeating: "Wasser fließt bergab und trägt Sand. ", count: 450)
         let log = EventLog()
@@ -5238,7 +5439,9 @@ struct ResearchRequestedSourcesLoopTests {
         #expect(!tools[0].contains(page))
         #expect(tools[1].contains(page))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func anAnswerRequestTheServerRefusesIsShortenedAndSentAgain() async throws {
         let page = String(repeating: "Wasser fließt bergab und trägt Sand. ", count: 270)
         let overflow = FakeServices.json(400, .object(["error": .object([
@@ -5259,6 +5462,7 @@ struct ResearchRequestedSourcesLoopTests {
         #expect(!retried[0].contains(page))
         #expect(retried[1].contains(page))
     }
+#endif
 }
 
 @Suite("Web research passages")
@@ -5365,6 +5569,7 @@ struct ResearchPassagesTests {
         #expect(ResearchArguments.usage.contains("--passages on|off"))
     }
 
+#if canImport(CryptoKit)
     @Test func clientSendsPassageFieldsOnlyWhenAsked() async throws {
         let services = FakeServices(modelReplies: [], sandbox: Self.sandbox)
         let client = ResearchSandboxClient.forTests(
@@ -5398,6 +5603,7 @@ struct ResearchPassagesTests {
                 passages: true, query: "q")
         }
     }
+#endif
 
     @Test func resultShowsPositionsSeparatorAndStaysUntrusted() {
         let hostile = ResearchPassage(
@@ -5445,6 +5651,7 @@ struct ResearchPassagesTests {
         #expect(ResearchAgent.State.pageKeys(plain) != first)
     }
 
+#if canImport(CryptoKit)
     @Test func passageRunContinuesAndRefusesTheSamePassagesTwice() async throws {
         let services = FakeServices(modelReplies: Self.readThenRepeat, sandbox: Self.sandbox)
         let log = EventLog()
@@ -5482,7 +5689,9 @@ struct ResearchPassagesTests {
             .first { $0["name"] == .string("open_page") }?["description"]?.stringValue ?? ""
         #expect(description.contains("passages"))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func figureCheckSeesOnlyWhatWasReadWithGapsBetweenStrangers() async throws {
         let services = FakeServices(modelReplies: Self.readThenRepeat, sandbox: Self.sandbox)
         let report = try await agent(services, options: Self.options(passages: true))
@@ -5499,6 +5708,7 @@ struct ResearchPassagesTests {
         #expect(!text.contains("[...]"))
         #expect(text.contains("350 Euro"))
     }
+#endif
 
     @Test func fakedMarkersInPageTextAreNeutralisedAndNeighboursGetNoSeparator() {
         let hostile = ResearchPassage(
@@ -5520,6 +5730,7 @@ struct ResearchPassagesTests {
         #expect(formatted.contains("Nachher\n[characters 61-70]"))
     }
 
+#if canImport(CryptoKit)
     @Test func readPastTheLastPassageExplainsItselfAndMakesNoSource() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "web_search", #"{"query":"waermepumpe kosten"}"#)]),
@@ -5545,7 +5756,9 @@ struct ResearchPassagesTests {
         #expect(!result.contains("no readable text"))
         #expect(!result.contains("Source ["))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func healthMustSayPassagesWhenTheyAreOn() async throws {
         let old = FakeServices(modelReplies: [])
         let client = ResearchSandboxClient.forTests(
@@ -5574,6 +5787,7 @@ struct ResearchPassagesTests {
         }
         #expect(services.modelRequests.isEmpty)
     }
+#endif
 
     @Test func shorteningIgnoresTheLoopsPassageLines() {
         let body = "[characters 0-50]\nDie Waermepumpe kostet 350 Euro pro Quadratmeter Wohnflaeche.\n"
@@ -5607,6 +5821,7 @@ struct ResearchPassagesTests {
         #expect(ResearchAgent.State.scalarPrefix("abc", 1_500) == "abc")
     }
 
+#if canImport(CryptoKit)
     @Test func reportSaysWhetherPassagesWereOn() async throws {
         let on = try await agent(
             FakeServices(modelReplies: Self.readThenRepeat, sandbox: Self.sandbox),
@@ -5619,7 +5834,9 @@ struct ResearchPassagesTests {
         #expect(!off.passagesOn)
         #expect(!off.markdown.contains("--passages on"))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func offKeepsCharacterReadsAndTheOldWording() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "web_search", #"{"query":"waermepumpe kosten"}"#)]),
@@ -5646,6 +5863,7 @@ struct ResearchPassagesTests {
         #expect(!description.contains("passages"))
         #expect(tools == ResearchAgent.tools)
     }
+#endif
 }
 
 @Suite("Web research figure check, round D")
@@ -5767,6 +5985,7 @@ struct ResearchRoundDLoopTests {
         ], sandbox: Self.sandbox)
     }
 
+#if canImport(CryptoKit)
     @Test func aPageWithoutTextGetsNoSourceNumberAndIsRefusedAgain() async throws {
         var options = ResearchOptions()
         options.nudges = false
@@ -5785,7 +6004,9 @@ struct ResearchRoundDLoopTests {
         #expect(second.contains("You already read this part of"))
         #expect(services.requests.filter { $0.url.path == "/v1/fetch" }.count == 1)
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func theAnswerRequestCanBeWrittenToAFile() async throws {
         let path = NSTemporaryDirectory() + "answer-request-\(UUID().uuidString).json"
         defer { try? FileManager.default.removeItem(atPath: path) }
@@ -5806,7 +6027,9 @@ struct ResearchRoundDLoopTests {
         let text = String(decoding: data, as: UTF8.self)
         #expect(text.contains("Source [1]"))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aRewriteThatWouldNotFitTheContextIsNotAsked() async throws {
         var options = ResearchOptions()
         options.nudges = false
@@ -5833,7 +6056,9 @@ struct ResearchRoundDLoopTests {
         #expect(report.answer == "VMs [1]. " + body + "Linux 6.")
         #expect(report.droppedUnreadCitations == [3])
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aCitationOfAnEmptyPageIsRewrittenLikeAnUnknownNumber() async throws {
         var options = ResearchOptions()
         options.nudges = false
@@ -5851,7 +6076,9 @@ struct ResearchRoundDLoopTests {
         #expect(report.answer == "Container sind VMs [1]. Nicht verifiziert: das Wachstum.")
         #expect(report.unknownCitations.isEmpty)
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aCitationOfAnEmptyPageThatSurvivesIsRemovedAndItsFigureChecked() async throws {
         var options = ResearchOptions()
         options.nudges = false
@@ -5872,7 +6099,9 @@ struct ResearchRoundDLoopTests {
         #expect(text.contains("The answer cited [2], which is not a page the research read; "
             + "the citation was removed."))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func theRepeatedSearchStopRemindsOnceWhenFewerSourcesWereReadThanAsked() async throws {
         let question = "Nenne mindestens 3 Quellen zu Containern"
         let wanted = ResearchSourceRequest(minimum: 3, maximum: nil)
@@ -5932,6 +6161,7 @@ struct ResearchRoundDLoopTests {
         #expect(direct.stoppedRepeatedSearches)
         #expect(!plainLog.events.contains(.askingToReadMoreSources))
     }
+#endif
 }
 
 @Suite("Web research escaped citations, short cut-off answers and look-alike figures, round E")
@@ -6112,6 +6342,7 @@ struct ResearchRoundETests {
         #expect(!ResearchAgent.looksCutOff(long))
     }
 
+#if canImport(CryptoKit)
     @Test func aShortAnswerCutOffWithANormalStopIsContinued() async throws {
         var options = ResearchOptions()
         options.maxSteps = 1
@@ -6137,7 +6368,9 @@ struct ResearchRoundETests {
         #expect(ResearchAgent.continueMidSentenceRequest.contains("reply with nothing"))
         #expect(!report.markdown.contains("mid-sentence"))
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aBlankOrRestartedContinuationOfASeemingCutOffClearsTheFlag() async throws {
         var options = ResearchOptions()
         options.maxSteps = 1
@@ -6161,7 +6394,9 @@ struct ResearchRoundETests {
             #expect(!report.answerCutOff, "\(reply)")
         }
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func aSeemingCutOffThatCannotBeContinuedIsFlaggedMidSentence() async throws {
         var options = ResearchOptions()
         options.maxSteps = 1
@@ -6178,6 +6413,7 @@ struct ResearchRoundETests {
             "_The answer seems to stop mid-sentence and may be incomplete._"))
         #expect(!report.markdown.contains("token limit"))
     }
+#endif
 
     @Test func aSpaceIsAddedOnlyForASeemingCutOff() {
         #expect(ResearchAgent.joined("Es gab und", "mehr.", spaced: true) == "Es gab und mehr.")
@@ -6261,6 +6497,7 @@ struct ResearchRoundETests {
         #expect(ResearchAgent.joined("Es gab:", "[1] eins", spaced: true) == "Es gab:\n[1] eins")
     }
 
+#if canImport(CryptoKit)
     @Test func aShortCompleteAnswerIsNotContinued() async throws {
         var options = ResearchOptions()
         options.maxSteps = 1
@@ -6278,6 +6515,7 @@ struct ResearchRoundETests {
         #expect(!log.events.contains(.continuingMidSentenceAnswer))
         #expect(services.modelRequests.count == 3)
     }
+#endif
 
     @Test func financeAbbreviationsAreNoNames() {
         let pages = [1: "Der Gewinn stieg. Die Rendite lag bei 12 Prozent."]
@@ -6533,6 +6771,7 @@ private struct CannedSandboxReply: ResearchHTTPTransport {
 struct ResearchSandboxAddressTests {
     private let sandbox = URL(string: "http://127.0.0.1:9100")!
 
+#if canImport(CryptoKit)
     @Test func aPageAddressThatIsNotHttpOrHttpsIsRefused() async throws {
         for address in ["javascript:alert(1)", "file:///etc/passwd", "data:text/html,x",
                         "ftp://example.com/a", " https://example.com/a", "//example.com/a"] {
@@ -6547,7 +6786,9 @@ struct ResearchSandboxAddressTests {
         let slice = try await good.fetch(url: "https://example.com/", offset: 0, maxCharacters: 100)
         #expect(slice.url == "HTTPS://example.com/a")
     }
+#endif
 
+#if canImport(CryptoKit)
     @Test func searchResultsWithoutAWebAddressAreDropped() async throws {
         let client = ResearchSandboxClient.forTests(baseURL: sandbox, transport: CannedSandboxReply(reply: """
             {"results":[
@@ -6559,6 +6800,7 @@ struct ResearchSandboxAddressTests {
         let results = try await client.search(query: "q", maxResults: 5)
         #expect(results.map(\.url) == ["https://b.example/", "http://d.example/p"])
     }
+#endif
 
     @Test func theSourcesListLinksOnlyWebAddresses() {
         let report = ResearchReport(

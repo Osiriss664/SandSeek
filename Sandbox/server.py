@@ -1326,8 +1326,6 @@ TIME_WINDOW = 60
 MIN_SECRET_BYTES = 32
 MAX_SECRET_BYTES = 4096
 DEFAULT_SECRET_FILE = "/run/sandseek-sandbox/secret"
-# Only tests name another file; the launcher never sets this.
-SECRET_FILE_ENV = "SANDSEEK_SANDBOX_SECRET_FILE"
 NONCE_CAPACITY = 100_000
 
 
@@ -1456,19 +1454,26 @@ class Handler(BaseHTTPRequestHandler):
 
     def _read_request_body(self, method: str) -> bytes:
         """Reads the body before it is checked, so the signature covers the
-        bytes that were sent. A Content-Length that cannot be a request's is an
-        error, a missing one gives no body (a POST then reports it below), and
-        a client that stops sending (Handler.timeout) is answered with 408 and
-        the connection is closed."""
+        bytes that were sent. A Transfer-Encoding is refused, a POST needs a
+        Content-Length, a Content-Length that cannot be a request's is an error,
+        and a client that stops sending (Handler.timeout) is answered with 408.
+        Every refusal here closes the connection, since unread bytes may be
+        left on it."""
+        if self.headers.get("Transfer-Encoding") is not None:
+            self.close_connection = True
+            raise ToolError("chunked requests are not accepted", "invalid_request", 400)
         raw = self.headers.get("Content-Length")
         if raw is None:
+            if method == "POST":
+                raise ToolError("Content-Length is required", "invalid_request", 411)
             return b""
         digits = raw.strip()
         if not (digits.isascii() and digits.isdigit()):
+            self.close_connection = True
             raise ToolError("Content-Length is not a number", "invalid_request", 400)
         if len(digits.lstrip("0")) > 18 or int(digits) > MAX_REQUEST_BYTES:
             self.close_connection = True
-            raise ToolError("request body is missing or too large", "invalid_request", 413)
+            raise ToolError("request body is too large", "invalid_request", 413)
         length = int(digits)
         try:
             data = self.rfile.read(length) if length else b""
@@ -1520,6 +1525,8 @@ class Handler(BaseHTTPRequestHandler):
         self._note_nonce()
         try:
             if not host_allowed(self.headers.get("Host")):
+                # The body is not read, so it must not be taken for a request.
+                self.close_connection = True
                 raise ToolError("forbidden host", "forbidden_host", 403)
             body = self._read_request_body(method)
             self._authenticate(method, body)
@@ -1559,7 +1566,7 @@ class Handler(BaseHTTPRequestHandler):
         except ToolError as error:
             self._error(error)
         except Exception as error:  # Never leak a traceback to the caller.
-            sys.stderr.write(f"internal error: {error!r}\n")
+            sys.stderr.write(f"internal error: {type(error).__name__}\n")
             self._error(ToolError("internal error", "internal_error", 500))
 
     def do_GET(self):
@@ -1620,9 +1627,10 @@ def stop_on_sigterm(server) -> None:
     signal.signal(signal.SIGTERM, handler)
 
 
-def main():
-    # Read as root, before privileges are dropped. No secret, no server.
-    Handler.secret = load_secret(os.environ.get(SECRET_FILE_ENV, DEFAULT_SECRET_FILE))
+def main(secret_file: str = DEFAULT_SECRET_FILE):
+    # Read as root, before privileges are dropped. No secret, no server. Only
+    # tests pass another file; nothing in the environment can move it.
+    Handler.secret = load_secret(secret_file)
     drop_privileges()
     # 0.0.0.0, not 127.0.0.1: `container run --publish` forwards the Mac's
     # 127.0.0.1:9100 to this VM's network address, not to its loopback, so a
