@@ -317,7 +317,7 @@ case "${1:-}" in
     startup_log=""
     refused=0 firewall_loaded=0 listening=0 gone=0 firewall_line=""
     polls_after_listening=0
-    old_image=0
+    old_image=0 list_failed=0
     # A hung curl or `container` call must not outlast the app's start timeout
     # (180 s), so the poll counts below also sit under an overall deadline.
     deadline=$((SECONDS + 120))
@@ -325,7 +325,9 @@ case "${1:-}" in
       # Ready needs the container to be running as well as the port to give
       # the unsigned 401: something else on the port must not pass for it.
       if probe; then
-        if running="$(container list --quiet 2>/dev/null)" && grep -qxF "$name" <<<"$running"; then
+        if ! running="$(container list --quiet 2>/dev/null)"; then
+          list_failed=1
+        elif grep -qxF "$name" <<<"$running"; then
           trap - EXIT
           echo "web research sandbox ready at http://127.0.0.1:$port"
           exit 0
@@ -379,9 +381,13 @@ case "${1:-}" in
       done
       debug_command+=" $image"
       echo "the sandbox container exited and was removed (it runs with --rm)." >&2
-      echo "To see why, run it once in the foreground without --rm (the secret file is mounted, so it starts as the real start does): $debug_command" >&2
+      echo "The log above usually says why. Its secret was deleted with it, so to run it once in the foreground without --rm, first write a test secret to $secret_file (64 hex characters, chmod 600), then run: $debug_command" >&2
     else
-      echo "sandbox started but did not answer on 127.0.0.1:$port; it was stopped and its secret deleted (the log is above)" >&2
+      if (( list_failed )); then
+        echo "the sandbox answered on 127.0.0.1:$port, but \`container list\` failed, so it could not be confirmed as this sandbox; it was stopped and its secret deleted. Try again" >&2
+      else
+        echo "sandbox started but did not answer on 127.0.0.1:$port; it was stopped and its secret deleted (the log is above)" >&2
+      fi
       if (( firewall_loaded && listening )); then
         echo "the server is listening, and the log said: $firewall_line" >&2
         echo "(if the published port connects from another address than that gateway, the server is unreachable; see docs/SECURITY.md)" >&2

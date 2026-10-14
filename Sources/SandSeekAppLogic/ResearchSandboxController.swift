@@ -450,7 +450,8 @@ public final class ResearchSandboxController {
     /// What a failed start adds when something else answers on the port.
     private static func portNote(_ problem: ResearchError) -> String {
         switch problem {
-        case .redirectRefused, .sandboxNotSigned, .sandboxSecretUnusable, .sandboxWrongVersion: break
+        case .redirectRefused, .sandboxNotSigned, .sandboxSecretUnusable, .sandboxWrongVersion,
+             .sandboxClockOff: break
         default: return ""
         }
         let text = problem.description

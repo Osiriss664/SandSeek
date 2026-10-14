@@ -85,7 +85,7 @@ def main(argv):
     try:
         secret = read_secret(argv[1])
     except SecretFileError as error:
-        print(f"error: {error}")
+        print(f"error: {error}", file=sys.stderr)
         return 1
     port = int(argv[2]) if len(argv) == 3 else 9100
     method, path = "GET", "/health"
