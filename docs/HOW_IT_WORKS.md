@@ -11,7 +11,7 @@ install it, see [INSTALL.md](INSTALL.md).
 
 ```
 Mac
-  model server        127.0.0.1:8080 (TUFF) or :8081 (llama.cpp)
+  model server        127.0.0.1:8080 (TUFF), :8081 (llama.cpp) or :11434 (Ollama)
                       runs the model on the GPU; started by you or by SandSeek
   SandSeek            the app, or the `sandseek` command: the loop that asks
                       the model, runs its tool calls and writes the report
@@ -21,7 +21,8 @@ Linux VM (Apple container)
   web sandbox         searches, downloads pages, turns them into plain text
 ```
 
-- **The model server** is TUFF (8.3.1 or newer) or llama.cpp's `llama-server`.
+- **The model server** is TUFF (8.3.1 or newer), llama.cpp's `llama-server` or
+  Ollama (experimental).
   You can start it yourself, or let SandSeek start it with **Start server**
   (only `TUFFServer` or `llama-server`, on 127.0.0.1, without a shell). SandSeek
   stops a server it started when you quit it normally, and never stops one you
@@ -208,7 +209,7 @@ between launches. Run `sandseek --help` for every option.
 | `--max-tokens <64...32768>` | Tokens per step | 2048, or 8192 with reasoning on | Tokens the model may write per step. |
 | `--page-chars <500...20000>` | Page text per read | 3000 | Characters one page read returns. |
 | `--passages on\|off` | Read the passages that best match the question first | off | See above. |
-| `--context-chars <2000...1000000>` | Prompt budget (llama.cpp without a context size) | from the model | How long the conversation may grow before older results are shortened. |
+| `--context-chars <2000...1000000>` | Prompt budget (llama.cpp without a context size; also overrides Ollama's `num_ctx`) | from the model | How long the conversation may grow before older results are shortened. |
 | `--search-results <1...10>` | Results per search | 5 | Results each search returns. |
 | `--tool-calls <1...8>` | Tool calls per step | 4 | Searches and page reads the model may ask for in one step. |
 | `--min-pages <1...12>` | Pages to read | 3 | Pages the model is asked to read; the loop opens top results to reach it. |
@@ -251,6 +252,19 @@ if it calls itself OpenAI-compatible.
   request. Requests are plain (not
   streamed) for now. If the server gives no context size, Settings has a prompt
   budget.
+
+- **Ollama (experimental, tested once on a Mac from the command line).** SandSeek uses Ollama's
+  own `/api/chat` (newline-delimited JSON, always streamed), not its
+  OpenAI-compatible route, because only `/api/chat` sets the context size
+  (`options.num_ctx`) and thinking (`think`). The status route is
+  `/api/version` and the model list is `/api/tags`, filtered to local models
+  that can call tools; `/api/show` checks the chosen model before a run (it
+  must be installed, local, and list `tools`) and gives its trained context
+  length. A run asks for 32,768 tokens or less (`--context-tokens` sets it, but
+  never above the model's maximum), and that number is also the prompt budget.
+  `think` is sent only to a model that can think, and then always as true or
+  false. Ollama has no key and no default model; cloud models are refused.
+  SandSeek never starts or stops Ollama.
 
 On a Mac with 16 GB, run only one model server with a loaded model at a time.
 

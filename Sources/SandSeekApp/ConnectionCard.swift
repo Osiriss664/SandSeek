@@ -260,6 +260,12 @@ struct ConnectionCard: View {
         if let window = server.connection?.contextTokens {
             text += " Context window: \(window.formatted()) tokens."
         }
+        if server.serverType == .ollama {
+            text += " Ollama is experimental. Only models that can call tools are listed; "
+                + "cloud models are never used. A question asks Ollama for a context of up to "
+                + "\(ResearchOllama.defaultContextTokens.formatted()) tokens "
+                + "(less when the model's own maximum is smaller)."
+        }
         return text
     }
 

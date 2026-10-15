@@ -397,10 +397,11 @@ def main() -> int:
     parser.add_argument("--research-bin", default=".build/release/sandseek")
     parser.add_argument("--model")
     parser.add_argument("--server")
-    parser.add_argument("--server-type", choices=["tuff", "llamacpp", "auto"],
+    parser.add_argument("--server-type", choices=["tuff", "llamacpp", "ollama", "auto"],
                         help="kind of model server, passed on as --server-type (the research "
-                             "command's default is auto, which refuses a server that is not "
-                             "TUFF: for llama-server give llamacpp)")
+                             "command's default is auto, which finds TUFF or Ollama and refuses "
+                             "any other server: for llama-server give llamacpp; Ollama is "
+                             "experimental and needs --model)")
     parser.add_argument("--api-key-file", metavar="PATH",
                         help="file with the key of a llama-server started with --api-key-file; "
                              "passed on to the research command as --api-key-file (the key "

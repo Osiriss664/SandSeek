@@ -1,0 +1,8 @@
+{"model":"gemma4:12b-mlx","created_at":"2026-10-15T21:29:43.443878Z","message":{"role":"assistant","content":"The"},"done":false}
+{"model":"gemma4:12b-mlx","created_at":"2026-10-15T21:29:43.443885Z","message":{"role":"assistant","content":" capital"},"done":false}
+{"model":"gemma4:12b-mlx","created_at":"2026-10-15T21:29:43.513008Z","message":{"role":"assistant","content":" of"},"done":false}
+{"model":"gemma4:12b-mlx","created_at":"2026-10-15T21:29:43.513016Z","message":{"role":"assistant","content":" Germany"},"done":false}
+{"model":"gemma4:12b-mlx","created_at":"2026-10-15T21:29:43.580479Z","message":{"role":"assistant","content":" is"},"done":false}
+{"model":"gemma4:12b-mlx","created_at":"2026-10-15T21:29:43.580485Z","message":{"role":"assistant","content":" Berlin"},"done":false}
+{"model":"gemma4:12b-mlx","created_at":"2026-10-15T21:29:43.779283Z","message":{"role":"assistant","content":"."},"done":false}
+{"model":"gemma4:12b-mlx","created_at":"2026-10-15T21:29:43.77929Z","message":{"role":"assistant","content":""},"done":true,"done_reason":"stop","total_duration":709242375,"load_duration":4905125,"prompt_eval_count":24,"prompt_eval_cached_count":2,"prompt_eval_duration":292775875,"eval_count":7,"eval_duration":410884291}

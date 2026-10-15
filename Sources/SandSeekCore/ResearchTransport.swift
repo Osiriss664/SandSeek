@@ -449,7 +449,9 @@ public struct URLSessionResearchTransport: ResearchHTTPTransport {
                               authorization: String?) async throws -> ResearchHTTPLineResponse {
         let started = ContinuousClock.now
         let request = Self.makeRequest(method: method, url: url, body: body,
-                                       accept: "text/event-stream", authorization: authorization)
+                                       accept: url.path.hasPrefix("/api/")
+                                           ? "application/x-ndjson" : "text/event-stream",
+                                       authorization: authorization)
         let session = self.session
         let noRedirect = owner.noRedirect
         // Up to the headers, with the same task group as `send`. Cancelling
@@ -566,7 +568,7 @@ public enum ResearchError: Error, Equatable, CustomStringConvertible {
             message
         case .modelUnavailable(let message):
             "could not reach the model server: \(message). Start TUFF's Background API "
-                + "(or `tuff serve`)."
+                + "(or `tuff serve`), or Ollama (`ollama serve`)."
         case .modelTimedOut:
             "one model step took longer than the request time limit. The model may be too "
                 + "slow on this Mac for this question; try fewer steps, or thinking off."

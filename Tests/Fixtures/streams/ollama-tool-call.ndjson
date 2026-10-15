@@ -1,0 +1,4 @@
+{"model":"qwen3:8b","created_at":"2026-10-15T09:31:10.402113Z","message":{"role":"assistant","content":"","thinking":"I should search first.\n"},"done":false}
+{"model":"qwen3:8b","created_at":"2026-10-15T09:31:10.633871Z","message":{"role":"assistant","content":"","tool_calls":[{"id":"call_k3x9q2ab","function":{"index":0,"name":"web_search","arguments":{"query":"heat pump subsidy 2026"}}}]},"done":false}
+{"model":"qwen3:8b","created_at":"2026-10-15T09:31:10.634420Z","message":{"role":"assistant","content":"","tool_calls":[{"id":"call_p7m1d5ze","function":{"index":1,"name":"open_page","arguments":{"url":"https://example.org/a","max_chars":3000}}}]},"done":false}
+{"model":"qwen3:8b","created_at":"2026-10-15T09:31:10.701355Z","message":{"role":"assistant","content":""},"done":true,"done_reason":"stop","total_duration":2912004000,"load_duration":98211000,"prompt_eval_count":2048,"prompt_eval_duration":1900000000,"eval_count":44,"eval_duration":900000000}

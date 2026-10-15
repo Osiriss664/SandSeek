@@ -1,0 +1,37 @@
+{
+ "thinking": {
+  "values": [
+   false,
+   true
+  ],
+  "default": true
+ },
+ "license": "<omitted, 10385 chars>",
+ "modelfile": "<omitted, 10692 chars>",
+ "parameters": "top_k                          64\ntop_p                          0.95\ntemperature                    1",
+ "template": "<omitted, 15 chars>",
+ "details": {
+  "parent_model": "",
+  "format": "safetensors",
+  "family": "gemma4_unified",
+  "families": null,
+  "parameter_size": "12.4B",
+  "quantization_level": "nvfp4"
+ },
+ "model_info": {
+  "gemma4_unified.block_count": 48,
+  "gemma4_unified.context_length": 262144,
+  "gemma4_unified.embedding_length": 3840,
+  "general.architecture": "gemma4_unified",
+  "general.parameter_count": 12382568756
+ },
+ "capabilities": [
+  "completion",
+  "vision",
+  "audio",
+  "tools",
+  "thinking"
+ ],
+ "modified_at": "2026-08-25T23:54:27.405210955+02:00",
+ "requires": "0.31.0"
+}

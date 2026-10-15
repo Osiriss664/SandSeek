@@ -51,9 +51,12 @@ if let path = arguments.replayFiguresPath {
 // The exposure check needs no model, sandbox or question either: it only
 // tries this Mac's own network addresses on the two ports.
 if arguments.checkExposure {
+    // Ollama's usual port gets Ollama's advice (OLLAMA_HOST).
+    let serverPort = arguments.serverURL.port ?? 80
     let result = await ResearchExposureCommand.run(
-        serverPort: arguments.serverURL.port ?? 80,
-        sandboxPort: arguments.resolvedSandboxURL().port ?? 80)
+        serverPort: serverPort,
+        sandboxPort: arguments.resolvedSandboxURL().port ?? 80,
+        serverKind: serverPort == 11_434 ? ResearchServerKind.ollama : nil)
     print(result.text)
     exit(result.exitCode)
 }
@@ -92,30 +95,65 @@ let quiet = arguments.quiet
 // server that is not recognised is a usage error, exit code 2.
 let connection: ResearchServerConnection
 do {
-    connection = try await ResearchServerConnection.establish(
+    let found = try await ResearchServerConnection.establish(
         choice: arguments.serverType, stream: arguments.stream,
+        serverURL: arguments.serverURL, transport: transport)
+    // Ollama: the model is checked (installed, local, can call tools) and the
+    // context window is chosen before the first question is sent. A key file
+    // and a cloud model name are refused here too when the type was found by
+    // `auto`.
+    if found.kind == .ollama, authorization != nil {
+        throw ResearchArgumentError(
+            "--api-key-file cannot be used with Ollama: it has no key on this Mac, "
+                + "and SandSeek sends none to it")
+    }
+    if found.kind != .ollama, arguments.contextTokens != nil {
+        throw ResearchArgumentError(
+            "--context-tokens is only for Ollama; the server at "
+                + "\(arguments.serverURL.absoluteString) is \(found.kind.displayName)")
+    }
+    connection = try await ResearchOllama.prepare(
+        found, model: arguments.model, requestedContextTokens: arguments.contextTokens,
         serverURL: arguments.serverURL, transport: transport)
 } catch {
     writeProgress("error: \(error)")
     if case ResearchError.modelUnavailable = error { exit(1) }
+    // Ollama's /api/show failed on the server's side: not a usage error.
+    if case ResearchError.modelRequestFailed = error { exit(1) }
     exit(2)
 }
 if let warning = connection.warning { writeProgress("warning: \(warning)") }
-if !quiet { writeProgress(connection.progressLine) }
+// Ollama: `think` follows what the model can do (see `ResearchOllama.thinking`).
+let enableThinking = ResearchOllama.thinking(
+    requested: arguments.enableThinking, connection: connection)
+if !quiet { writeProgress(connection.progressLine(enableThinking: enableThinking)) }
+if !quiet, let note = ResearchOllama.thinkingNote(
+    requested: arguments.enableThinking, model: arguments.model, connection: connection) {
+    writeProgress(note)
+}
 let showThinking = arguments.showThinking
+// The context window the server named outside its model list (Ollama's
+// `num_ctx`) is the loop's known budget, unless --context-chars fixes one.
+let runOptions: ResearchOptions = {
+    var options = arguments.options
+    options.knownContextTokens = connection.contextTokens
+    return options
+}()
 let agent = ResearchAgent(
     chat: ResearchChatClient(
         serverURL: arguments.serverURL,
         model: arguments.model,
         maxTokens: arguments.maxTokens,
-        enableThinking: arguments.enableThinking,
+        enableThinking: enableThinking,
         streaming: connection.streaming,
         authorization: authorization,
+        kind: connection.kind,
+        requestedContextTokens: connection.contextTokens,
         transport: transport),
     sandbox: ResearchSandboxClient(
         baseURL: arguments.resolvedSandboxURL(), transport: sandboxTransport,
         secretFile: ResearchSandboxSecret.defaultFileURL),
-    options: arguments.options,
+    options: runOptions,
     onEvent: { event in
         guard !quiet else { return }
         switch event {

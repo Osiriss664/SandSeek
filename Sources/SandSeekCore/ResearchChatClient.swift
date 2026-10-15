@@ -45,6 +45,13 @@ public enum ResearchToolUse: Sendable {
 /// fields TUFF accepts: the server refuses unknown keys, and it refuses
 /// `tool_choice=required` and `parallel_tool_calls=false`, so neither is used.
 ///
+/// For an Ollama connection (`kind == .ollama`) it talks to Ollama's native
+/// `POST /api/chat` instead. The loop keeps its OpenAI-style messages; the
+/// client translates them on the way out (`ResearchOllama.messages`) and
+/// reads Ollama's reply back into the same `ResearchAssistantTurn`. Ollama
+/// has no `tool_choice`, so a request that must not call tools simply
+/// carries no tools.
+///
 /// With `streaming` the reply is read as a stream (server-sent events) and
 /// put together by `ResearchStreamAssembler`; without it the request is the
 /// plain one-reply request the client has always sent. Streaming is what lets
@@ -55,11 +62,21 @@ public struct ResearchChatClient: Sendable {
     public let maxTokens: Int
     public let enableThinking: Bool?
     public let streaming: Bool
+    /// The kind of server the requests go to. Ollama's `/api/chat` streams
+    /// newline-delimited JSON (`application/x-ndjson`), not server-sent events;
+    /// the transport asks for that type on `/api/` routes, and the line
+    /// splitter is the same.
+    public let kind: ResearchServerKind
+    /// The context window an Ollama request asks for (`options.num_ctx`).
+    /// Nil leaves it to the server. Not used for the other kinds.
+    public let requestedContextTokens: Int?
     /// The `Authorization` header value for every request, such as
     /// `Bearer <key>` for a llama.cpp server started with `--api-key`. Sent
     /// as that header only: never in a body or URL, and not printed.
     private let authorization: String?
     private let transport: any ResearchHTTPTransport
+    /// The numbers of the ids given to Ollama tool calls that came without one.
+    private let callNumbering = ResearchCallNumbering()
 
     public init(serverURL: URL,
                 model: String,
@@ -67,15 +84,20 @@ public struct ResearchChatClient: Sendable {
                 enableThinking: Bool?,
                 streaming: Bool = false,
                 authorization: String? = nil,
+                kind: ResearchServerKind = .tuff,
+                requestedContextTokens: Int? = nil,
                 transport: any ResearchHTTPTransport) {
         var base = serverURL.absoluteString
         if base.hasSuffix("/v1") { base.removeLast(3) }
-        endpoint = URL(string: base + "/v1/chat/completions")!
+        endpoint = URL(string: base + (kind == .ollama ? "/api/chat" : "/v1/chat/completions"))!
         self.model = model
         self.maxTokens = maxTokens
         self.enableThinking = enableThinking
         self.streaming = streaming
-        self.authorization = authorization
+        self.kind = kind
+        self.requestedContextTokens = requestedContextTokens
+        // Ollama on this Mac has no key: nothing is sent to it.
+        self.authorization = kind == .ollama ? nil : authorization
         self.transport = transport
     }
 
@@ -84,6 +106,10 @@ public struct ResearchChatClient: Sendable {
                      toolUse: ResearchToolUse,
                      thinking: Bool? = nil,
                      preserveThinking: Bool = false) -> ResearchJSON {
+        if kind == .ollama {
+            return ollamaRequestBody(messages: messages, tools: tools, toolUse: toolUse,
+                                     thinking: thinking)
+        }
         var body: [String: ResearchJSON] = [
             "model": .string(model),
             "messages": .array(messages),
@@ -107,6 +133,38 @@ public struct ResearchChatClient: Sendable {
         // whose flag equals the cached one. See `ResearchPreserveThinking`.
         if preserveThinking {
             body["preserve_thinking"] = .bool(true)
+        }
+        return .object(body)
+    }
+
+    /// The body of Ollama's `POST /api/chat`: the model, the messages in
+    /// Ollama's form, the same tool definitions (Ollama takes the OpenAI-style
+    /// schema), `stream`, `think` when reasoning is asked for or against, and
+    /// `options` with the context window and the token limit. `truncate` and
+    /// `shift` are false, so that a prompt that does not fit is an error the
+    /// loop answers by shortening it, and not text Ollama silently drops.
+    /// A request with `toolUse == .off` carries no tools. None of TUFF's
+    /// fields (`enable_thinking`, `preserve_thinking`, `stream_options`,
+    /// `tool_choice`, `max_tokens`) is sent.
+    func ollamaRequestBody(messages: [ResearchJSON],
+                           tools: [ResearchJSON],
+                           toolUse: ResearchToolUse,
+                           thinking: Bool? = nil) -> ResearchJSON {
+        var options: [String: ResearchJSON] = ["num_predict": .integer(maxTokens)]
+        if let requestedContextTokens { options["num_ctx"] = .integer(requestedContextTokens) }
+        var body: [String: ResearchJSON] = [
+            "model": .string(model),
+            "messages": .array(ResearchOllama.messages(from: messages)),
+            "stream": .bool(streaming),
+            "options": .object(options),
+            "truncate": .bool(false),
+            "shift": .bool(false),
+        ]
+        if toolUse != .off, !tools.isEmpty {
+            body["tools"] = .array(tools)
+        }
+        if let thinking = thinking ?? enableThinking {
+            body["think"] = .bool(thinking)
         }
         return .object(body)
     }
@@ -162,6 +220,9 @@ public struct ResearchChatClient: Sendable {
         } catch let error as URLError where error.code == .timedOut {
             throw ResearchError.modelTimedOut
         } catch {
+            if kind == .ollama, Task.isCancelled || error is CancellationError {
+                throw CancellationError()
+            }
             throw ResearchError.modelUnavailable(error.localizedDescription)
         }
         // A 3xx is not followed and not read: nothing that answers with one is
@@ -169,8 +230,9 @@ public struct ResearchChatClient: Sendable {
         if response.isRedirect { throw ResearchError.redirectRefused(status: response.status) }
         let reply = try? ResearchJSON.decode(response.body)
         guard (200..<300).contains(response.status) else {
-            throw Self.requestFailure(status: response.status, body: response.body, reply: reply)
+            throw failure(status: response.status, body: response.body, reply: reply)
         }
+        if kind == .ollama { return try ollamaTurn(from: reply) }
         let choice = reply?["choices"]?.arrayValue?.first
         guard let message = choice?["message"] else {
             throw ResearchError.malformedModelReply("no choices[0].message")
@@ -188,6 +250,29 @@ public struct ResearchChatClient: Sendable {
                                      finishReason: choice?["finish_reason"]?.stringValue,
                                      promptTokens: reply?["usage"]?["prompt_tokens"]?.intValue,
                                      model: reply?["model"]?.stringValue)
+    }
+
+    /// The turn in the one JSON object Ollama answers a request without
+    /// streaming with. An `error` in it is a refusal, whatever the status.
+    private func ollamaTurn(from reply: ResearchJSON?) throws -> ResearchAssistantTurn {
+        guard let reply, reply.objectValue != nil else {
+            throw ResearchError.malformedModelReply("the reply is not a JSON object")
+        }
+        var assembler = ResearchOllamaStreamAssembler(firstCallNumber: callNumbering.current)
+        try assembler.feed(json: reply)
+        let turn = try assembler.finish(requireDone: false)
+        callNumbering.advance(by: turn.toolCalls.count)
+        return turn
+    }
+
+    /// The error for a reply with a status other than 2xx: Ollama's has a
+    /// plain string in `error`, the OpenAI-style one an object.
+    private func failure(status: Int, body: Data, reply: ResearchJSON?) -> ResearchError {
+        if kind == .ollama {
+            return ResearchOllama.failure(
+                message: ResearchOllama.errorText(reply, body: body), status: status)
+        }
+        return Self.requestFailure(status: status, body: body, reply: reply)
     }
 
     /// The error for a reply with a status other than 2xx, from its body.
@@ -242,10 +327,16 @@ public struct ResearchChatClient: Sendable {
             // LF, which is white space between JSON tokens.
             let text = lines.joined(separator: "\n")
             let data = Data(text.utf8)
-            throw Self.requestFailure(
+            throw failure(
                 status: response.status, body: data, reply: try? ResearchJSON.decode(data))
         }
         do {
+            if kind == .ollama {
+                let turn = try await ResearchOllamaStreamAssembler.assemble(
+                    response.lines, firstCallNumber: callNumbering.current)
+                callNumbering.advance(by: turn.toolCalls.count)
+                return turn
+            }
             return try await ResearchStreamAssembler.assemble(response.lines)
         } catch let error as ResearchError {
             throw error
@@ -262,6 +353,9 @@ public struct ResearchChatClient: Sendable {
     /// The models TUFF lists in `/v1/models`, with each one's context window
     /// in tokens when it says. Empty when the server does not answer.
     public func listedModels() async -> [(id: String, contextTokens: Int?)] {
+        // Ollama's model list says nothing about context windows, and its
+        // context is the `num_ctx` the run asks for.
+        if kind == .ollama { return [] }
         guard let response = try? await transport.send(
                 method: "GET", url: endpoint.deletingLastPathComponent()
                     .deletingLastPathComponent().appendingPathComponent("models"),

@@ -1,0 +1,7 @@
+{"model":"qwen3:8b","created_at":"2026-10-15T09:30:01.120489Z","message":{"role":"assistant","content":"","thinking":"Okay, the user "},"done":false}
+{"model":"qwen3:8b","created_at":"2026-10-15T09:30:01.151277Z","message":{"role":"assistant","content":"","thinking":"wants a short answer.\n"},"done":false}
+{"model":"qwen3:8b","created_at":"2026-10-15T09:30:01.183902Z","message":{"role":"assistant","content":"\n\nA "},"done":false}
+{"model":"qwen3:8b","created_at":"2026-10-15T09:30:01.214655Z","message":{"role":"assistant","content":"heat"},"done":false}
+{"model":"qwen3:8b","created_at":"2026-10-15T09:30:01.246318Z","message":{"role":"assistant","content":" pump uses "},"done":false}
+{"model":"qwen3:8b","created_at":"2026-10-15T09:30:01.277841Z","message":{"role":"assistant","content":"ambient heat, as in Zürich. [1]\n"},"done":false}
+{"model":"qwen3:8b","created_at":"2026-10-15T09:30:01.309402Z","message":{"role":"assistant","content":""},"done":true,"done_reason":"stop","total_duration":4207418000,"load_duration":112043000,"prompt_eval_count":1834,"prompt_eval_duration":2481000000,"eval_count":61,"eval_duration":1498000000}

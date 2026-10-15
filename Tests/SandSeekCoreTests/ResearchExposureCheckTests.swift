@@ -228,10 +228,11 @@ private final class LocalListener {
         #expect(report.reachable == [lan])
         // In numeric order, whatever order they were given in.
         #expect(report.checked == [lan, bridge])
-        #expect(report.warning == "Something answers at 192.168.1.5:8080. "
+        let expected: String = "Something answers at 192.168.1.5:8080. "
             + "Other machines on that network can reach it. "
             + "Start the server so that it listens on 127.0.0.1 only "
-            + "(llama-server: --host 127.0.0.1).")
+            + "(llama-server: --host 127.0.0.1)."
+        #expect(report.warning == expected)
         #expect(report.unknown.isEmpty)
         #expect(report.refusedCount == 1)
     }
@@ -464,5 +465,63 @@ private final class LocalListener {
         #expect(throws: ResearchArgumentError.self) {
             _ = try ResearchArguments.parse(["--server", "http://127.0.0.1:8080"], environment: [:])
         }
+    }
+}
+
+@Suite struct ResearchOllamaExposureTests {
+    @Test func ollamasPortIsCheckedLikeAnyOtherAndGetsOllamasAdvice() async {
+        let lan = ResearchHostAddress.ipv4(192, 168, 1, 5)
+        let connector = FakeConnector(accepting: [.ipv4(127, 0, 0, 1), lan])
+        let report = await ResearchExposureCheck.run(
+            port: 11_434, addresses: [lan], connector: connector)
+        #expect(report.isExposed)
+        #expect(report.reachable == [lan])
+        let warning = report.warningText(for: .ollama)
+        let expected: String = "Something answers at 192.168.1.5:11434. "
+            + "Other machines on that network can reach it. "
+            + "Start Ollama with OLLAMA_HOST=127.0.0.1:11434 so that it listens on 127.0.0.1 only."
+        #expect(warning == expected)
+        // Never the address that means every interface.
+        #expect(warning?.contains("0.0.0.0") == false)
+        // The advice for the other servers is unchanged.
+        #expect(report.warning == report.warningText(for: nil))
+        #expect(report.warningText(for: .llamacpp) == report.warning)
+        #expect(report.warning?.contains("llama-server: --host 127.0.0.1") == true)
+    }
+
+    @Test func theAdviceNamesThePortOllamaRunsOn() async {
+        let lan = ResearchHostAddress.ipv4(192, 168, 1, 5)
+        let connector = FakeConnector(accepting: [.ipv4(127, 0, 0, 1), lan])
+        let report = await ResearchExposureCheck.run(
+            port: 11_500, addresses: [lan], connector: connector)
+        #expect(report.warningText(for: .ollama)?.contains("OLLAMA_HOST=127.0.0.1:11500") == true)
+    }
+
+    @Test func nothingIsSaidWhenNothingAnswersOnTheNetwork() async {
+        let lan = ResearchHostAddress.ipv4(192, 168, 1, 5)
+        let connector = FakeConnector(accepting: [.ipv4(127, 0, 0, 1)])
+        let report = await ResearchExposureCheck.run(
+            port: 11_434, addresses: [lan], connector: connector)
+        #expect(report.warningText(for: .ollama) == nil)
+    }
+
+    @Test func theCommandsResultCarriesTheAdviceOfTheKindItWasGiven() async {
+        let lan = ResearchHostAddress.ipv4(192, 168, 1, 5)
+        let connector = FakeConnector(accepting: [.ipv4(127, 0, 0, 1), lan], onlyPort: 11_434)
+        let ollama = await ResearchExposureCommand.run(
+            serverPort: 11_434, sandboxPort: 9_100, addresses: [lan], connector: connector,
+            serverKind: .ollama)
+        #expect(ollama.exitCode == ResearchExposureCommand.exitExposed)
+        #expect(ollama.text.contains("RESULT: Something answers at 192.168.1.5:11434."))
+        #expect(ollama.text.contains("OLLAMA_HOST=127.0.0.1:11434"))
+        #expect(!ollama.text.contains("llama-server"))
+        let other = await ResearchExposureCommand.run(
+            serverPort: 11_434, sandboxPort: 9_100, addresses: [lan], connector: connector)
+        #expect(other.text.contains("llama-server: --host 127.0.0.1"))
+        #expect(!other.text.contains("OLLAMA_HOST"))
+    }
+
+    @Test func theUsageNamesOllamasAdvice() {
+        #expect(ResearchArguments.usage.contains("OLLAMA_HOST=127.0.0.1:11434"))
     }
 }

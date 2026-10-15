@@ -16,8 +16,13 @@ public struct ResearchArguments: Equatable, Sendable {
     /// Which kind of model server `serverURL` is; `auto` asks it.
     public var serverType: ResearchServerChoice = .auto
     /// Whether to read model replies as a stream. Nil is the default for the
-    /// server kind: on for TUFF, off for llama.cpp (see `ResearchServerConnection`).
+    /// server kind: on for TUFF and Ollama, off for llama.cpp (see
+    /// `ResearchServerConnection`).
     public var stream: Bool?
+    /// `--context-tokens`: the context window an Ollama run asks for
+    /// (`num_ctx`). Nil is the default: 32,768, or the model's trained
+    /// maximum when that is smaller.
+    public var contextTokens: Int?
     public var outputPath: String?
     /// Test aids: write the answer and page texts of a finished run to a new
     /// JSON file, and run the figure check again on such a file, with no
@@ -63,17 +68,38 @@ public struct ResearchArguments: Equatable, Sendable {
     options:
       --model <name>           Model the server should use (default: default,
                                the model selected on the server).
-      --server <url>           Model server (default: http://127.0.0.1:8080).
-      --server-type tuff|llamacpp|auto
+      --server <url>           Model server (default: http://127.0.0.1:8080, or
+                               http://127.0.0.1:11434 with --server-type ollama).
+      --server-type tuff|llamacpp|ollama|auto
                                Kind of model server (default auto: the
                                command asks TUFF's /tuff/v1/status and uses
-                               TUFF when it answers; any other server is
+                               TUFF when it answers, else Ollama when its
+                               /api/version answers; any other server is
                                refused). A llama.cpp server must be named
                                with llamacpp; it is experimental and gets
                                plain (non-streaming) requests. With tuff the
                                status route is asked too: a server that does not
                                answer at all ends the run (exit code 1), one
                                that answers something else gives a warning.
+                               Ollama is experimental. It is used through its
+                               own /api/chat, on 127.0.0.1:11434 by default;
+                               --model must name an installed model that can
+                               call tools. Thinking: a model that cannot think
+                               gets no think field; one that can gets think
+                               on only when --thinking on or --show-thinking
+                               asks for it, else off. Ollama
+                               cloud models (names ending in :cloud or -cloud)
+                               are refused, because the question would leave
+                               this Mac. Ollama needs no key, so
+                               --api-key-file is refused with it.
+      --context-tokens <4096...262144>
+                               Context window of an Ollama run (num_ctx), also
+                               the budget the research plans its prompts with
+                               (unless --context-chars fixes one). Default
+                               32768; never more than the model's trained
+                               maximum, which Ollama enforces. Only for Ollama, whose
+                               own default of 4096 tokens is too small. A
+                               larger window needs more memory.
       --api-key-file <path>    File with the key of a model server that asks
                                for one (llama-server --api-key-file). The key
                                is sent as a Bearer token to the server, which
@@ -81,10 +107,11 @@ public struct ResearchArguments: Equatable, Sendable {
                                key off the command line: it would show in
                                `ps` and in your shell history.
       --stream on|off          Read each model reply as a stream (default on
-                               for TUFF). Streaming lets Stop and the time
-                               limits make TUFF stop generating; with off,
-                               TUFF finishes an abandoned reply anyway. Not
-                               available for llamacpp yet.
+                               for TUFF and Ollama). Streaming lets Stop and
+                               the time limits make the server stop
+                               generating; with off, TUFF finishes an
+                               abandoned reply anyway. Not available for
+                               llamacpp yet.
       --sandbox <url>          Web sandbox (default: the port the sandbox's start
                                recorded, or SANDSEEK_SANDBOX_PORT if set; else
                                http://127.0.0.1:9100).
@@ -157,7 +184,10 @@ public struct ResearchArguments: Equatable, Sendable {
                                block, for example macOS Local Network
                                privacy); 4 and 5 mean "cannot tell".
                                Start llama-server with --host 127.0.0.1 if it
-                               answers; TUFF listens on 127.0.0.1 only.
+                               answers; TUFF listens on 127.0.0.1 only. Start
+                               Ollama with OLLAMA_HOST=127.0.0.1:11434 (the
+                               advice for Ollama is given when the port is
+                               11434).
     """
 
     public init() {}
@@ -201,6 +231,7 @@ public struct ResearchArguments: Equatable, Sendable {
         var words: [String] = []
         var index = 0
         var maxTokensGiven = false
+        var serverGiven = false
         // The first option other than the replay's own, which it cannot take.
         var runOption: String?
         // The same for --check-exposure, which takes only --server, --sandbox and --quiet.
@@ -246,14 +277,18 @@ public struct ResearchArguments: Equatable, Sendable {
                 parsed.model = try value(argument)
             case "--server":
                 parsed.serverURL = try ResearchEndpoint.loopbackURL(try value(argument), flag: argument)
+                serverGiven = true
             case "--server-type":
                 let text = try value(argument)
                 guard let choice = ResearchServerChoice(rawValue: text) else {
-                    throw ResearchArgumentError("--server-type must be tuff, llamacpp or auto")
+                    throw ResearchArgumentError(
+                        "--server-type must be tuff, llamacpp, ollama or auto")
                 }
                 parsed.serverType = choice
             case "--api-key-file":
                 parsed.apiKeyFile = try value(argument)
+            case "--context-tokens":
+                parsed.contextTokens = try integer(argument, ResearchOllama.contextTokensRange)
             case "--stream":
                 parsed.stream = try onOff(argument)
             case "--sandbox":
@@ -363,6 +398,29 @@ public struct ResearchArguments: Equatable, Sendable {
         }
         if parsed.serverType == .llamacpp, parsed.stream == true, !parsed.showHelp, !parsed.showVersion {
             throw ResearchArgumentError(ResearchServerConnection.streamingNeedsConnectorMessage)
+        }
+        // Ollama has no key, and a window to set; the other servers have no
+        // such window. Refused here, so that nothing is sent anywhere.
+        let runs = !parsed.showHelp && !parsed.showVersion && parsed.replayFiguresPath == nil
+            && !parsed.checkExposure
+        // Ollama listens on 11434, not on TUFF's 8080, unless --server says otherwise.
+        if parsed.serverType == .ollama, !serverGiven {
+            parsed.serverURL = URL(string: "http://127.0.0.1:11434")!
+        }
+        if runs, parsed.serverType == .ollama {
+            if parsed.apiKeyFile != nil {
+                throw ResearchArgumentError(
+                    "--api-key-file cannot be used with --server-type ollama: Ollama on this Mac "
+                        + "has no key, and SandSeek sends none to it")
+            }
+            if let problem = ResearchOllama.nameProblem(parsed.model) {
+                throw ResearchArgumentError(problem)
+            }
+        }
+        if runs, parsed.contextTokens != nil,
+           parsed.serverType == .tuff || parsed.serverType == .llamacpp {
+            throw ResearchArgumentError(
+                "--context-tokens is only for Ollama (--server-type ollama or auto)")
         }
         if !parsed.showHelp && !parsed.showVersion && parsed.replayFiguresPath == nil && !parsed.checkExposure
             && parsed.question.isEmpty {

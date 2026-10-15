@@ -489,6 +489,18 @@ does not control.
 - **TUFF** has no key. The risk is open until TUFF itself checks the `Host`
   header. It is low to medium, and only while the server runs. Quit the server
   when you are not researching.
+- **Ollama** (experimental) is used on 127.0.0.1:11434, with no key. The
+  app and the command refuse Ollama cloud models (names ending in `:cloud` or
+  `-cloud`, read the way Ollama itself reads them, and models whose details
+  name a remote host), so a question and the pages read for it are not sent to
+  ollama.com by SandSeek. This is a check at the start of a run, not a lock: a
+  model that is swapped for a cloud model of the same name afterwards would not
+  be noticed. For a second lock, start Ollama with `OLLAMA_NO_CLOUD=1`, which
+  makes Ollama itself refuse remote models. Start Ollama with
+  `OLLAMA_HOST=127.0.0.1:11434` too; the exposure check says so when it finds
+  Ollama listening beyond loopback. Ollama checks the `Host` header of requests
+  that arrive on loopback, which answers DNS rebinding. Tested once on a Mac
+  from the command line; not measured against the injection pages.
 - **llama.cpp** is used only with `--host 127.0.0.1` and `--api-key-file`. The
   key makes rebinding useless (the page does not have it). The app makes the
   key itself, keeps it in a file only you can read (mode 0600 in a folder with
@@ -605,7 +617,7 @@ does and does not do:
   llama.cpp only with `--host 127.0.0.1` and `--api-key-file`.
 - **Only TUFF with Qwen has been measured against the injection pages** so far.
   llama.cpp with Bonsai: not measured yet. Until it is, llama.cpp counts as only
-  partly tested.
+  partly tested. Ollama: not measured either.
 - **Ad hoc signature, no notarization.** The app is signed ad hoc and not
   notarized: a copy downloaded from the release page needs Open Anyway (System
   Settings → Privacy & Security) on first launch.
