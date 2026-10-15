@@ -2,6 +2,9 @@
 
 ## 0.2.0 (unreleased)
 
+The sandbox image must be rebuilt: the app does it by itself on the first Start;
+from the command line, run `Scripts/research_sandbox.sh build`.
+
 Only SandSeek may use the sandbox.
 
 - Every request to the sandbox is signed (HMAC with a secret only your Mac

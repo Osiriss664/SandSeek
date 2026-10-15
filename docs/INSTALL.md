@@ -217,7 +217,9 @@ note if it could not tell.
    **Security check** runs the longer self-test (about a minute).
 4. Pick the model, choose **Quick answer** or **Thorough**, type a question and
    press **Research** (Command-Return). Progress and answer appear side by side;
-   **Stop** ends the question.
+   **Stop** ends the question. A saved report opened during a run gets its own
+   window. Sources are cards; **Copy answer** copies the answer as plain text,
+   and a report can be printed (Command-P) or exported with **Export as PDF…**.
 
 From Terminal, with the sandbox started (`Scripts/research_sandbox.sh build`
 once, then `start`) and a server running:
@@ -253,7 +255,10 @@ originals are never changed or removed.
 Fetch the new code, then build and package again. The app rebuilds the sandbox
 image by itself when anything in `Sandbox/` changed; by hand, run
 `Scripts/research_sandbox.sh build`. Quit the app and stop the sandbox first
-(**Stop Sandbox**, or `Scripts/research_sandbox.sh stop`).
+(**Stop everything**, or `Scripts/research_sandbox.sh stop`).
+
+After updating from the first release, the first **Start** rebuilds the sandbox image, which
+takes a few minutes. The old secret file in TUFF's folder is removed.
 
 ## Uninstall
 

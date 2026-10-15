@@ -18,7 +18,7 @@ Swift package. Built, tested and tried by hand on a Mac with macOS 27, TUFF
 8.3.1 and Qwen3.6 35B (11 October 2026); Start server was tried with TUFF 8.3.11
 and llama.cpp.
 
-![The SandSeek app: model server card with Start server, the web sandbox card and the question box](docs/assets/sandseek-app.png)
+![The SandSeek app: the question box on top, then the folded Model server and Web sandbox cards showing Connected, Ready and Signed](docs/assets/sandseek-app.png)
 
 ## How it works, in one minute
 
@@ -56,10 +56,13 @@ addresses go to the internet. More in [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.m
 
      The app is then `build/SandSeek.app`; move it to Applications. An app
      you built yourself opens without "Open Anyway".
-3. Open SandSeek and choose your server on the model server card. Either
+3. Open SandSeek and choose your server on the **Model server** card. Either
    start the server yourself and press **Check**, or choose its program once
    and press **Start server** (TUFF and llama.cpp). Then press **Start
-   Sandbox** and ask your first question.
+   Sandbox** on the **Web sandbox** card; the first start builds the sandbox
+   image and takes a few minutes. Or press **Start everything**, which does
+   both and runs the security check. Type your question in the box on top and
+   press **Research**. **Stop everything** stops it all again.
 
 Step by step: [docs/INSTALL.md](docs/INSTALL.md).
 
@@ -128,7 +131,11 @@ again when it stops being ready. While something is not ready, **Start
 everything** starts the model server (if you chose a program for it), then the
 sandbox, then runs the security check. Progress and answer come below, side by
 side. Stop is visible while a question runs. A saved report opened while a
-question runs gets a window of its own.
+question runs gets a window of its own. Sources are small cards, **Copy
+answer** copies the answer as plain text, and a report can be printed or
+exported with **Export as PDF…**. When the sandbox is verified, its card shows
+"Signed · checked HH:MM". **Stop everything** stops the question, the sandbox
+and a model server SandSeek started.
 
 - **Model server.** Pick TUFF (127.0.0.1:8080) or llama.cpp (127.0.0.1:8081);
   Ollama and LM Studio are listed as "later". The address can be edited but
