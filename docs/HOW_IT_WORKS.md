@@ -209,7 +209,7 @@ between launches. Run `sandseek --help` for every option.
 | `--max-tokens <64...32768>` | Tokens per step | 2048, or 8192 with reasoning on | Tokens the model may write per step. |
 | `--page-chars <500...20000>` | Page text per read | 3000 | Characters one page read returns. |
 | `--passages on\|off` | Read the passages that best match the question first | off | See above. |
-| `--context-chars <2000...1000000>` | Prompt budget (llama.cpp without a context size; also overrides Ollama's `num_ctx`) | from the model | How long the conversation may grow before older results are shortened. |
+| `--context-chars <2000...1000000>` | Prompt budget (llama.cpp without a context size; for Ollama it replaces the budget taken from `num_ctx`, which is still sent) | from the model | How long the conversation may grow before older results are shortened. |
 | `--search-results <1...10>` | Results per search | 5 | Results each search returns. |
 | `--tool-calls <1...8>` | Tool calls per step | 4 | Searches and page reads the model may ask for in one step. |
 | `--min-pages <1...12>` | Pages to read | 3 | Pages the model is asked to read; the loop opens top results to reach it. |
