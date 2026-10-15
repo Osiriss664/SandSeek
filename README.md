@@ -93,7 +93,8 @@ above all test reports.
 ## Requirements
 
 - Apple silicon, macOS 26 (needed by Apple `container`)
-- [Apple `container`](https://github.com/apple/container)
+- [Apple `container`](https://github.com/apple/container) 1.5.0 or newer, installed with
+  Apple's installer (SandSeek runs only `/usr/local/bin/container`)
 - A local model server on 127.0.0.1: TUFF 8.3.1 or newer, or llama.cpp
   (experimental, see below). Streaming is on by
   default for TUFF, so that Stop and the time limits make it stop generating.

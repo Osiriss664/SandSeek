@@ -28,6 +28,24 @@ Only SandSeek may use the sandbox.
   sign their requests; the address check reads the secret file (`--secret-file`
   to name another).
 
+SandSeek runs only Apple's `container`.
+
+- The app and `Scripts/research_sandbox.sh` run `/usr/local/bin/container`, where
+  Apple's installer puts it, and never a `container` found through PATH. They
+  first check that the file and every folder above it belong to root alone,
+  that it is signed by Apple (not just by anyone), and that it is version 1.5.0
+  or newer. If not, nothing is started and the sandbox card says why in plain
+  words. **Apple container 1.5.0 or newer is now required.**
+- `container`, `codesign` and the sandbox script run with a clean, fixed
+  environment instead of a filtered copy of yours: only `HOME`, `USER`,
+  `LOGNAME`, `TMPDIR`, a fixed `PATH` and language, and the settings the script
+  reads (`SANDSEEK_DNS`, `SEARXNG_URL`, the port). Other variables, such as
+  proxy settings, are no longer passed on.
+- A `container` command that hangs is ended (`SIGTERM`, then `SIGKILL` three
+  seconds later), and only the last 1 MiB of a command's output is kept.
+- Calls to the sandbox have time limits of their own: 10 seconds for the health
+  check, 60 for a search and 90 for a page, instead of the transport's half hour.
+
 A better window.
 
 - The Model server card and the Web sandbox card fold with the arrow beside

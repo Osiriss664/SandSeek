@@ -13,10 +13,15 @@ For what the security design does and does not promise, read
 - A Mac with Apple silicon and **macOS 26** (Apple `container` needs it).
 - **16 GB of memory** is the size the project was tested on. A model server with
   a loaded model uses most of it, so run only one server at a time.
-- **Apple `container`**, from its
-  [releases page](https://github.com/apple/container/releases). After the
-  installer has run, `container system start` starts its background service
-  (SandSeek's scripts do this when it is not running).
+- **Apple `container` 1.5.0 or newer**, installed with Apple's installer from
+  its [releases page](https://github.com/apple/container/releases), which puts
+  it at `/usr/local/bin/container`. SandSeek runs only that file, never one it
+  finds on your PATH, and only after checking that it is Apple's: the file and
+  the folders above it must belong to root and not be writable by you or your
+  group, its code signature must be Apple's, and its version must be 1.5.0 or
+  newer. (A copy that Homebrew or another installer put elsewhere is not used.)
+  After the installer has run, `container system start` starts its background
+  service (SandSeek's scripts do this when it is not running).
 - A **Swift 6.2 toolchain** to build: Xcode 26, or the command line tools that
   come with it. `swift --version` should print 6.2 or newer.
 - A **local model server** that SandSeek can connect to:
@@ -290,7 +295,19 @@ them with a command**, so you can still get them back.
 
 ## Troubleshooting
 
-- **"Apple container is not installed"**: install it from the releases page above.
+- **"Apple container is not installed"**: install it with Apple's installer
+  from the releases page above. SandSeek looks only at
+  `/usr/local/bin/container`.
+- **"... could change that file or a folder above it"**: something at
+  `/usr/local/bin/container` or in `/usr`, `/usr/local` or `/usr/local/bin`
+  belongs to you or is writable by a group, which can happen when another
+  installer changed those folders. Reinstall Apple container with Apple's
+  installer, or in Terminal: `ls -ld /usr/local /usr/local/bin
+  /usr/local/bin/container` shows who owns them.
+- **"... is not signed by Apple"**: the file at `/usr/local/bin/container` is
+  not Apple's release (a build you made yourself is signed ad hoc and is not
+  accepted). Install Apple's package.
+- **"... but SandSeek needs 1.5.0 or newer"**: update Apple container.
 - **The sandbox does not become Ready, or "Not verified"**: stop it and start it
   again. If it stays red, run `Scripts/research_sandbox.sh selftest` and read the
   `FAIL` lines.

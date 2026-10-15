@@ -47,7 +47,8 @@ model server, and the trustworthiness of the answer you read.
 
 **Who is trusted:** you, your own programs on the Mac (any program on the Mac
 can call the loopback services, as with any local server), the macOS and
-Apple `container` software, and the model weights you chose.
+Apple `container` software (see below for how SandSeek makes sure the
+`container` it runs is Apple's), and the model weights you chose.
 
 **Boundaries and what sits on each:**
 
@@ -231,6 +232,41 @@ These hold as long as the design is intact and the VM boundary holds.
   Inside the VM the server listens on 0.0.0.0, because the published port has
   to reach it; who can connect is set by the inbound rule above (the gateway
   only).
+
+## The `container` program
+
+SandSeek starts and stops the VM by running Apple's `container` tool, so that
+program has full control of the sandbox. It is therefore not looked up through
+`PATH`, where a program in a folder you can write to could stand in for it.
+
+- The app and `Scripts/research_sandbox.sh` run only
+  `/usr/local/bin/container`, where Apple's installer puts it.
+- Before the first use in a session (the script: on every start, stop, build and
+  self-test) they check that the file, and every folder above it, belongs to
+  root and cannot be written by its group or by others, both as the path is
+  given and with symbolic links followed; that its code signature is valid
+  under `codesign --verify --strict` and chains to Apple's certificate
+  authority with Apple's team (`UPBK2H6LZM`, the signer of the `container`
+  release), so a signature you or anyone else made is refused; and that
+  `container --version` is 1.5.0 or newer. If a check fails, nothing is run and
+  the sandbox card (or the script) says which one in plain words. The app
+  checks again if the file at that path is replaced during a session.
+- `container`, `codesign` and the sandbox script run with a fixed environment
+  of their own, not the app's or your shell's: `PATH` is `/usr/bin:/bin:/usr/sbin:/sbin`,
+  the language is fixed, and only `HOME`, `USER`, `LOGNAME`, `TMPDIR` and the
+  settings the script reads (`SANDSEEK_DNS`, `SEARXNG_URL` and the port) are
+  passed on. Nothing set by a launcher or a shell (`DYLD_*`, `BASH_ENV`, proxy
+  variables, tokens) reaches them. Proxy settings for image downloads are
+  among the things this leaves out.
+- Every command has a time limit. The app ends one that hangs with `SIGTERM`
+  and, three seconds later, `SIGKILL`, and keeps only the last 1 MiB of what a
+  command prints. Every call to the sandbox also has its own limit (10 seconds
+  for the health check, 60 for a search, 90 for a page).
+
+What this does not do: the check and the first command are separate steps, so
+a program that could replace `/usr/local/bin/container` in between could still
+win, but that takes root, and root can do far more than that. The script cannot
+time-limit `container` itself; the app's limit on the script covers that.
 
 ## What it does not guarantee
 
@@ -599,11 +635,14 @@ came from.
 
 ```sh
 cd Sandbox && python3 -m unittest test_server
+python3 -m unittest discover -s Scripts -p 'test_*.py'
 swift test
 ```
 
 The first tests the sandbox policy and needs no network; the second tests the
-loop, the command and the app logic.
+launcher script's checks of the `container` program (it never calls a bare
+`container`, refuses a file others can write to, reads versions, keeps a fixed
+environment); the third tests the loop, the command and the app logic.
 
 `--save-pages <file.json>` and `--replay-figures <file.json>` on the command
 help to measure the figure check on real runs. `Scripts/research_question_set.py`
