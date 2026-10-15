@@ -378,7 +378,8 @@ public final class ResearchServerLaunchController {
     }
 
     private func fail(_ message: String, showLog: Bool = false) {
-        ServiceLog.logger.notice("Server problem: \(message, privacy: .public)")
+        // The message can name files on this Mac, so it stays private in the log.
+        ServiceLog.logger.notice("Server problem: \(message, privacy: .private)")
         logTail = showLog ? ResearchServerLog.tail(at: logURL) : ""
         state = .failed(message)
     }
