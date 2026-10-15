@@ -76,13 +76,19 @@ extension SavedResearchReport {
     }
 
     /// The "Pages that could not be read" section of the Markdown report, or
-    /// nothing when every page was read.
+    /// nothing when every page was read. Only an address that passes the Mac's
+    /// check for sources (`ResearchFinalAddress`) becomes a link; a refused one
+    /// (a private network, another scheme, a user name) is written as code, so
+    /// a Markdown viewer does not make it clickable.
     static func unreadablePagesMarkdown(_ pages: [UnreadablePage]) -> String {
         guard !pages.isEmpty else { return "" }
         var text = "\n## Pages that could not be read\n\n"
         for page in pages {
             let address = ResearchText.markdownURL(page.address)
-            text += "- [\(address)](\(address)) \u{2014} "
+            let shown = ResearchFinalAddress.problem(with: page.address) == nil
+                ? "[\(address)](\(address))"
+                : "`" + address.replacingOccurrences(of: "`", with: "%60") + "`"
+            text += "- \(shown) \u{2014} "
                 + ResearchText.inertMarkdown(page.reason) + "\n"
         }
         return ResearchText.terminalSafe(text)

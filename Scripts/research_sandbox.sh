@@ -610,6 +610,8 @@ lock_holder_is_orphan() {
   listed="$("$container_bin" list --all --quiet 2>/dev/null)" || return 1
   if recorded="$(recorded_name)"; then
     ! grep -qxF "$recorded" <<<"$listed"
+  else
+    return 1
   fi
 }
 

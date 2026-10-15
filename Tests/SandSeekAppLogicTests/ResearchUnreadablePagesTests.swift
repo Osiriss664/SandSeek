@@ -150,6 +150,20 @@ import Testing
         #expect(report.markdown.contains("- and 5 more"))
     }
 
+    @Test func refusedAddressesAreNotLinks() {
+        let steps = [
+            step(0, .reading, "http://192.168.1.1/admin"),
+            step(1, .failed, "the sandbox refused a private address"),
+            step(2, .reading, "https://user:pw@example.com/x"),
+            step(3, .failed, "refused"),
+        ]
+        let markdown = saved(steps: steps).markdown
+        #expect(markdown.contains("- `http://192.168.1.1/admin` \u{2014}"))
+        #expect(!markdown.contains("](http://192.168.1.1"))
+        #expect(markdown.contains("`https://user:pw@example.com/x`"))
+        #expect(!markdown.contains("](https://user:pw@"))
+    }
+
     @Test func printTextLeavesBothListsOut() {
         // Not one of the report's sources (example.com/a is source 1).
         let steps = [
