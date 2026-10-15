@@ -102,5 +102,5 @@ Do these when the app changes, with a person at the keyboard.
    program and ask again: a fresh sandbox starts and answers.
 3. **Quit and force quit:** press Cmd-Q; within a few seconds no sandseek VM and
    no secret file should remain. Start the sandbox again, force quit the app
-   (Activity Monitor), then relaunch: the old VM is removed and exactly one new
-   one runs.
+   (Activity Monitor), then relaunch and click Start Sandbox: the old VM is
+   removed at that start (not when the app opens) and exactly one new one runs.
