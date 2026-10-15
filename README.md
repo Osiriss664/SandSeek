@@ -18,7 +18,7 @@ Swift package. Built, tested and tried by hand on a Mac with macOS 27, TUFF
 8.3.1 and Qwen3.6 35B (11 October 2026); Start server was tried with TUFF 8.3.11
 and llama.cpp.
 
-![An earlier layout of the SandSeek window: the Model server and Web sandbox cards above the question box, with the badges Not running and Off](docs/assets/sandseek-app.png)
+![The SandSeek window: the question box with model and mode, Stop everything, the folded Model server and Web sandbox cards showing Connected, Ready and Signed, then an answer with its folded Figure check and Pages that could not be read lists, the sources and the searches](docs/assets/sandseek-app.png)
 
 ## How it works, in one minute
 
