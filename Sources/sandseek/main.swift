@@ -51,9 +51,12 @@ if let path = arguments.replayFiguresPath {
 // The exposure check needs no model, sandbox or question either: it only
 // tries this Mac's own network addresses on the two ports.
 if arguments.checkExposure {
+    // Ollama's usual port gets Ollama's advice (OLLAMA_HOST).
+    let serverPort = arguments.serverURL.port ?? 80
     let result = await ResearchExposureCommand.run(
-        serverPort: arguments.serverURL.port ?? 80,
-        sandboxPort: arguments.resolvedSandboxURL().port ?? 80)
+        serverPort: serverPort,
+        sandboxPort: arguments.resolvedSandboxURL().port ?? 80,
+        serverKind: serverPort == 11_434 ? ResearchServerKind.ollama : nil)
     print(result.text)
     exit(result.exitCode)
 }
@@ -92,8 +95,25 @@ let quiet = arguments.quiet
 // server that is not recognised is a usage error, exit code 2.
 let connection: ResearchServerConnection
 do {
-    connection = try await ResearchServerConnection.establish(
+    let found = try await ResearchServerConnection.establish(
         choice: arguments.serverType, stream: arguments.stream,
+        serverURL: arguments.serverURL, transport: transport)
+    // Ollama: the model is checked (installed, local, can call tools) and the
+    // context window is chosen before the first question is sent. A key file
+    // and a cloud model name are refused here too when the type was found by
+    // `auto`.
+    if found.kind == .ollama, authorization != nil {
+        throw ResearchArgumentError(
+            "--api-key-file cannot be used with Ollama: it has no key on this Mac, "
+                + "and SandSeek sends none to it")
+    }
+    if found.kind != .ollama, arguments.contextTokens != nil {
+        throw ResearchArgumentError(
+            "--context-tokens is only for Ollama; the server at "
+                + "\(arguments.serverURL.absoluteString) is \(found.kind.displayName)")
+    }
+    connection = try await ResearchOllama.prepare(
+        found, model: arguments.model, requestedContextTokens: arguments.contextTokens,
         serverURL: arguments.serverURL, transport: transport)
 } catch {
     writeProgress("error: \(error)")
@@ -103,6 +123,13 @@ do {
 if let warning = connection.warning { writeProgress("warning: \(warning)") }
 if !quiet { writeProgress(connection.progressLine) }
 let showThinking = arguments.showThinking
+// The context window the server named outside its model list (Ollama's
+// `num_ctx`) is the loop's known budget, unless --context-chars fixes one.
+let runOptions: ResearchOptions = {
+    var options = arguments.options
+    options.knownContextTokens = connection.contextTokens
+    return options
+}()
 let agent = ResearchAgent(
     chat: ResearchChatClient(
         serverURL: arguments.serverURL,
@@ -111,11 +138,13 @@ let agent = ResearchAgent(
         enableThinking: arguments.enableThinking,
         streaming: connection.streaming,
         authorization: authorization,
+        kind: connection.kind,
+        contextTokens: connection.contextTokens,
         transport: transport),
     sandbox: ResearchSandboxClient(
         baseURL: arguments.resolvedSandboxURL(), transport: sandboxTransport,
         secretFile: ResearchSandboxSecret.defaultFileURL),
-    options: arguments.options,
+    options: runOptions,
     onEvent: { event in
         guard !quiet else { return }
         switch event {

@@ -340,11 +340,21 @@ public struct ResearchExposureReport: Equatable, Sendable {
     /// The warning the app and the command show, or nil when nothing
     /// answered on the network. It names no flag for every server type: TUFF
     /// has none, and listens on 127.0.0.1 only by itself.
-    public var warning: String? {
+    public var warning: String? { warning(for: nil) }
+
+    /// The same warning with the way out for a known kind of server. Ollama
+    /// listens where `OLLAMA_HOST` says, so its advice names that variable
+    /// (never `0.0.0.0`, which is every network address). Without a kind the
+    /// advice is the llama.cpp flag.
+    public func warning(for kind: ResearchServerKind?) -> String? {
         guard isExposed else { return nil }
-        return "Something answers at \(reachableText). "
+        let lead = "Something answers at \(reachableText). "
             + "Other machines on that network can reach it. "
-            + "Start the server so that it listens on 127.0.0.1 only "
+        if kind == .ollama {
+            return lead + "Start Ollama with OLLAMA_HOST=127.0.0.1:11434 so that it listens "
+                + "on 127.0.0.1 only."
+        }
+        return lead + "Start the server so that it listens on 127.0.0.1 only "
             + "(llama-server: --host 127.0.0.1)."
     }
 
@@ -445,7 +455,8 @@ public enum ResearchExposureCommand {
         sandboxPort: Int,
         addresses: [ResearchHostAddress]? = nil,
         connector: any ResearchPortConnecting = ResearchTCPConnector(),
-        timeout: TimeInterval = ResearchExposureCheck.defaultTimeout
+        timeout: TimeInterval = ResearchExposureCheck.defaultTimeout,
+        serverKind: ResearchServerKind? = nil
     ) async -> (text: String, exitCode: Int32) {
         // Listing the interfaces once keeps the two ports on the same addresses.
         let list = ResearchHostAddress.networkAddresses(
@@ -454,7 +465,7 @@ public enum ResearchExposureCommand {
             port: serverPort, addresses: list, connector: connector, timeout: timeout)
         let sandbox = await ResearchExposureCheck.run(
             port: sandboxPort, addresses: list, connector: connector, timeout: timeout)
-        return render(server: server, sandbox: sandbox)
+        return render(server: server, sandbox: sandbox, serverKind: serverKind)
     }
 
     /// The line about one port's network addresses.
@@ -479,7 +490,8 @@ public enum ResearchExposureCommand {
     }
 
     static func render(server: ResearchExposureReport,
-                       sandbox: ResearchExposureReport) -> (text: String, exitCode: Int32) {
+                       sandbox: ResearchExposureReport,
+                       serverKind: ResearchServerKind? = nil) -> (text: String, exitCode: Int32) {
         var lines = [
             "Network exposure check: does a connection to this Mac's own network addresses succeed?",
             "A plain TCP connect only; nothing is sent to the servers. A connection that is",
@@ -507,7 +519,7 @@ public enum ResearchExposureCommand {
         let exitCode: Int32
         if server.isExposed || sandbox.isExposed {
             exitCode = exitExposed
-            if let warning = server.warning {
+            if let warning = server.warning(for: serverKind) {
                 lines.append("RESULT: " + warning)
             }
             if sandbox.isExposed {

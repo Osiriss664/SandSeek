@@ -1114,7 +1114,7 @@ struct ResearchStreamingArgumentsTests {
 
     @Test func serverTypeAndStreamAreParsed() throws {
         for (text, expected) in [("tuff", ResearchServerChoice.tuff), ("llamacpp", .llamacpp),
-                                 ("auto", .auto)] {
+                                 ("ollama", .ollama), ("auto", .auto)] {
             #expect(try ResearchArguments.parse(["q", "--server-type", text]).serverType == expected)
         }
         #expect(try ResearchArguments.parse(["q", "--stream", "off"]).stream == false)
@@ -1137,7 +1137,7 @@ struct ResearchStreamingArgumentsTests {
     }
 
     @Test func badValuesAreRefused() {
-        for arguments in [["q", "--server-type", "ollama"], ["q", "--server-type", "TUFF"],
+        for arguments in [["q", "--server-type", "lmstudio"], ["q", "--server-type", "TUFF"],
                           ["q", "--server-type"], ["q", "--stream", "yes"], ["q", "--stream"],
                           ["q", "--server-type", "llamacpp", "--stream", "on"]] {
             #expect(throws: ResearchArgumentError.self) {
@@ -1148,7 +1148,7 @@ struct ResearchStreamingArgumentsTests {
 
     @Test func theUsageDescribesBothOptions() {
         let usage = ResearchArguments.usage
-        #expect(usage.contains("--server-type tuff|llamacpp|auto"))
+        #expect(usage.contains("--server-type tuff|llamacpp|ollama|auto"))
         #expect(usage.contains("--stream on|off"))
         #expect(usage.contains("/tuff/v1/status"))
         #expect(usage.contains("experimental"))

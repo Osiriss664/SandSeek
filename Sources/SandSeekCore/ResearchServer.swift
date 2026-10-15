@@ -7,11 +7,13 @@ import Foundation
 public enum ResearchServerKind: String, Equatable, Sendable {
     case tuff
     case llamacpp
+    case ollama
 
     public var displayName: String {
         switch self {
         case .tuff: "TUFF"
         case .llamacpp: "llama.cpp"
+        case .ollama: "Ollama"
         }
     }
 }
@@ -21,6 +23,7 @@ public enum ResearchServerChoice: String, Equatable, Sendable {
     case auto
     case tuff
     case llamacpp
+    case ollama
 }
 
 /// What `GET /tuff/v1/status` told about the server.
@@ -28,6 +31,16 @@ public enum ResearchServerProbe: Equatable, Sendable {
     /// A 200 with a JSON object: TUFF. `version` is its `version` when it has one.
     case tuff(version: String?)
     /// The server answered, but not like TUFF's status route.
+    case other(status: Int)
+    /// The server did not answer.
+    case unreachable(String)
+}
+
+/// What `GET /api/version` told about the server.
+public enum ResearchOllamaProbe: Equatable, Sendable {
+    /// A 200 with a JSON object that has a string `version`: Ollama.
+    case ollama(version: String)
+    /// The server answered, but not like Ollama's version route.
     case other(status: Int)
     /// The server did not answer.
     case unreachable(String)
@@ -45,8 +58,9 @@ public struct ResearchServerConnection: Equatable, Sendable {
     public let warning: String?
     /// The model's context window in tokens when the server says it outside
     /// the model list: llama.cpp's `/props` (`default_generation_settings.n_ctx`).
-    /// Nil when it is not known; the run then follows the model list, or its
-    /// small fallback budget.
+    /// For Ollama it is the `num_ctx` every request asks for. Nil when it is
+    /// not known; the run then follows the model list, or its small fallback
+    /// budget.
     public let contextTokens: Int?
 
     public init(kind: ResearchServerKind, version: String?, streaming: Bool,
@@ -67,8 +81,17 @@ public struct ResearchServerConnection: Equatable, Sendable {
             line += streaming ? ", streaming" : ", no streaming"
         case .llamacpp:
             line += ", no streaming (llama.cpp gets plain requests)"
+        case .ollama:
+            line += streaming ? ", streaming" : ", no streaming"
+            if let contextTokens { line += ", context \(contextTokens) tokens" }
         }
         return line
+    }
+
+    /// The same connection with the context window the run will ask for.
+    public func withContextTokens(_ tokens: Int?) -> ResearchServerConnection {
+        ResearchServerConnection(kind: kind, version: version, streaming: streaming,
+                                 warning: warning, contextTokens: tokens)
     }
 
     /// TUFF's status route. The server URL may end in `/v1`, as for chat.
@@ -104,11 +127,44 @@ public struct ResearchServerConnection: Equatable, Sendable {
         return .tuff(version: version?.isEmpty == false ? version : nil)
     }
 
+    /// Ollama's version route. The server URL may end in `/v1`, as for chat.
+    static func ollamaVersionURL(for serverURL: URL) -> URL? {
+        var base = serverURL.absoluteString
+        if base.hasSuffix("/v1") { base.removeLast(3) }
+        return URL(string: base + "/api/version")
+    }
+
+    /// Asks the server whether it is Ollama (`GET /api/version`, which answers
+    /// `{"version":"0.x.y"}`). A short time limit, as for `probe`.
+    public static func probeOllama(serverURL: URL,
+                                   transport: any ResearchHTTPTransport,
+                                   timeout: TimeInterval = 5) async -> ResearchOllamaProbe {
+        guard let url = ollamaVersionURL(for: serverURL) else {
+            return .unreachable("the server address cannot be extended to /api/version")
+        }
+        let response: ResearchHTTPResponse
+        do {
+            response = try await transport.send(
+                method: "GET", url: url, body: nil, timeout: timeout)
+        } catch let error as URLError where error.code == .timedOut {
+            return .unreachable("no answer within \(Int(timeout)) seconds")
+        } catch {
+            return .unreachable(error.localizedDescription)
+        }
+        guard response.status == 200,
+              let status = try? ResearchJSON.decode(response.body),
+              status.objectValue != nil,
+              let version = status["version"]?.stringValue else {
+            return .other(status: response.status)
+        }
+        return .ollama(version: version)
+    }
+
     /// Decides which server this is and whether to stream.
     ///
-    /// - `auto`: TUFF when the status route says so. Anything else is
-    ///   refused, with the way out: llama.cpp must be named, because it
-    ///   is not detected.
+    /// - `auto`: TUFF when the status route says so, else Ollama when its
+    ///   version route says so. Anything else is refused, with the way out:
+    ///   llama.cpp must be named, because it is not detected.
     /// - `tuff`: used as named. The status route is asked once, to record the
     ///   version. A server that does not answer at all is an error, as for
     ///   `auto`. Every TUFF 8.3.1 server has the route (the Background API and
@@ -116,9 +172,14 @@ public struct ResearchServerConnection: Equatable, Sendable {
     ///   only gives a warning: the run goes on as TUFF because it was named.
     /// - `llamacpp`: used as named, with today's plain request. It cannot
     ///   stream before its connector exists (`stream` on is refused).
+    /// - `ollama`: the version route is asked once. A server that does not
+    ///   answer is an error, and so is one that answers but is not Ollama:
+    ///   Ollama is never assumed.
     ///
     /// `stream` is the `--stream` choice; nil is the default, which is on for
-    /// TUFF and off for llama.cpp.
+    /// TUFF and Ollama and off for llama.cpp. The context window of an Ollama
+    /// connection is added later (`ResearchOllama.prepare`), because it
+    /// depends on the model.
     public static func establish(choice: ResearchServerChoice,
                                  stream: Bool?,
                                  serverURL: URL,
@@ -130,6 +191,18 @@ public struct ResearchServerConnection: Equatable, Sendable {
                 throw ResearchError.invalidEndpoint(streamingNeedsConnectorMessage)
             }
             return ResearchServerConnection(kind: .llamacpp, version: nil, streaming: false)
+        case .ollama:
+            switch await probeOllama(serverURL: serverURL, transport: transport) {
+            case .ollama(let version):
+                return ResearchServerConnection(
+                    kind: .ollama, version: version, streaming: stream ?? true)
+            case .unreachable(let message):
+                throw ResearchError.modelUnavailable(message)
+            case .other(let status) where (300..<400).contains(status):
+                throw ResearchError.redirectRefused(status: status)
+            case .other(let status):
+                throw ResearchError.invalidEndpoint(notOllamaMessage(serverURL: serverURL, status: status))
+            }
         case .tuff:
             switch await probe(serverURL: serverURL, transport: transport) {
             case .tuff(let version):
@@ -158,6 +231,12 @@ public struct ResearchServerConnection: Equatable, Sendable {
             case .other(let status) where (300..<400).contains(status):
                 throw ResearchError.redirectRefused(status: status)
             case .other(let status):
+                // Not TUFF: it may be Ollama, which has its own version route.
+                if case .ollama(let version) = await probeOllama(
+                    serverURL: serverURL, transport: transport) {
+                    return ResearchServerConnection(
+                        kind: .ollama, version: version, streaming: stream ?? true)
+                }
                 throw ResearchError.invalidEndpoint(notTUFFMessage(serverURL: serverURL, status: status))
             }
         }
@@ -169,9 +248,16 @@ public struct ResearchServerConnection: Equatable, Sendable {
 
     static func notTUFFMessage(serverURL: URL, status: Int) -> String {
         "the server at \(serverURL.absoluteString) did not answer TUFF's /tuff/v1/status "
-            + "(HTTP \(status)), so it is not recognised as TUFF. For a llama.cpp server "
+            + "(HTTP \(status)) or Ollama's /api/version, so it is not recognised. For a llama.cpp server "
             + "(llama-server) pass --server-type llamacpp: it is experimental and gets "
-            + "plain (non-streaming) requests. For TUFF, start its Background API (or `tuff serve`), which "
+            + "plain (non-streaming) requests. For Ollama, start it with `ollama serve` and "
+            + "pass --server-type ollama. For TUFF, start its Background API (or `tuff serve`), which "
             + "has the status route, or pass --server-type tuff."
+    }
+
+    static func notOllamaMessage(serverURL: URL, status: Int) -> String {
+        "the server at \(serverURL.absoluteString) did not answer Ollama's /api/version "
+            + "(HTTP \(status)), so it is not Ollama. For TUFF pass --server-type tuff; for a "
+            + "llama.cpp server (llama-server) pass --server-type llamacpp."
     }
 }

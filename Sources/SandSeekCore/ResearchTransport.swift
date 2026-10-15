@@ -566,7 +566,7 @@ public enum ResearchError: Error, Equatable, CustomStringConvertible {
             message
         case .modelUnavailable(let message):
             "could not reach the model server: \(message). Start TUFF's Background API "
-                + "(or `tuff serve`)."
+                + "(or `tuff serve`), or Ollama (`ollama serve`)."
         case .modelTimedOut:
             "one model step took longer than the request time limit. The model may be too "
                 + "slow on this Mac for this question; try fewer steps, or thinking off."
