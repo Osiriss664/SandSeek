@@ -16,9 +16,12 @@ Endpoints (JSON in, JSON out):
 Fetches refuse anything but http(s) on ports 80 and 443, and refuse every
 address that is not globally routable. The resolved address is the one
 connected to, so a DNS answer cannot change between the check and the
-connection. Redirects are followed by hand and checked the same way. That keeps
-the Mac (the VM's gateway), the local network and cloud metadata addresses out
-of reach.
+connection. Redirects are followed by hand and checked the same way; a redirect
+from https to http is refused, and so is an answer with more than one Location
+header. That keeps the Mac (the VM's gateway), the local network and cloud
+metadata addresses out of reach. The Mac's own interface addresses, public ones
+included, are refused too: the launcher writes them to a file in the secret
+folder (see "Blocked addresses" below).
 
 PDFs: when /v1/fetch gets an application/pdf page (or, for a response typed
 application/octet-stream or not typed at all, one whose body starts with
@@ -39,7 +42,9 @@ Those checks live in this process, so they would not bind code that took it
 over. firewall.nft, loaded by entrypoint.sh before this server starts, applies
 the same rule to the whole VM, with one exception for DNS to the VM's name
 server, and the server then drops root and every Linux
-capability so it cannot change the firewall.
+capability so it cannot change the firewall. The Mac's own addresses are in
+that firewall as well (entrypoint.sh adds them to the sets blocked4 and
+blocked6).
 """
 
 from __future__ import annotations
@@ -207,6 +212,16 @@ IPV6_UNICAST = ipaddress.ip_network("2000::/3")
 # (6to4, Teredo), or reserved for documentation.
 IPV6_REFUSED = [ipaddress.ip_network(n) for n in ("2002::/16", "2001::/32", "2001:db8::/32")]
 
+# Addresses the sandbox must never connect to, even when they are public: the
+# Mac's own interface addresses. Scripts/research_sandbox.sh writes them, one
+# per line, to BLOCKED_FILE_NAME in the folder that holds the secret, and
+# main() reads that file once, as root, through load_blocked_file(). The
+# addresses are not secret.
+BLOCKED_ADDRESSES: frozenset = frozenset()
+BLOCKED_FILE_NAME = "blocked-addresses"
+MAX_BLOCKED_ADDRESSES = 256
+MAX_BLOCKED_FILE_BYTES = 64 * 1024
+
 
 def is_public_address(address: str) -> bool:
     try:
@@ -221,7 +236,17 @@ def is_public_address(address: str) -> bool:
         # the global unicast range is allowed.
         elif ip not in IPV6_UNICAST or any(ip in net for net in IPV6_REFUSED):
             return False
+    if ip in BLOCKED_ADDRESSES:
+        return False
     return ip.is_global and not ip.is_multicast
+
+
+def url_scheme(url: str) -> str:
+    """The lowercase scheme of `url`, or "" when it cannot be read."""
+    try:
+        return urllib.parse.urlsplit(url.strip()).scheme.lower()
+    except ValueError:
+        return ""
 
 
 def system_resolver(host: str, port: int) -> list[str]:
@@ -449,6 +474,12 @@ def pinned_transport(method: str, target: Target, headers: dict[str, str],
         connection.request(method, target.path, body=body, headers=headers)
         response = connection.getresponse()
         received = {k.lower(): v for k, v in response.getheaders()}
+        # The dictionary above keeps one value per name, so a second Location
+        # header would go unseen. Which of two addresses a client follows
+        # differs between clients; this one follows neither.
+        if sum(1 for name, _ in response.getheaders() if name.lower() == "location") > 1:
+            raise ToolError(f"{target.host} sent more than one redirect address",
+                            "fetch_failed", 502)
         chunks, size = [], 0
         while size <= cap and not expired.is_set():
             chunk = response.read1(min(65536, cap + 1 - size))
@@ -1037,10 +1068,15 @@ class WebTools:
             response = self.transport(method, target, headers, body,
                                       deadline=min(FETCH_DEADLINE, remaining))
             if response.status in (301, 302, 303, 307, 308):
-                location = response.headers.get("location")
+                location = (response.headers.get("location") or "").strip()
                 if not location:
                     raise ToolError("redirect without a location", "fetch_failed", 502)
                 current = urllib.parse.urljoin(target.url, location)
+                # One rule for every request this tool makes, pages and search
+                # alike: a page read over https is never sent on over http.
+                if target.scheme == "https" and url_scheme(current) == "http":
+                    raise ToolError("a redirect from https to http was refused",
+                                    "insecure_redirect", 502)
                 if response.status == 303 or (response.status in (301, 302) and method == "POST"):
                     method, body, content_type = "GET", None, None
                 continue
@@ -1397,6 +1433,61 @@ def load_secret(path: str) -> bytes:
     return value
 
 
+# --- Blocked addresses ------------------------------------------------------
+
+def load_blocked_addresses(text: str) -> frozenset:
+    """The addresses in `text`, separated by commas or white space, as address
+    objects. An IPv4-mapped IPv6 address counts as the IPv4 address it carries.
+    Raises ValueError for anything that is not a plain IP address (a zone id
+    such as `fe80::1%en0` included) and for an empty or over-long list, so a
+    mistake in the launcher stops the sandbox instead of leaving a hole in its
+    blocklist."""
+    found = set()
+    for part in re.split(r"[,\r\n\t ]+", text):
+        if not part:
+            continue
+        if "%" in part:
+            raise ValueError(f"an address with a zone id is not accepted: {part[:64]!r}")
+        try:
+            ip = ipaddress.ip_address(part)
+        except ValueError:
+            raise ValueError(f"not an IP address: {part[:64]!r}") from None
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        found.add(ip)
+        if len(found) > MAX_BLOCKED_ADDRESSES:
+            raise ValueError(f"more than {MAX_BLOCKED_ADDRESSES} addresses")
+    if not found:
+        raise ValueError("no addresses in the list")
+    return frozenset(found)
+
+
+def load_blocked_file(path: str) -> frozenset:
+    """The Mac's addresses in a file, read like the secret: once, as root,
+    before privileges are dropped. It exits when the file is missing, is not a
+    regular file, is too long or holds anything but addresses."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as error:
+        sys.exit(f"cannot open the Mac's address list: {error.strerror}; refusing to start")
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            sys.exit("the Mac's address list is not a regular file; refusing to start")
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = -1
+            data = handle.read(MAX_BLOCKED_FILE_BYTES + 1)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if len(data) > MAX_BLOCKED_FILE_BYTES:
+        sys.exit(f"the Mac's address list is longer than {MAX_BLOCKED_FILE_BYTES} bytes; "
+                 "refusing to start")
+    try:
+        return load_blocked_addresses(data.decode("ascii"))
+    except ValueError as error:  # a decoding error is a ValueError too
+        sys.exit(f"the Mac's address list: {error}; refusing to start")
+
+
 class NonceStore:
     """Nonces accepted within the time window. Only requests with a correct
     signature are stored, so a caller without the secret cannot fill it."""
@@ -1652,8 +1743,12 @@ class Handler(BaseHTTPRequestHandler):
                 # "passages" tells the research loop this sandbox can rank
                 # passages. "api" is the version of this API. "pdf" tells it
                 # /v1/fetch reads PDFs (pypdf is installed).
+                # "blocked_addresses" is how many of the Mac's own addresses
+                # this server refuses; the security check compares it with
+                # the list the launcher wrote.
                 return self._send(200, {"status": "ok", "api": 1, "passages": True,
-                                        "pdf": PdfReader is not None})
+                                        "pdf": PdfReader is not None,
+                                        "blocked_addresses": len(BLOCKED_ADDRESSES)})
             if method != "POST":
                 raise ToolError("method not allowed", "method_not_allowed", 405)
             # A browser cannot send application/json cross-origin without a
@@ -1840,6 +1935,11 @@ def main(secret_file: str = DEFAULT_SECRET_FILE):
     # tests pass another file; nothing in the environment can move it.
     no_memory_dumps()
     Handler.secret = load_secret(secret_file)
+    # The Mac's own addresses, from the file beside the secret, read the same
+    # way and for the same reason; no list, no server.
+    global BLOCKED_ADDRESSES
+    BLOCKED_ADDRESSES = load_blocked_file(
+        os.path.join(os.path.dirname(secret_file), BLOCKED_FILE_NAME))
     drop_privileges()
     no_memory_dumps()  # Again: changing user can make the process dumpable.
     # 0.0.0.0, not 127.0.0.1: `container run --publish` forwards the Mac's

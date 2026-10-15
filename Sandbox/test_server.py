@@ -10,6 +10,7 @@ import hmac
 import http.client
 import importlib.util
 import io
+import ipaddress
 import json
 import os
 import re
@@ -421,11 +422,48 @@ class FetchTests(unittest.TestCase):
         self.assertEqual(tools.fetch("https://example.com/r")["url"], "https://other.example/x")
 
         blocked = self.tools({
-            "https://example.com/r": Response(301, {"location": "http://internal.example/"}, b""),
+            "http://example.com/r": Response(301, {"location": "http://internal.example/"}, b""),
         })
         with self.assertRaises(ToolError) as caught:
-            blocked.fetch("https://example.com/r")
+            blocked.fetch("http://example.com/r")
         self.assertEqual(caught.exception.code, "blocked_address")
+
+    def test_a_redirect_from_https_to_http_is_refused(self):
+        for status in (301, 302, 303, 307, 308):
+            for location in ("http://other.example/x", "HTTP://other.example/x",
+                             "  http://other.example/x  "):
+                transport = FakeTransport({
+                    "https://example.com/r": Response(status, {"location": location}, b""),
+                    "http://other.example/x": page(ARTICLE),
+                })
+                tools = WebTools(resolver=self.resolve, transport=transport, searxng_url="")
+                with self.assertRaises(ToolError, msg=(status, location)) as caught:
+                    tools.fetch("https://example.com/r")
+                self.assertEqual(caught.exception.code, "insecure_redirect")
+                self.assertEqual(len(transport.calls), 1, "the http address was never requested")
+
+    def test_a_redirect_from_https_to_http_is_refused_in_a_search_too(self):
+        resolve = resolver({"html.duckduckgo.com": ["52.142.124.215"],
+                            "other.example": ["93.184.216.35"]})
+        transport = FakeTransport({
+            "https://html.duckduckgo.com/html/": Response(
+                302, {"location": "http://other.example/html/"}, b""),
+            "http://other.example/html/": page(DDG),
+        })
+        tools = WebTools(resolver=resolve, transport=transport, searxng_url="")
+        with self.assertRaises(ToolError) as caught:
+            tools.search("bounded experts", 3)
+        self.assertEqual(caught.exception.code, "insecure_redirect")
+        self.assertEqual(len(transport.calls), 1)
+
+    def test_other_redirects_are_still_followed(self):
+        tools = self.tools({
+            "http://example.com/a": Response(301, {"location": "https://example.com/b"}, b""),
+            "https://example.com/b": Response(302, {"location": "/c"}, b""),
+            "https://example.com/c": Response(302, {"location": " https://other.example/d "}, b""),
+            "https://other.example/d": page(ARTICLE),
+        })
+        self.assertEqual(tools.fetch("http://example.com/a")["url"], "https://other.example/d")
 
     def test_redirect_loop_stops(self):
         tools = self.tools({
@@ -1508,6 +1546,177 @@ class PinnedTransportTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 1.8)
 
 
+class _RedirectHandler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def do_GET(self):
+        self.send_response(302)
+        for value in {"/one": ["/a"], "/two": ["/a", "http://elsewhere.example/b"],
+                      "/same": ["/a", "/a"]}.get(self.path, []):
+            self.send_header("Location", value)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+
+class DoubleLocationTests(unittest.TestCase):
+    """pinned_transport keeps one value per header name, so it has to count the
+    Location headers itself."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.httpd = ThreadingHTTPServer(("127.0.0.1", 0), _RedirectHandler)
+        cls.httpd.daemon_threads = True
+        cls.port = cls.httpd.server_address[1]
+        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+
+    def get(self, path):
+        target = server.Target("http", "pinned.invalid", self.port, path, "127.0.0.1")
+        return server.pinned_transport("GET", target, {"Host": "pinned.invalid"}, None, deadline=5)
+
+    def test_one_location_header_comes_through(self):
+        response = self.get("/one")
+        self.assertEqual((response.status, response.headers["location"]), (302, "/a"))
+
+    def test_two_location_headers_are_refused_even_when_they_agree(self):
+        for path in ("/two", "/same"):
+            with self.assertRaises(ToolError, msg=path) as caught:
+                self.get(path)
+            self.assertEqual(caught.exception.code, "fetch_failed")
+            self.assertIn("more than one redirect address", caught.exception.message)
+
+
+class BlockedAddressTests(unittest.TestCase):
+    """The Mac's own addresses, which are refused although some are public."""
+
+    def setUp(self):
+        self.folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.folder, True)
+
+    def write(self, text, name=server.BLOCKED_FILE_NAME):
+        path = os.path.join(self.folder, name)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        return path
+
+    def refused(self, text):
+        with self.assertRaises(SystemExit) as caught:
+            server.load_blocked_file(self.write(text))
+        self.assertIn("refusing to start", str(caught.exception.code))
+        return str(caught.exception.code)
+
+    def test_a_listed_public_address_is_refused_and_a_neighbour_is_not(self):
+        with mock.patch.object(server, "BLOCKED_ADDRESSES",
+                               server.load_blocked_addresses("93.184.216.34\n2606:2800:220:1::1\n")):
+            self.assertFalse(server.is_public_address("93.184.216.34"))
+            self.assertFalse(server.is_public_address("2606:2800:220:1:0:0:0:1"))
+            self.assertFalse(server.is_public_address("::ffff:93.184.216.34"))
+            self.assertTrue(server.is_public_address("93.184.216.35"))
+            self.assertTrue(server.is_public_address("2606:2800:220:1::2"))
+        self.assertTrue(server.is_public_address("93.184.216.34"))
+
+    def test_a_mapped_address_in_the_list_blocks_the_ipv4_address(self):
+        with mock.patch.object(server, "BLOCKED_ADDRESSES",
+                               server.load_blocked_addresses("::ffff:93.184.216.34")):
+            self.assertFalse(server.is_public_address("93.184.216.34"))
+
+    def test_a_url_with_the_macs_own_address_is_refused_on_every_hop(self):
+        names = resolver({"example.com": ["93.184.216.34"], "mac.example": ["198.41.0.4"]})
+
+        def resolve(host, port):
+            # An address literal resolves to itself, as getaddrinfo does.
+            return [host] if ":" in host or host[0].isdigit() else names(host, port)
+        with mock.patch.object(server, "BLOCKED_ADDRESSES",
+                               server.load_blocked_addresses("198.41.0.4,2606:2800:220:1::9")):
+            for url in ("http://198.41.0.4/", "https://[2606:2800:220:1::9]/", "http://mac.example/"):
+                with self.assertRaises(ToolError, msg=url) as caught:
+                    server.check_url(url, resolve)
+                self.assertEqual(caught.exception.code, "blocked_address", url)
+            transport = FakeTransport({
+                "https://example.com/r": Response(302, {"location": "https://mac.example/x"}, b""),
+            })
+            tools = WebTools(resolver=resolve, transport=transport, searxng_url="")
+            with self.assertRaises(ToolError) as caught:
+                tools.fetch("https://example.com/r")
+            self.assertEqual(caught.exception.code, "blocked_address")
+            self.assertEqual(len(transport.calls), 1)
+
+    def test_the_list_is_read_strictly(self):
+        found = server.load_blocked_addresses(
+            "198.41.0.4\n::1,FE80::1\r\n  2001:DB8::7\t::ffff:10.0.0.1\n198.41.0.4\n")
+        self.assertEqual(found, frozenset(ipaddress.ip_address(a) for a in (
+            "198.41.0.4", "::1", "fe80::1", "2001:db8::7", "10.0.0.1")))
+        for bad in ("", "\n\n", "fe80::1%en0", "not-an-ip", "1.2.3", "01.2.3.4", "1.2.3.4/24",
+                    "198.41.0.4; accept", "$(id)", "[::1]", "1.2.3.4\u00a05.6.7.8", "\u0661.2.3.4",
+                    "0x7f.0.0.1", "::1 junk"):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                server.load_blocked_addresses(bad)
+        many = "\n".join(f"10.0.{n // 256}.{n % 256}" for n in range(257))
+        with self.assertRaises(ValueError):
+            server.load_blocked_addresses(many)
+        self.assertEqual(len(server.load_blocked_addresses("\n".join(many.split("\n")[:256]))), 256)
+
+    def test_the_file_is_read_like_the_secret(self):
+        path = self.write("198.41.0.4\n::1\n")
+        self.assertEqual(server.load_blocked_file(path), frozenset(
+            ipaddress.ip_address(a) for a in ("198.41.0.4", "::1")))
+        with self.assertRaises(SystemExit) as caught:
+            server.load_blocked_file(os.path.join(self.folder, "missing"))
+        self.assertIn("cannot open", str(caught.exception.code))
+        os.mkdir(os.path.join(self.folder, "folder"))
+        with self.assertRaises(SystemExit):
+            server.load_blocked_file(os.path.join(self.folder, "folder"))
+        link = os.path.join(self.folder, "link")
+        os.symlink(path, link)
+        with self.assertRaises(SystemExit):
+            server.load_blocked_file(link)
+        self.assertIn("zone id", self.refused("fe80::1%en0\n"))
+        self.refused("")
+        self.refused("10.0.0.1\nnonsense\n")
+        self.refused("10.0.0.1\n\u00e9\n")
+        self.refused("10.0.0.1\n" + " " * server.MAX_BLOCKED_FILE_BYTES)
+
+    def test_the_server_does_not_start_without_the_list(self):
+        secret = os.path.join(self.folder, "secret")
+        with open(secret, "wb") as handle:
+            handle.write(SECRET)
+        with mock.patch.object(server, "BoundedServer") as listener, \
+                mock.patch.object(server, "drop_privileges") as drop, \
+                mock.patch.object(server, "BLOCKED_ADDRESSES", frozenset()), \
+                mock.patch.object(server.Handler, "secret", b""):
+            with self.assertRaises(SystemExit) as caught:
+                server.main(secret)
+        self.assertIn("address list", str(caught.exception.code))
+        listener.assert_not_called()
+        drop.assert_not_called()
+
+    def test_main_reads_the_list_beside_the_secret(self):
+        secret = os.path.join(self.folder, "secret")
+        with open(secret, "wb") as handle:
+            handle.write(SECRET)
+        self.write("198.41.0.4\n::1\n")
+        with mock.patch.object(server, "BoundedServer", side_effect=SystemExit(0)), \
+                mock.patch.object(server, "drop_privileges"), \
+                mock.patch.object(server, "no_memory_dumps"), \
+                mock.patch.object(server, "BLOCKED_ADDRESSES", frozenset()), \
+                mock.patch.object(server.Handler, "secret", b""):
+            with self.assertRaises(SystemExit):
+                server.main(secret)
+            self.assertEqual(server.BLOCKED_ADDRESSES, frozenset(
+                ipaddress.ip_address(a) for a in ("198.41.0.4", "::1")))
+
+    def test_the_file_name_matches_the_launcher_and_the_entrypoint(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        for relative in ("entrypoint.sh", os.path.join("..", "Scripts", "research_sandbox.sh")):
+            with open(os.path.join(here, relative), encoding="utf-8") as handle:
+                self.assertIn(server.BLOCKED_FILE_NAME, handle.read(), relative)
+
+
 class InjectionFixtureTests(unittest.TestCase):
     """The injection fixtures only test the model if extraction keeps the
     planted text, so check that it survives."""
@@ -1927,6 +2136,10 @@ class LoadSecretTests(unittest.TestCase):
         order = []
         with mock.patch.object(server, "load_secret",
                                side_effect=lambda path: order.append(("load", path)) or SECRET), \
+                mock.patch.object(server, "load_blocked_file",
+                                  side_effect=lambda path: order.append(("blocked", path))
+                                  or frozenset()), \
+                mock.patch.object(server, "BLOCKED_ADDRESSES", frozenset()), \
                 mock.patch.object(server, "drop_privileges",
                                   side_effect=lambda: order.append(("drop",))), \
                 mock.patch.object(server, "BoundedServer", side_effect=SystemExit(0)), \
@@ -1934,7 +2147,9 @@ class LoadSecretTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 server.main()
             self.assertEqual(server.Handler.secret, SECRET)
-        self.assertEqual(order, [("load", server.DEFAULT_SECRET_FILE), ("drop",)])
+        self.assertEqual(order, [("load", server.DEFAULT_SECRET_FILE),
+                                 ("blocked", "/run/sandseek-sandbox/blocked-addresses"),
+                                 ("drop",)])
 
     def test_main_does_not_start_without_a_secret(self):
         with mock.patch.object(server, "BoundedServer") as listener:
@@ -1959,9 +2174,15 @@ class SignedRoundTripTests(LiveServer):
         self.assertEqual(answer.status, 200)
         self.assertSigned(answer)
         self.assertEqual(answer.json, {"status": "ok", "api": 1, "passages": True,
-                                       "pdf": server.PdfReader is not None})
+                                       "pdf": server.PdfReader is not None,
+                                       "blocked_addresses": len(server.BLOCKED_ADDRESSES)})
         self.assertEqual(answer.headers["content-type"], "application/json")
         self.assertEqual(answer.headers["cache-control"], "no-store")
+
+    def test_health_counts_the_blocked_addresses(self):
+        with mock.patch.object(server, "BLOCKED_ADDRESSES", server.load_blocked_addresses(
+                "198.41.0.4\n::1\n2001:db8::7\n")):
+            self.assertEqual(self.exchange("GET", "/health").json["blocked_addresses"], 3)
 
     def test_fetch_and_search_are_signed(self):
         answer = self.post("/v1/fetch", {"url": "https://example.com/a"})
@@ -2682,6 +2903,8 @@ class MemoryDumpTests(unittest.TestCase):
         with mock.patch.object(server, "no_memory_dumps", side_effect=lambda: order.append("dumps")), \
                 mock.patch.object(server, "load_secret",
                                   side_effect=lambda path: order.append("load") or SECRET), \
+                mock.patch.object(server, "load_blocked_file", return_value=frozenset()), \
+                mock.patch.object(server, "BLOCKED_ADDRESSES", frozenset()), \
                 mock.patch.object(server, "drop_privileges", side_effect=lambda: order.append("drop")), \
                 mock.patch.object(server, "BoundedServer", side_effect=SystemExit(0)), \
                 mock.patch.object(server.Handler, "secret", b""):
@@ -2999,6 +3222,28 @@ class FirewallFileTests(unittest.TestCase):
         self.assertIn("type filter hook output priority filter; policy drop;",
                       self.chain("output"))
 
+    def test_the_macs_own_addresses_are_refused_before_anything_is_accepted(self):
+        rules = self.chain("output")
+        for family, name in (("ip", "blocked4"), ("ip6", "blocked6")):
+            tcp = f"meta nfproto ipv{name[-1]} {family} daddr @{name} meta l4proto tcp reject with tcp reset"
+            plain = f"meta nfproto ipv{name[-1]} {family} daddr @{name} reject"
+            self.assertEqual(rules.count(tcp), 1, name)
+            self.assertEqual(rules.count(plain), 1, name)
+        accepts = [i for i, rule in enumerate(rules) if rule.endswith(" accept")]
+        blocked = [i for i, rule in enumerate(rules) if "@blocked" in rule]
+        # Only loopback and replies come first; the file has no other accept
+        # before the blocked rules (entrypoint.sh inserts DNS above them all).
+        self.assertEqual([rules[i] for i in accepts if i < max(blocked)],
+                         ['oifname "lo" accept', "ct state established,related accept"])
+
+    def test_the_blocked_sets_are_declared_empty_and_typed(self):
+        for name, kind in (("blocked4", "ipv4_addr"), ("blocked6", "ipv6_addr")):
+            start = self.code.index(f"set {name} {{")
+            body = self.code[start:self.code.index("}", start)]
+            self.assertIn(f"type {kind}", body)
+            self.assertNotIn("elements", body)
+            self.assertNotIn("interval", body)
+
 
 SAMPLE_ROUTE = (
     "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n"
@@ -3088,7 +3333,10 @@ class DefaultGatewayTests(unittest.TestCase):
 class EntrypointTests(unittest.TestCase):
     """Runs entrypoint.sh with stand-ins for nft, sleep and the helper."""
 
-    def run_entrypoint(self, helper_body, nft_exit=0):
+    BLOCKED = "198.41.0.4\n::1\n"
+
+    def run_entrypoint(self, helper_body, nft_exit=0, blocked=BLOCKED, nft_fail_on=None,
+                       blocked_is_link=False):
         import subprocess
         import tempfile
         here = os.path.dirname(os.path.abspath(__file__))
@@ -3104,13 +3352,25 @@ class EntrypointTests(unittest.TestCase):
             log = os.path.join(directory, "calls")
             helper = write("helper", helper_body)
             # The helper is run by name through python3 in the real script.
+            # A script on standard input (`python3 -`) runs for real; the
+            # helper and the server are stand-ins.
             write("python3", f'#!/bin/sh\nif [ "$1" = "/app/default_gateway.py" ]; then shift; '
-                             f'exec {helper} "$@"; fi\necho "python3 $*" >> {log}\n')
-            write("nft", f'#!/bin/sh\necho "nft $*" >> {log}\nexit {nft_exit}\n')
+                             f'exec {helper} "$@"; fi\n'
+                             f'if [ "$1" = "-" ]; then exec {sys.executable} "$@"; fi\n'
+                             f'echo "python3 $*" >> {log}\n')
+            fail_on = f'case "$*" in *"{nft_fail_on}"*) exit 1 ;; esac\n' if nft_fail_on else ""
+            write("nft", f'#!/bin/sh\necho "nft $*" >> {log}\n{fail_on}exit {nft_exit}\n')
             write("sleep", "#!/bin/sh\nexit 0\n")
             resolv = write("resolv.conf", "")
+            blocked_file = os.path.join(directory, "blocked-addresses")
+            if blocked is not None:
+                with open(blocked_file + (".real" if blocked_is_link else ""), "w") as handle:
+                    handle.write(blocked)
+                if blocked_is_link:
+                    os.symlink(blocked_file + ".real", blocked_file)
             patched = script.replace("/etc/resolv.conf", resolv).replace(
-                "/app/firewall.nft", "FIREWALL")
+                "/app/firewall.nft", "FIREWALL").replace(
+                "/run/sandseek-sandbox/blocked-addresses", blocked_file)
             entry = write("entrypoint.sh", patched)
             env = {"PATH": directory + ":/usr/bin:/bin"}
             result = subprocess.run(["/bin/sh", entry], env=env, capture_output=True, text=True)
@@ -3149,6 +3409,50 @@ class EntrypointTests(unittest.TestCase):
         self.assertIn("could not load the sandbox firewall", result.stderr)
         self.assertNotIn("server.py", calls)
 
+    GATEWAY = "#!/bin/sh\necho 192.168.64.1\n"
+
+    def test_every_address_of_the_mac_goes_into_the_set_of_its_family(self):
+        text = ("198.41.0.4\n::1\nFE80::1\n2001:DB8::7\n::ffff:93.184.216.34\n"
+                "198.41.0.4\n10.0.0.5\n")
+        result, calls = self.run_entrypoint(self.GATEWAY, blocked=text)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        added = [line for line in calls.splitlines() if " add element " in line]
+        # IPv4 first, each once, sorted; a mapped address becomes its IPv4 address.
+        self.assertEqual(added, [
+            "nft add element inet sandseek_sandbox blocked4 { 10.0.0.5 }",
+            "nft add element inet sandseek_sandbox blocked4 { 93.184.216.34 }",
+            "nft add element inet sandseek_sandbox blocked4 { 198.41.0.4 }",
+            "nft add element inet sandseek_sandbox blocked6 { ::1 }",
+            "nft add element inet sandseek_sandbox blocked6 { 2001:db8::7 }",
+            "nft add element inet sandseek_sandbox blocked6 { fe80::1 }",
+        ])
+        self.assertIn("6 of the Mac's own addresses refused", result.stderr)
+        # After the firewall is loaded, before the server starts.
+        self.assertLess(calls.index("-f FIREWALL"), calls.index("add element"))
+        self.assertLess(calls.rindex("add element"), calls.index("python3 /app/server.py"))
+
+    def test_a_list_that_is_missing_or_wrong_stops_the_start(self):
+        for text in (None, "", "\n", "fe80::1%en0\n", "not-an-ip\n", "198.41.0.4\n1.2.3\n",
+                     "198.41.0.4; accept\n", "$(id)\n", "198.41.0.4\n\u00e9\n",
+                     "\n".join(f"10.0.{n // 256}.{n % 256}" for n in range(257)),
+                     "10.0.0.1\n" + " " * 70000):
+            result, calls = self.run_entrypoint(self.GATEWAY, blocked=text)
+            self.assertEqual(result.returncode, 1, repr(text)[:60])
+            self.assertIn("refusing to start", result.stderr, repr(text)[:60])
+            self.assertNotIn("add element", calls, repr(text)[:60])
+            self.assertNotIn("server.py", calls, repr(text)[:60])
+
+    def test_a_list_that_is_a_link_is_not_followed(self):
+        result, calls = self.run_entrypoint(self.GATEWAY, blocked_is_link=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("is missing", result.stderr)
+        self.assertNotIn("server.py", calls)
+
+    def test_an_address_that_nft_does_not_take_stops_the_start(self):
+        result, calls = self.run_entrypoint(self.GATEWAY, nft_fail_on="add element")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("server.py", calls)
+
 
 class LauncherTests(unittest.TestCase):
     """Scripts/research_sandbox.sh start and status, with `container` and `curl`
@@ -3163,6 +3467,28 @@ class LauncherTests(unittest.TestCase):
     SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "Scripts",
                           "research_sandbox.sh")
     UNSIGNED = '{"error": {"message": "not signed", "code": "unauthorized"}}'
+    # What `ifconfig` prints on a Mac (documentation addresses), with a zone id,
+    # a repeated address, upper-case hexadecimal and a point-to-point link.
+    IFCONFIG = (
+        "lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384\n"
+        "\toptions=1203<RXCSUM,TXCSUM,TXSTATUS,SW_TIMESTAMP>\n"
+        "\tinet 127.0.0.1 netmask 0xff000000\n"
+        "\tinet6 ::1 prefixlen 128\n"
+        "\tinet6 fe80::1%lo0 prefixlen 64 scopeid 0x1\n"
+        "\tnd6 options=201<PERFORMNUD,DAD>\n"
+        "en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500\n"
+        "\tether aa:bb:cc:dd:ee:ff\n"
+        "\tinet6 fe80::1c2b:3d4e:5f60:7182%en0 prefixlen 64 secured scopeid 0xc\n"
+        "\tinet 203.0.113.9 netmask 0xffffff00 broadcast 203.0.113.255\n"
+        "\tinet6 2001:db8:1234:5678:AAAA:bbbb:cccc:dddd prefixlen 64 autoconf secured\n"
+        "\tinet6 2001:db8:1234:5678:AAAA:bbbb:cccc:dddd prefixlen 64 autoconf temporary\n"
+        "\tstatus: active\n"
+        "utun0: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1380\n"
+        "\tinet6 fe80::abcd:1234:5678:9abc%utun0 prefixlen 64 scopeid 0x10\n"
+        "\tinet 10.8.0.2 --> 10.8.0.1 netmask 0xffffff00\n")
+    ADDRESSES = ["127.0.0.1", "::1", "fe80::1", "fe80::1c2b:3d4e:5f60:7182", "203.0.113.9",
+                 "2001:db8:1234:5678:aaaa:bbbb:cccc:dddd", "fe80::abcd:1234:5678:9abc",
+                 "10.8.0.2", "198.41.0.4"]
 
     def setUp(self):
         self.home = tempfile.mkdtemp()
@@ -3184,6 +3510,12 @@ exit 0
 [[ -n "$FAKE_CODE" ]] || exit 7
 printf '%s\\n%s' "$FAKE_BODY" "$FAKE_CODE"
 ''')
+        self.write_stub("ifconfig", '''#!/bin/bash
+[[ -z "${FAKE_IFCONFIG_FAILS:-}" ]] || exit 1
+cat "$(dirname "$0")/ifconfig.out"
+''')
+        with open(os.path.join(self.bin, "ifconfig.out"), "w") as handle:
+            handle.write(self.IFCONFIG)
         self.secret = os.path.join(self.home, "Library", "Application Support", "SandSeek",
                                    "sandbox", "secret")
         self.script = self.stubbed_script()
@@ -3193,6 +3525,8 @@ printf '%s\\n%s' "$FAKE_BODY" "$FAKE_CODE"
             text = handle.read()
         text = text.replace("container_bin=/usr/local/bin/container",
                             f'container_bin="{self.bin}/container"', 1)
+        text = text.replace("ifconfig_bin=/sbin/ifconfig",
+                            f'ifconfig_bin="{self.bin}/ifconfig"', 1)
         start = text.index("require_container() {")
         end = text.index("\n}\n", start) + 3
         text = (text[:start] + "require_container() {\n"
@@ -3232,6 +3566,73 @@ printf '%s\\n%s' "$FAKE_BODY" "$FAKE_CODE"
         with open(self.secret) as handle:
             self.assertEqual(len(handle.read()), 64)
         self.assertEqual(os.stat(self.secret).st_mode & 0o777, 0o600)
+
+    def test_a_start_hands_the_macs_addresses_to_the_vm_in_the_secret_folder(self):
+        done = self.run_script("start", FAKE_CODE="401", FAKE_BODY=self.UNSIGNED)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        listed = os.path.join(os.path.dirname(self.secret), "blocked-addresses")
+        with open(listed) as handle:
+            self.assertEqual(handle.read().split("\n"), self.ADDRESSES + [""])
+        self.assertEqual(os.stat(listed).st_mode & 0o777, 0o600)
+        # The folder with both files is the one that is mounted, read-only; the
+        # addresses are in no argument and no environment variable.
+        run = next(c for c in self.container_calls() if c.startswith("run "))
+        self.assertIn(f"source={os.path.dirname(self.secret)},", run)
+        self.assertNotIn("198.41.0.4", run)
+        self.assertNotIn("203.0.113.9", run)
+        self.assertNotIn("BLOCKED", run)
+
+    def test_the_addresses_are_written_before_the_container_runs(self):
+        # An ifconfig that fails, or that prints nothing usable, stops the
+        # start before `container run`, and no secret or list is left.
+        for fake in ({"FAKE_IFCONFIG_FAILS": "1"},):
+            done = self.run_script("start", **fake)
+            self.assertEqual(done.returncode, 1)
+            self.assertIn("could not read the Mac's network addresses", done.stderr)
+            self.assertFalse(any(c.startswith("run ") for c in self.container_calls()))
+            self.assertFalse(os.path.exists(self.secret))
+            self.assertFalse(os.path.exists(os.path.join(os.path.dirname(self.secret),
+                                                         "blocked-addresses")))
+        with open(os.path.join(self.bin, "ifconfig.out"), "w") as handle:
+            handle.write("en0: flags=8863<UP>\n\tstatus: inactive\n")
+        done = self.run_script("start")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("found no usable network address", done.stderr)
+        self.assertFalse(any(c.startswith("run ") for c in self.container_calls()))
+        self.assertFalse(os.path.exists(self.secret))
+
+    def test_addresses_that_do_not_pass_the_checks_are_left_out_and_reported(self):
+        with open(os.path.join(self.bin, "ifconfig.out"), "w") as handle:
+            handle.write("\tinet 1.2.3\n\tinet 01.2.3.4\n\tinet 1.2.3.256\n\tinet 8.8.8.8; accept\n"
+                         "\tinet6 not:an:address\n\tinet6 :1\n\tinet6 1:2:3:4:5:6:7:8:9\n"
+                         "\tinet 192.0.2.7\n\tinet6\n")
+        done = self.run_script("start", FAKE_CODE="401", FAKE_BODY=self.UNSIGNED)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stderr.count("ignoring an interface address that is not valid"), 7)
+        with open(os.path.join(os.path.dirname(self.secret), "blocked-addresses")) as handle:
+            self.assertEqual(handle.read().split(), ["192.0.2.7", "198.41.0.4"])
+
+    def test_more_than_256_addresses_are_not_started(self):
+        with open(os.path.join(self.bin, "ifconfig.out"), "w") as handle:
+            handle.write("".join(f"\tinet 10.1.{n // 256}.{n % 256} netmask 0xff\n"
+                                 for n in range(256)))
+        done = self.run_script("start")
+        self.assertEqual(done.returncode, 1)
+        self.assertIn("at most 256", done.stderr)
+        self.assertFalse(os.path.exists(self.secret))
+
+    def test_stop_and_a_failed_start_remove_the_list_with_the_secret(self):
+        listed = os.path.join(os.path.dirname(self.secret), "blocked-addresses")
+        done = self.run_script("start", FAKE_CODE="401", FAKE_BODY=self.UNSIGNED)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertTrue(os.path.exists(listed))
+        done = self.run_script("stop", FAKE_ALL_LIST="")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertFalse(os.path.exists(listed))
+        self.assertFalse(os.path.exists(self.secret))
+        done = self.run_script("start", FAKE_RUN_EXIT="1")
+        self.assertEqual(done.returncode, 1)
+        self.assertFalse(os.path.exists(listed))
 
     def test_a_health_body_without_spaces_after_the_colon_still_counts(self):
         done = self.run_script("status", FAKE_CODE="401",
@@ -3298,6 +3699,8 @@ class SigtermTests(unittest.TestCase):
             secret = os.path.join(folder, "secret")
             with open(secret, "wb") as handle:
                 handle.write(SECRET)
+            with open(os.path.join(folder, server.BLOCKED_FILE_NAME), "w") as handle:
+                handle.write("198.41.0.4\n")
             process = subprocess.Popen(
                 [sys.executable, "-c", code, secret], cwd=os.path.dirname(os.path.abspath(__file__)),
                 stderr=subprocess.PIPE, text=True)
