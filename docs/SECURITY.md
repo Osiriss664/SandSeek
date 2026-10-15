@@ -232,6 +232,18 @@ These hold as long as the design is intact and the VM boundary holds.
   Inside the VM the server listens on 0.0.0.0, because the published port has
   to reach it; who can connect is set by the inbound rule above (the gateway
   only).
+  The server is also hard to jam. A whole request (line, headers and body)
+  must arrive within 10 seconds, or a body that stops short gets a signed 408
+  and anything slower is dropped; at most 32 connections are served at once and
+  the next is closed at once; the request line and headers together may not
+  exceed 16 KiB or 50 headers, a second `Content-Length` or any
+  `Transfer-Encoding` is refused, and the target must be a short plain path.
+  Log lines hold only the method, one of the three known paths, the status, the
+  size and the time taken: no address, query, header or page text. A page that
+  was sent compressed and would unpack past the size limit is refused
+  (`oversized`), not cut. The server turns off core files and memory reads of
+  itself (`RLIMIT_CORE` 0, `PR_SET_DUMPABLE` 0) because its memory holds the
+  secret and the pages it read.
 
 ## The `container` program
 
@@ -290,8 +302,9 @@ time-limit `container` itself; the app's limit on the script covers that.
   lookups.
 - **A kernel or virtualisation flaw could let code escape the VM,** or let code
   in the VM remove the firewall. That is the risk of any VM. The Python
-  packages and the base image are pinned by hash and digest, but `nftables`
-  comes from Debian's current packages when the image is built.
+  packages and the base image are pinned by hash and digest, and `nftables`
+  comes from a fixed Debian snapshot date (snapshot.debian.org), so a rebuild
+  installs the same version.
 - **Any program running as you can call the sandbox** on 127.0.0.1:9100 and
   have public pages fetched through it. It needs the secret file for that,
   which only your Mac user can read, so another Mac user, a browser page (Host

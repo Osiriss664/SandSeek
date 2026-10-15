@@ -1643,6 +1643,9 @@ class LiveServer(unittest.TestCase):
 
     secret = SECRET
     handler_timeout = None
+    quiet_log = True
+    read_deadline = None
+    server_class = ThreadingHTTPServer
 
     def setUp(self):
         self.clock = Clock(START)
@@ -1654,9 +1657,12 @@ class LiveServer(unittest.TestCase):
                       "now": staticmethod(self.clock)}
         if self.handler_timeout is not None:
             attributes["timeout"] = self.handler_timeout
-        self.handler = type("TestHandler", (server.Handler,), {
-            **attributes, "log_message": lambda *args: None})
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), self.handler)
+        if self.read_deadline is not None:
+            attributes["read_deadline"] = self.read_deadline
+        if self.quiet_log:
+            attributes["log_message"] = lambda *args: None
+        self.handler = type("TestHandler", (server.Handler,), attributes)
+        self.httpd = self.server_class(("127.0.0.1", 0), self.handler)
         self.httpd.daemon_threads = True
         self.port = self.httpd.server_address[1]
         self.thread = threading.Thread(target=self.httpd.serve_forever,
@@ -1923,7 +1929,7 @@ class LoadSecretTests(unittest.TestCase):
                                side_effect=lambda path: order.append(("load", path)) or SECRET), \
                 mock.patch.object(server, "drop_privileges",
                                   side_effect=lambda: order.append(("drop",))), \
-                mock.patch.object(server, "ThreadingHTTPServer", side_effect=SystemExit(0)), \
+                mock.patch.object(server, "BoundedServer", side_effect=SystemExit(0)), \
                 mock.patch.object(server.Handler, "secret", b""):
             with self.assertRaises(SystemExit):
                 server.main()
@@ -1931,7 +1937,7 @@ class LoadSecretTests(unittest.TestCase):
         self.assertEqual(order, [("load", server.DEFAULT_SECRET_FILE), ("drop",)])
 
     def test_main_does_not_start_without_a_secret(self):
-        with mock.patch.object(server, "ThreadingHTTPServer") as listener:
+        with mock.patch.object(server, "BoundedServer") as listener:
             with self.assertRaises(SystemExit) as caught:
                 server.main(os.path.join(self.folder, "missing"))
         self.assertIn("cannot open", str(caught.exception.code))
@@ -2345,6 +2351,291 @@ class SilentClientTests(LiveServer):
                 # Nothing for an unfinished head; 408 for a body that stops short.
                 self.assertTrue(answer == b"" or answer.startswith(b"HTTP/1.0 408"), answer)
                 self.assertLess(time.monotonic() - started, 4)
+
+
+class ReadDeadlineTests(LiveServer):
+    read_deadline = 1.0
+
+    def test_a_sender_that_drips_the_body_gets_a_signed_408_by_the_deadline(self):
+        # A byte every 0.3 seconds never trips the per-wait timeout (30 s), so
+        # only the deadline for the whole request can end this.
+        body = b'{"url": "https://example.com/a"}'
+        nonce, headers = self.headers_for("POST", "/v1/fetch", body)
+        started = time.monotonic()
+        with socket.create_connection(("127.0.0.1", self.port), timeout=10) as client:
+            head = "POST /v1/fetch HTTP/1.1\r\n" + "".join(f"{n}: {v}\r\n" for n, v in headers)
+            client.sendall(head.encode() + b"\r\n")
+            data = b""
+            for byte in body:
+                try:
+                    client.sendall(bytes([byte]))
+                except OSError:
+                    break
+                time.sleep(0.3)
+                client.settimeout(0.01)
+                try:
+                    chunk = client.recv(4096)
+                except (socket.timeout, TimeoutError):
+                    continue
+                data += chunk
+                if not chunk:
+                    break
+            client.settimeout(5)
+            while True:
+                try:
+                    chunk = client.recv(4096)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                data += chunk
+        self.assertLess(time.monotonic() - started, 5)
+        head, _, answer = data.partition(b"\r\n\r\n")
+        self.assertTrue(head.startswith(b"HTTP/1.0 408"), head)
+        self.assertEqual(json.loads(answer)["error"]["code"], "request_timeout")
+        auth = [line.split(b": ", 1)[1].decode() for line in head.split(b"\r\n")
+                if line.lower().startswith(b"x-sandbox-auth")]
+        self.assertEqual(auth, [expected_response_auth(self.secret, "POST", "/v1/fetch", nonce,
+                                                       408, answer)])
+
+    def test_a_sender_that_drips_the_headers_is_dropped_by_the_deadline(self):
+        started = time.monotonic()
+        with socket.create_connection(("127.0.0.1", self.port), timeout=10) as client:
+            data = b""
+            for byte in b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nX-A: ":
+                try:
+                    client.sendall(bytes([byte]))
+                except OSError:
+                    break
+                time.sleep(0.1)
+            client.settimeout(5)
+            try:
+                data = client.recv(1024)
+            except OSError:
+                pass
+        self.assertEqual(data, b"")
+        self.assertLess(time.monotonic() - started, 5)
+
+    def test_a_request_that_arrives_in_time_is_answered(self):
+        self.assertEqual(self.exchange("GET", "/health").status, 200)
+
+    def test_the_deadline_is_a_few_seconds_in_production(self):
+        self.assertTrue(0 < server.READ_DEADLINE <= server.REQUEST_TIMEOUT)
+        self.assertEqual(server.Handler.read_deadline, server.READ_DEADLINE)
+
+
+class BoundedServerTests(LiveServer):
+    server_class = server.BoundedServer
+
+    def test_the_cap_is_32(self):
+        self.assertEqual(server.MAX_CONNECTIONS, 32)
+
+    def test_the_33rd_connection_is_closed_and_a_freed_slot_is_reused(self):
+        self.httpd._slots = threading.BoundedSemaphore(server.MAX_CONNECTIONS)
+        clients = []
+        try:
+            for _ in range(server.MAX_CONNECTIONS):
+                clients.append(socket.create_connection(("127.0.0.1", self.port), timeout=5))
+            deadline = time.monotonic() + 5
+            # Wait until the server has taken every slot.
+            while time.monotonic() < deadline:
+                if self.httpd._slots._value == 0:
+                    break
+                time.sleep(0.02)
+            self.assertEqual(self.httpd._slots._value, 0)
+            extra = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+            try:
+                extra.sendall(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+                try:
+                    answer = extra.recv(1024)
+                except ConnectionError:
+                    answer = b""
+                self.assertEqual(answer, b"")
+            finally:
+                extra.close()
+            clients.pop().close()
+            deadline = time.monotonic() + 5
+            while self.httpd._slots._value == 0 and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertEqual(self.exchange("GET", "/health").status, 200)
+        finally:
+            for client in clients:
+                client.close()
+
+    def test_binding_does_not_ask_for_the_host_name(self):
+        with mock.patch.object(socket, "getfqdn", side_effect=AssertionError("slow lookup")):
+            httpd = server.BoundedServer(("127.0.0.1", 0), self.handler)
+        try:
+            self.assertEqual(httpd.server_name, "127.0.0.1")
+            self.assertEqual(httpd.server_port, httpd.server_address[1])
+        finally:
+            httpd.server_close()
+
+
+class StrictRequestTests(LiveServer):
+    def raw(self, data):
+        with socket.create_connection(("127.0.0.1", self.port), timeout=5) as client:
+            client.sendall(data)
+            out = b""
+            while True:
+                try:
+                    chunk = client.recv(4096)
+                except ConnectionError:
+                    break
+                if not chunk:
+                    break
+                out += chunk
+        return out
+
+    def status_of(self, data):
+        return data.split(b"\r\n", 1)[0] if data else b""
+
+    def test_too_many_headers_are_refused(self):
+        headers = "".join(f"X-{i}: 1\r\n" for i in range(server.MAX_HEADERS + 5))
+        out = self.raw(f"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n{headers}\r\n".encode())
+        self.assertIn(b" 431 ", self.status_of(out))
+
+    def test_a_big_head_is_refused_without_reading_it_all(self):
+        filler = "".join(f"X-{i}: {'a' * 1000}\r\n" for i in range(40))
+        out = self.raw(f"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n{filler}\r\n".encode())
+        self.assertIn(b" 431 ", self.status_of(out))
+
+    def test_a_long_request_line_is_not_answered(self):
+        out = self.raw(b"GET /" + b"a" * (server.MAX_HEAD_BYTES + 10) + b" HTTP/1.1\r\n\r\n")
+        self.assertNotIn(b" 200 ", self.status_of(out))
+        self.assertNotIn(b"sandbox", out.lower())
+
+    def test_the_target_must_be_a_short_plain_path(self):
+        for target in (b"http://127.0.0.1/health", b"health", b"/a" + b"b" * 3000,
+                       b"/h\xc3\xa9", b"*"):
+            with self.subTest(target=target):
+                out = self.raw(b"GET " + target + b" HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+                self.assertIn(b" 400 ", self.status_of(out))
+
+    def test_two_content_lengths_are_a_signed_400(self):
+        body = b"{}"
+        answer = self.exchange("POST", "/v1/fetch", body, edit=add("Content-Length", "2"))
+        self.assertError(answer, 400, "invalid_request")
+
+    def test_transfer_encoding_is_a_signed_400(self):
+        answer = self.exchange("POST", "/v1/fetch", b"{}", edit=add("Transfer-Encoding", "chunked"))
+        self.assertError(answer, 400, "invalid_request")
+
+    def test_a_normal_request_still_works(self):
+        self.assertEqual(self.exchange("GET", "/health").status, 200)
+        self.assertEqual(self.post("/v1/fetch", {"url": "https://example.com/a"}).status, 200)
+
+
+class LogLineTests(LiveServer):
+    quiet_log = False
+
+    def test_a_log_line_has_no_url_query_or_header(self):
+        with mock.patch.object(sys, "stderr", io.StringIO()) as log:
+            self.post("/v1/fetch", {"url": "https://example.com/a", "query": "hunter2"},
+                      edit=add("X-Secret-Header", "headervalue"))
+            self.exchange("GET", "/health?token=hunter2")
+            self.exchange("GET", "/secret-path/hunter2?x=1")
+        text = log.getvalue()
+        for leaked in ("hunter2", "example.com", "headervalue", "token", "127.0.0.1",
+                       "secret-path", "Bounded"):
+            self.assertNotIn(leaked, text)
+        lines = [line for line in text.splitlines() if line]
+        self.assertEqual(len(lines), 3, text)
+        self.assertRegex(lines[0], r"^POST /v1/fetch 200 \d+ \d+\.\d\ds$")
+        self.assertRegex(lines[1], r"^GET /health 404 \d+ \d+\.\d\ds$")
+        self.assertRegex(lines[2], r"^GET - 404 \d+ \d+\.\d\ds$")
+
+    def test_a_refused_request_line_is_not_echoed(self):
+        with mock.patch.object(sys, "stderr", io.StringIO()) as log:
+            with socket.create_connection(("127.0.0.1", self.port), timeout=5) as client:
+                client.sendall(b"GET http://evil.example/?q=hunter2 HTTP/1.1\r\n"
+                               b"Host: 127.0.0.1\r\n\r\n")
+                client.recv(1024)
+            time.sleep(0.2)
+        self.assertNotIn("hunter2", log.getvalue())
+        self.assertNotIn("evil.example", log.getvalue())
+
+    def test_the_fallback_parser_log_has_no_address(self):
+        with mock.patch.object(server, "_run_in_child", return_value=None), \
+                mock.patch.object(sys, "stderr", io.StringIO()) as log:
+            server.extract_text_bounded("<p>x</p>", "https://secret.example/?token=hunter2")
+        self.assertIn("fallback", log.getvalue())
+        self.assertNotIn("secret.example", log.getvalue())
+        self.assertNotIn("hunter2", log.getvalue())
+
+
+class CompressedSizeTests(unittest.TestCase):
+    def compressed(self, size, encoding="gzip"):
+        raw = b"a" * size
+        body = gzip.compress(raw) if encoding == "gzip" else zlib.compress(raw)
+        return Response(200, {"content-type": "text/html", "content-encoding": encoding}, body)
+
+    def test_a_body_that_unpacks_past_the_limit_is_refused_not_cut(self):
+        for encoding in ("gzip", "deflate"):
+            with self.subTest(encoding):
+                with self.assertRaises(ToolError) as caught:
+                    server.decode_body(self.compressed(1001, encoding), limit=1000)
+                self.assertEqual((caught.exception.code, caught.exception.status), ("oversized", 502))
+
+    def test_a_body_exactly_at_the_limit_is_kept_whole(self):
+        for encoding in ("gzip", "deflate"):
+            with self.subTest(encoding):
+                self.assertEqual(len(server.decode_body(self.compressed(1000, encoding), limit=1000)),
+                                 1000)
+
+    def test_a_small_compressed_bomb_is_refused_by_a_page_fetch(self):
+        bomb = gzip.compress(b"a" * (server.MAX_DOWNLOAD_BYTES + 1000))
+        self.assertLess(len(bomb), 100_000)
+        tools = WebTools(resolver=resolver({"example.com": ["93.184.216.34"]}),
+                         transport=FakeTransport({"https://example.com/z": Response(
+                             200, {"content-type": "text/html", "content-encoding": "gzip"}, bomb)}),
+                         searxng_url="")
+        with self.assertRaises(ToolError) as caught:
+            tools.fetch("https://example.com/z")
+        self.assertEqual(caught.exception.code, "oversized")
+
+
+class MemoryDumpTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux only")
+    def test_the_process_is_not_dumpable_and_has_no_core_file(self):
+        code = ("import resource, sys, ctypes; sys.path.insert(0, %r); import server; "
+                "server.no_memory_dumps(); "
+                "print(ctypes.CDLL(None).prctl(3, 0, 0, 0, 0), resource.getrlimit(resource.RLIMIT_CORE))"
+                % os.path.dirname(os.path.abspath(__file__)))
+        done = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stdout.strip(), "0 (0, 0)")
+
+    def test_it_is_quiet_where_prctl_is_missing(self):
+        class NoLibc:
+            def __getattr__(self, name):
+                raise AttributeError(name)
+        with mock.patch.object(server.ctypes, "CDLL", return_value=NoLibc()):
+            server.no_memory_dumps()
+
+    def test_main_turns_dumps_off_before_reading_the_secret(self):
+        order = []
+        with mock.patch.object(server, "no_memory_dumps", side_effect=lambda: order.append("dumps")), \
+                mock.patch.object(server, "load_secret",
+                                  side_effect=lambda path: order.append("load") or SECRET), \
+                mock.patch.object(server, "drop_privileges", side_effect=lambda: order.append("drop")), \
+                mock.patch.object(server, "BoundedServer", side_effect=SystemExit(0)), \
+                mock.patch.object(server.Handler, "secret", b""):
+            with self.assertRaises(SystemExit):
+                server.main()
+        self.assertEqual(order, ["dumps", "load", "drop", "dumps"])
+
+
+class ContainerfileTests(unittest.TestCase):
+    def test_apt_comes_from_a_snapshot_and_pip_is_hashed(self):
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Containerfile")
+        with open(path, encoding="utf-8") as source:
+            text = source.read()
+        self.assertRegex(text, r"ARG DEBIAN_SNAPSHOT=\d{8}T\d{6}Z")
+        self.assertIn("snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}", text)
+        self.assertIn("snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}", text)
+        self.assertIn("still names the live Debian archive", text)
+        self.assertIn("pip install --require-hashes", text)
 
 
 def _load_address_check():

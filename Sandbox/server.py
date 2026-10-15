@@ -63,6 +63,7 @@ import re
 import resource
 import signal
 import socket
+import socketserver
 import ssl
 import stat
 import sys
@@ -141,6 +142,18 @@ MAX_REDIRECTS = 5
 MAX_REQUEST_BYTES = 64 * 1024
 # Seconds a client may stay silent on an open connection (see Handler.timeout).
 REQUEST_TIMEOUT = 30
+# The whole request (line, headers and body) must arrive within this many
+# seconds; the processing of an authenticated request is not limited by it.
+READ_DEADLINE = 10.0
+# Connections served at the same time. One more is closed without an answer, so
+# idle or slow connections cannot use up the VM's process limit.
+MAX_CONNECTIONS = 32
+# The request line and all headers together, the number of headers, and the
+# length of the request target. A caller of this API sends a handful of short
+# headers; anything bigger is refused.
+MAX_HEAD_BYTES = 16 * 1024
+MAX_HEADERS = 50
+MAX_TARGET_CHARS = 2048
 DEFAULT_SLICE_CHARS = 6000
 MAX_SLICE_CHARS = 20000
 MAX_SEARCH_RESULTS = 10
@@ -460,7 +473,11 @@ def pinned_transport(method: str, target: Target, headers: dict[str, str],
         connection.close()
 
 
-def decode_body(response: Response) -> bytes:
+def decode_body(response: Response, limit: int | None = None) -> bytes:
+    """The body, unpacked when the site sent it gzip or deflate anyway (the
+    sandbox never asks for compression). A body that unpacks to more than
+    `limit` bytes is refused (`oversized`), never cut."""
+    limit = MAX_DOWNLOAD_BYTES if limit is None else limit
     encoding = response.headers.get("content-encoding", "identity").lower()
     if encoding in ("", "identity"):
         return response.body
@@ -469,10 +486,14 @@ def decode_body(response: Response) -> bytes:
     wbits = 16 + zlib.MAX_WBITS if encoding == "gzip" else zlib.MAX_WBITS
     try:
         inflater = zlib.decompressobj(wbits)
-        # Bounded so a small compressed bomb cannot fill the VM's memory.
-        return inflater.decompress(response.body, MAX_DOWNLOAD_BYTES)
+        # Bounded so a small compressed bomb cannot fill the VM's memory: one
+        # byte past the limit is enough to know the body is too long.
+        data = inflater.decompress(response.body, limit + 1)
     except (zlib.error, gzip.BadGzipFile):
         raise ToolError("response body could not be decompressed", "unsupported_content", 502)
+    if len(data) > limit:
+        raise ToolError(f"the body is larger than {limit} bytes", "oversized", 502)
+    return data
 
 
 def charset_of(content_type: str) -> str:
@@ -685,10 +706,10 @@ def extract_text_bounded(markup: str, url: str, timeout: float | None = None,
     text = _run_in_child(extractor, markup, url, EXTRACT_TIMEOUT if timeout is None else timeout)
     if text is not None:
         return text
-    sys.stderr.write(f"extraction of {url} timed out or failed; used the fallback parser\n")
+    sys.stderr.write("extraction timed out or failed; used the fallback parser\n")
     text = _run_in_child(_fallback_in_child, markup[:MAX_FALLBACK_CHARS], url, FALLBACK_TIMEOUT)
     if text is None:
-        sys.stderr.write(f"the fallback parser could not read {url} either; no text\n")
+        sys.stderr.write("the fallback parser could not read the page either; no text\n")
         return ""
     return text
 
@@ -1420,10 +1441,86 @@ class Handler(BaseHTTPRequestHandler):
     # connection is closed. It limits waits on the client's socket only, not
     # the fetch a request runs.
     timeout = REQUEST_TIMEOUT
+    # Seconds allowed for the whole request to arrive (see setup()).
+    read_deadline = READ_DEADLINE
     tools: WebTools = WebTools()
 
+    # Paths that may appear in the log; any other path is logged as "-", since
+    # a caller chooses it.
+    _LOGGED_PATHS = ("/health", "/v1/search", "/v1/fetch")
+
+    def setup(self):
+        super().setup()
+        # One deadline for the whole request line, headers and body together:
+        # Handler.timeout limits each wait, so a client sending a byte every
+        # few seconds would hold its thread (and a slot) for ever.
+        self.rfile = _HeadReader(self.rfile, MAX_HEAD_BYTES)
+        self._read_timer = threading.Timer(self.read_deadline, self._read_expired)
+        self._read_timer.daemon = True
+        self._read_timer.start()
+
+    def _read_expired(self):
+        try:
+            self.connection.shutdown(socket.SHUT_RD)
+        except OSError:
+            pass
+
+    def _request_read(self):
+        timer = getattr(self, "_read_timer", None)
+        if timer is not None:
+            timer.cancel()
+
+    def finish(self):
+        self._request_read()
+        super().finish()
+
+    def handle_one_request(self):
+        self._started = time.monotonic()
+        self._size = None
+        self.rfile.start_head()
+        super().handle_one_request()
+
+    def parse_request(self):
+        """The standard parsing, then stricter checks: the request line and
+        headers must fit MAX_HEAD_BYTES and MAX_HEADERS, and the target must
+        be a short, plain ASCII path (not a full URL)."""
+        too_big = self.rfile.over
+        if not too_big and not super().parse_request():
+            return False
+        keep_open = self.close_connection
+        self.close_connection = True  # Any refusal below closes the connection.
+        if too_big or self.rfile.over:
+            self.send_error(431, "request head too large")
+            return False
+        if len(self.headers) > MAX_HEADERS:
+            self.send_error(431, "too many headers")
+            return False
+        target = self.path
+        if (not target.startswith("/") or len(target) > MAX_TARGET_CHARS
+                or any(not "!" <= char <= "~" for char in target)):
+            self.send_error(400, "bad request target")
+            return False
+        self.close_connection = keep_open
+        return True
+
+    def log_request(self, code="-", size="-"):
+        # Method, path (no query), status, size and duration: never headers,
+        # bodies, URLs or queries.
+        path = self.path.split("?", 1)[0] if hasattr(self, "path") else ""
+        if path not in self._LOGGED_PATHS:
+            path = "-"
+        started = getattr(self, "_started", None)
+        took = "-" if started is None else f"{time.monotonic() - started:.2f}s"
+        size = self._size if getattr(self, "_size", None) is not None else size
+        method = (getattr(self, "command", None) or "-")[:8]
+        self.log_message("%s %s %s %s %s", method, path, code, size, took)
+
+    def log_error(self, fmt, *args):
+        # The standard text repeats the request line, which holds the query.
+        self.log_message("request refused")
+
     def log_message(self, fmt, *args):
-        sys.stderr.write("%s %s\n" % (self.command, fmt % args))
+        sys.stderr.write(("%s\n" % (fmt % args))[:200])
 
     # Set by main(); tests set their own. Without a secret nothing is served.
     secret: bytes = b""
@@ -1438,6 +1535,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send(self, status: int, payload: dict):
         data = json.dumps(payload).encode()
+        self._size = len(data)
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
@@ -1462,6 +1560,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get("Transfer-Encoding") is not None:
             self.close_connection = True
             raise ToolError("chunked requests are not accepted", "invalid_request", 400)
+        if len(self.headers.get_all("Content-Length") or []) > 1:
+            self.close_connection = True
+            raise ToolError("more than one Content-Length", "invalid_request", 400)
         raw = self.headers.get("Content-Length")
         if raw is None:
             if method == "POST":
@@ -1528,7 +1629,10 @@ class Handler(BaseHTTPRequestHandler):
                 # The body is not read, so it must not be taken for a request.
                 self.close_connection = True
                 raise ToolError("forbidden host", "forbidden_host", 403)
-            body = self._read_request_body(method)
+            try:
+                body = self._read_request_body(method)
+            finally:
+                self._request_read()
             self._authenticate(method, body)
             if method == "GET":
                 if self.path != "/health":
@@ -1591,6 +1695,92 @@ class Handler(BaseHTTPRequestHandler):
         self._handle("OPTIONS")
 
 
+class _HeadReader:
+    """Wraps the request's input stream. While the request line and headers
+    are read it counts the bytes, and past `budget` it reports the end of the
+    headers and sets `over`, so a flood of headers never fills memory. The
+    body is read without the count."""
+
+    def __init__(self, raw, budget: int):
+        self._raw = raw
+        self._limit = budget
+        self._left: int | None = budget
+        self.over = False
+
+    def start_head(self) -> None:
+        self._left = self._limit
+        self.over = False
+
+    def readline(self, size: int = -1) -> bytes:
+        if self._left is None:
+            return self._raw.readline(size)
+        room = self._left + 1
+        line = self._raw.readline(room if size is None or size < 0 else min(size, room))
+        self._left -= len(line)
+        if self._left < 0:
+            self.over = True
+            return b""
+        return line
+
+    def read(self, size: int = -1) -> bytes:
+        self._left = None  # The head is complete; the body is bounded elsewhere.
+        return self._raw.read(size)
+
+    def __getattr__(self, name):
+        return getattr(self._raw, name)
+
+
+class BoundedServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer that serves at most `max_connections` connections at
+    once. Past that, a new connection is closed without an answer."""
+    daemon_threads = True
+
+    def __init__(self, address, handler, max_connections: int = MAX_CONNECTIONS):
+        super().__init__(address, handler)
+        self._slots = threading.BoundedSemaphore(max_connections)
+
+    def server_bind(self):
+        # HTTPServer.server_bind also asks for the host's fully qualified name
+        # (socket.getfqdn), a reverse DNS lookup that can stall for a minute on
+        # a machine whose resolver is slow, and nothing here uses the name.
+        # Bind as TCPServer does and record the address as it is.
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host
+        self.server_port = port
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+
+def no_memory_dumps() -> None:
+    """No core file and no ptrace or /proc/<pid>/mem read of this process by
+    the same user, since its memory holds the secret and the pages it read.
+    Linux only; where it is not available this does nothing."""
+    try:
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    except (OSError, ValueError):
+        pass
+    try:
+        pr_set_dumpable = 4
+        ctypes.CDLL(None, use_errno=True).prctl(pr_set_dumpable, 0, 0, 0, 0)
+    except (OSError, AttributeError):
+        pass
+
+
 def drop_privileges(uid: int = SANDBOX_UID) -> None:
     """Started as root so entrypoint.sh can load the firewall; from here on
     the server runs as an unprivileged user with no capabilities and cannot
@@ -1630,8 +1820,10 @@ def stop_on_sigterm(server) -> None:
 def main(secret_file: str = DEFAULT_SECRET_FILE):
     # Read as root, before privileges are dropped. No secret, no server. Only
     # tests pass another file; nothing in the environment can move it.
+    no_memory_dumps()
     Handler.secret = load_secret(secret_file)
     drop_privileges()
+    no_memory_dumps()  # Again: changing user can make the process dumpable.
     # 0.0.0.0, not 127.0.0.1: `container run --publish` forwards the Mac's
     # 127.0.0.1:9100 to this VM's network address, not to its loopback, so a
     # loopback-only server would never be reached. The VM's input firewall
@@ -1640,8 +1832,7 @@ def main(secret_file: str = DEFAULT_SECRET_FILE):
     # side is published on 127.0.0.1 only. Anything that can send from the
     # gateway address (processes on the Mac) can still connect, so the Host
     # check stays.
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
-    server.daemon_threads = True
+    server = BoundedServer(("0.0.0.0", PORT), Handler)
     stop_on_sigterm(server)
     sys.stderr.write(f"SandSeek sandbox listening on :{PORT}\n")
     try:

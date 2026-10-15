@@ -28,6 +28,22 @@ Only SandSeek may use the sandbox.
   sign their requests; the address check reads the secret file (`--secret-file`
   to name another).
 
+A sturdier sandbox server.
+
+- A whole request must arrive within 10 seconds (a body that stops short gets a
+  signed 408), at most 32 connections are served at a time, and the request
+  line and headers are limited (16 KiB, 50 headers, one `Content-Length`, no
+  `Transfer-Encoding`, a short plain target), so a slow or greedy caller cannot
+  tie the server up.
+- Starting no longer waits for a slow name lookup.
+- Log lines have only the method, path, status, size and time: no addresses,
+  queries, headers or page text.
+- A compressed page that would unpack past the size limit is refused with an
+  `oversized` error instead of being cut.
+- The server process turns off core dumps and memory reads of itself.
+- The image installs `nftables` from a fixed Debian snapshot date, so a rebuild
+  gives the same version. Rebuild the sandbox image after updating.
+
 SandSeek runs only Apple's `container`.
 
 - The app and `Scripts/research_sandbox.sh` run `/usr/local/bin/container`, where
