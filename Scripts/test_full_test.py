@@ -131,6 +131,23 @@ class Fixture:
                 def test_a(self): pass
                 def test_b(self): pass
             """, 0o644)
+        # Stand-ins for the safety scripts (--safety); the real ones are tested in
+        # test_safety_probe.py.
+        write(f"{r}/Scripts/safety_probe.sh", f"""\
+            #!/bin/bash
+            echo "safety_probe args=$* skipscan=$SKIP_PORT_SCAN folder=$SAFETY_SECRET_FOLDER" >> "$FAKE_LOG"
+            echo "  PASS  stub check one"
+            echo "  NOTE  stub note secret={SECRET}"
+            [ "$FAKE_FAIL" = probe ] && echo "  FAIL  stub failure"
+            echo "Result: 1 pass, $([ "$FAKE_FAIL" = probe ] && echo 1 || echo 0) fail"
+            [ "$FAKE_FAIL" != probe ]
+            """)
+        write(f"{r}/Scripts/safety_lifecycle.sh", """\
+            #!/bin/bash
+            echo "safety_lifecycle args=$*" >> "$FAKE_LOG"
+            echo "  PASS  stub lifecycle check"
+            echo "Result: 1 pass, 0 fail"
+            """)
         write(f"{r}/Scripts/other.sh", "#!/bin/bash\ntrue\n")
         write(f"{r}/sandseek-stub", f"""\
             #!/bin/bash
@@ -755,6 +772,58 @@ class Cleanup(FullTestCase):
                               "--api-key-file", key_file, FULL_TEST_TIME_LIMIT_SECONDS="12", timeout=90)
         directory = self.fx.report_dir(process)
         self.assertNotIn(KEY, self.everything_text(directory))
+
+
+class Safety(FullTestCase):
+    def test_off_by_default(self):
+        process = self.fx.run()
+        self.assertEqual(process.returncode, 0, process.stdout)
+        self.assertNotIn("safety_", self.fx.calls())
+        _, steps, _ = self.fx.results(process)
+        self.assertNotIn("7.1", steps)
+
+    def test_safety_runs_probe_then_lifecycle_before_the_final_stop(self):
+        process = self.fx.run("--safety", SKIP_PORT_SCAN="1")
+        self.assertEqual(process.returncode, 0, process.stdout)
+        data, steps, directory = self.fx.results(process)
+        self.assertEqual(steps["7.1"]["result"], "PASS")
+        self.assertEqual(steps["7.2"]["result"], "PASS")
+        self.assertIn("Result: 1 pass, 0 fail", steps["7.1"]["note"])
+        calls = self.fx.calls()
+        self.assertIn("skipscan=1", calls)
+        self.assertIn("safety_lifecycle args=--running", calls)
+        self.assertLess(calls.index("safety_probe"), calls.index("safety_lifecycle"))
+        self.assertLess(calls.index("safety_lifecycle"), calls.rindex("sandbox stop"))
+        report = open(os.path.join(directory, "report.md")).read()
+        self.assertIn("## Safety test", report)
+        self.assertIn("PASS  stub check one", report)
+        self.assertIn("NOTE  stub note", report)
+        self.assertTrue(any("stub check one" in line for line in data["safety"]))
+
+    def test_the_secret_is_masked_in_the_safety_output(self):
+        process = self.fx.run("--safety")
+        directory = self.fx.report_dir(process)
+        everything = self.everything_text(directory) + process.stdout + process.stderr
+        self.assertNotIn(SECRET, everything)
+
+    def test_a_probe_failure_fails_the_run_and_still_cleans_up(self):
+        process = self.fx.run("--safety", FAKE_FAIL="probe")
+        self.assertEqual(process.returncode, 1)
+        _, steps, directory = self.fx.results(process)
+        self.assertEqual(steps["7.1"]["result"], "FAIL")
+        self.assertIn("FAIL  stub failure", open(os.path.join(directory, "report.md")).read())
+        self.assertIn("sandbox stop", self.fx.calls())
+
+    def test_safety_is_skipped_without_a_running_sandbox(self):
+        process = self.fx.run("--safety", FAKE_FAIL="start")
+        _, steps, _ = self.fx.results(process)
+        self.assertEqual(steps["7.1"]["result"], "SKIP")
+        self.assertEqual(steps["7.2"]["result"], "SKIP")
+        self.assertNotIn("safety_probe", self.fx.calls())
+
+    def test_no_sandbox_flag_does_not_run_it(self):
+        process = self.fx.run("--safety", "--no-sandbox")
+        self.assertNotIn("safety_", self.fx.calls())
 
 
 class Usage(FullTestCase):

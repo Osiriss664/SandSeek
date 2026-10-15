@@ -243,6 +243,22 @@ def read_results(run_dir):
     return rows
 
 
+def safety_lines(run_dir):
+    """The PASS, FAIL, NOTE and SKIP lines and the Result lines of the safety
+    test (--safety), from the files its steps wrote."""
+    found = []
+    for name in ("safety-probe.txt", "safety-lifecycle.txt"):
+        try:
+            with open(os.path.join(run_dir, name), encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    text = line.rstrip("\n")
+                    if text.lstrip().startswith(("PASS", "FAIL", "NOTE", "SKIP")) or text.startswith("Result:"):
+                        found.append(mask(text.strip()))
+        except OSError:
+            continue
+    return found
+
+
 def report(run_dir, overall, reason):
     rows = read_results(run_dir)
     try:
@@ -263,6 +279,9 @@ def report(run_dir, overall, reason):
     for row in rows:
         note = row["note"].replace("|", "/")
         lines.append(f"| {row['id']} {row['name']} | {row['result']} | {row['seconds']} s | {note} |")
+    safety = safety_lines(run_dir)
+    if safety:
+        lines += ["", "## Safety test", ""] + [f"    {line}" for line in safety]
     failed = [row for row in rows if row["result"] == "FAIL"]
     if failed:
         lines += ["", "## Failures"]
@@ -274,7 +293,7 @@ def report(run_dir, overall, reason):
     with open(os.path.join(run_dir, "report.md"), "w", encoding="utf-8") as handle:
         handle.write(text)
     data = {"overall": overall, "reason": reason, "run_folder": run_dir, "model": model,
-            "counts": counts, "seconds": total,
+            "counts": counts, "safety": safety, "seconds": total,
             "steps": [{"id": row["id"], "name": row["name"], "result": row["result"],
                        "seconds": row["seconds"], "note": row["note"],
                        "log": row["log"], "log_tail": row["log_tail"]} for row in rows],

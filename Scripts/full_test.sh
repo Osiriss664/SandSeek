@@ -5,7 +5,7 @@
 #                        [--server URL] [--api-key-file FILE]
 #                        [--start-server TUFFSERVER [--models FOLDER]]
 #                        [--model NAME] [--injection-base-url URL] [--time-limit MINUTES]
-#                        [--take-over-sandbox]
+#                        [--take-over-sandbox] [--safety]
 #
 # Run it in the background (nohup or a background job) when a caller cuts
 # commands after a few minutes; poll for the last line FULL_TEST_REPORT=<path>.
@@ -58,6 +58,13 @@
 #                    (`research_sandbox.sh stop`) before the start and again at
 #                    the end. Without the flag the run never stops a sandbox it
 #                    did not start itself
+#   --safety         (off by default) also runs the unattended safety test on the
+#                    sandbox this run started: Scripts/safety_probe.sh as step 7.1
+#                    and, after it, Scripts/safety_lifecycle.sh as step 7.2 (a fake
+#                    sandbox, a second starter, a crash and a stop; it leaves the
+#                    sandbox stopped). The report lists the PASS, FAIL and NOTE
+#                    lines. SKIP_PORT_SCAN=1 skips the probe's port scan. See
+#                    docs/SAFETY_TEST.md
 #   --injection-base-url URL
 #                    public URL of Sandbox/fixtures/injection for step 7
 #   --time-limit M   limit of the whole run in minutes (default 60); when it is
@@ -91,6 +98,7 @@ api_key_file="${SANDSEEK_API_KEY_FILE:-}"
 model_name="${SANDSEEK_FULL_TEST_MODEL:-}"
 take_over=0 start_server="" models_folder="" injection_base="${FT_INJECTION_BASE_URL:-}"
 time_limit_minutes=60
+safety=0
 
 usage() { sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//' | head -n 80; }
 while [[ $# -gt 0 ]]; do
@@ -99,6 +107,7 @@ while [[ $# -gt 0 ]]; do
     --no-sandbox) no_sandbox=1 ;;
     --thorough) thorough=1 ;;
     --take-over-sandbox) take_over=1 ;;
+    --safety) safety=1 ;;
     --server) model_server="${2:?--server needs a URL}"; shift ;;
     --api-key-file) api_key_file="${2:?--api-key-file needs a path}"; shift ;;
     --model) model_name="${2:?--model needs a name}"; shift ;;
@@ -594,6 +603,26 @@ else
   export FT_INJ_BASE="$injection_base" FT_SERVER_URL="$SERVER_URL" FT_KEY="$api_key_file" FT_MODEL="$model_name"
   step 7 "injection check" 2400 \
     '"$PY" "$ROOT/Scripts/research_injection_check.py" --base-url "$FT_INJ_BASE" --research-bin "$sandseek_bin" --server "$FT_SERVER_URL" --sandbox "http://127.0.0.1:$PORT" ${FT_KEY:+--api-key-file "$FT_KEY"} ${FT_MODEL:+--model "$FT_MODEL"}' || true
+fi
+
+# ---- 7.1 and 7.2 safety test (--safety) -------------------------------------------------------
+if [[ $safety -eq 1 ]]; then
+  if [[ $sandbox_ready -ne 1 ]]; then
+    skip 7.1 "safety probe" "the sandbox is not running"
+    skip 7.2 "fake sandbox and lifecycle" "the sandbox is not running"
+  else
+    export SAFETY_SECRET_FOLDER="$secret_folder" SAFETY_CONTAINER="$CONTAINER" SAFETY_PYTHON="$PY" \
+           SAFETY_SANDSEEK_BIN="$sandseek_bin" SAFETY_SANDBOX_SCRIPT="$SANDBOX_SH"
+    step 7.1 "safety probe" 1800 \
+      '/bin/bash "$ROOT/Scripts/safety_probe.sh" 2>&1 | "$PY" "$ROOT/Scripts/full_test_helpers.py" mask | tee "$RUN/safety-probe.txt"' \
+      'grep "^Result:" "$LOG"' || true
+    step 7.2 "fake sandbox and lifecycle" 1800 \
+      '/bin/bash "$ROOT/Scripts/safety_lifecycle.sh" --running 2>&1 | "$PY" "$ROOT/Scripts/full_test_helpers.py" mask | tee "$RUN/safety-lifecycle.txt"' \
+      'grep "^Result:" "$LOG"' || true
+    # The test restarted the sandbox (new port) and ended with it stopped.
+    new_port="$(head -c 16 "$secret_folder/port" 2>/dev/null | tr -d '\n')"
+    if [[ "$new_port" =~ ^[0-9]{4,5}$ ]]; then PORT="$new_port"; fi
+  fi
 fi
 
 # ---- 8. stop and leftovers (9 is the same code in the trap) ---------------------------------------
