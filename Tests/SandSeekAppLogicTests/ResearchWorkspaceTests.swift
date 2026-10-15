@@ -136,13 +136,15 @@ private final class BusyRunServices: ResearchHTTPTransport, @unchecked Sendable 
         let reports = ResearchReportStore(directory: temporaryDirectory())
         // The quit path runs the tool itself, not through the fake runner. A
         // path with no tool keeps this test away from a real `container` on
-        // the Mac, whose empty list would end the first quit's ownership.
-        let noTool = marks.appendingPathComponent("no-container").path
+        // the Mac, whose empty list would end the first quit's ownership. The
+        // file is still called `container`: the fake runner answers by name.
+        let noTool = marks.appendingPathComponent("missing/container").path
         let sandbox = ResearchSandboxController(
             runner: FakeProcessRunner(), containerTool: .trustedForTests(path: noTool),
             transport: FakeResearchServices(), defaults: MemorySettings(), environment: [:],
             resources: try testResources(bundle: bundle), stateDirectory: temporaryDirectory(), secretFile: TestSandboxSecret.file)
         await sandbox.start()
+        #expect(sandbox.startedByApp)
         let workspace = ResearchWorkspace(
             sandbox: sandbox, server: server, reports: reports,
             run: ResearchRunController(store: reports, transport: FakeResearchServices(), sandboxSecretFile: TestSandboxSecret.file),
@@ -153,6 +155,11 @@ private final class BusyRunServices: ResearchHTTPTransport, @unchecked Sendable 
         #expect(launcher.servers.isEmpty)
         #expect(!FileManager.default.fileExists(
             atPath: marks.appendingPathComponent("server-term").path))
+        // The sandbox is still the app's: its stop ran, before any TERM.
+        let first = try? String(
+            contentsOf: marks.appendingPathComponent("result"), encoding: .utf8)
+        #expect(first?.trimmingCharacters(in: .whitespacesAndNewlines) == "wrong")
+        #expect(sandbox.startedByApp)
         try? FileManager.default.removeItem(at: marks.appendingPathComponent("result"))
 
         await launch.start(using: server)
