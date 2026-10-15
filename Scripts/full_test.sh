@@ -2,7 +2,8 @@
 # One command for every SandSeek check that needs no clicking.
 #
 #   Scripts/full_test.sh [--quick] [--no-sandbox] [--thorough]
-#                        [--server URL] [--api-key-file FILE]
+#                        [--server URL] [--server-type tuff|llamacpp|ollama|auto]
+#                        [--api-key-file FILE]
 #                        [--start-server TUFFSERVER [--models FOLDER]]
 #                        [--model NAME] [--injection-base-url URL] [--time-limit MINUTES]
 #                        [--take-over-sandbox] [--safety]
@@ -32,6 +33,14 @@
 #                    http://127.0.0.1:8080). Without an answering server, step 6
 #                    and 7 are SKIP; this script never starts a model server on
 #                    its own unless --start-server is given.
+#   --server-type T  tuff, llamacpp, ollama or auto: the kind of model server,
+#                    passed to sandseek as --server-type T. Without it
+#                    sandseek decides on its own, as it always did. With
+#                    ollama, --server defaults to http://127.0.0.1:11434 and
+#                    --model is needed (Ollama has no default model).
+#                    Ollama support is experimental. --start-server starts
+#                    TUFFServer only and is a usage error with ollama; start
+#                    Ollama yourself (`ollama serve`).
 #   --model NAME     model for the questions of step 6 and the injection check,
 #                    passed to sandseek as --model NAME (default
 #                    $SANDSEEK_FULL_TEST_MODEL, else the server's own default).
@@ -94,6 +103,9 @@ PY="${FT_PYTHON:-python3}"
 
 quick=0 no_sandbox=0 thorough=0
 model_server="${SANDSEEK_MODEL_SERVER:-http://127.0.0.1:8080}"
+server_given=0
+[[ -z "${SANDSEEK_MODEL_SERVER:-}" ]] || server_given=1
+server_type=""
 api_key_file="${SANDSEEK_API_KEY_FILE:-}"
 model_name="${SANDSEEK_FULL_TEST_MODEL:-}"
 take_over=0 start_server="" models_folder="" injection_base="${FT_INJECTION_BASE_URL:-}"
@@ -109,7 +121,8 @@ while [[ $# -gt 0 ]]; do
     --thorough) thorough=1 ;;
     --take-over-sandbox) take_over=1 ;;
     --safety) safety=1 ;;
-    --server) model_server="${2:?--server needs a URL}"; shift ;;
+    --server) model_server="${2:?--server needs a URL}"; server_given=1; shift ;;
+    --server-type) server_type="${2:?--server-type needs tuff, llamacpp, ollama or auto}"; shift ;;
     --api-key-file) api_key_file="${2:?--api-key-file needs a path}"; shift ;;
     --model) model_name="${2:?--model needs a name}"; shift ;;
     --start-server) start_server="${2:?--start-server needs a path}"; shift ;;
@@ -121,6 +134,15 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+case "$server_type" in
+  ""|tuff|llamacpp|ollama|auto) ;;
+  *) echo "--server-type must be tuff, llamacpp, ollama or auto: $server_type" >&2; exit 2 ;;
+esac
+if [[ "$server_type" == ollama ]]; then
+  [[ -z "$start_server" ]] || { echo "--start-server starts TUFFServer only; start Ollama yourself (ollama serve) and use --server-type ollama" >&2; exit 2; }
+  [[ -n "$model_name" ]] || { echo "--server-type ollama needs --model NAME (Ollama has no default model)" >&2; exit 2; }
+  [[ $server_given -eq 1 ]] || model_server="http://127.0.0.1:11434"
+fi
 if [[ -n "$models_folder" ]]; then
   [[ -n "$start_server" ]] || { echo "--models needs --start-server" >&2; exit 2; }
   [[ "$models_folder" == /* && -d "$models_folder" ]] || { echo "--models must be an absolute, existing folder: $models_folder" >&2; exit 2; }
@@ -163,6 +185,14 @@ export ROOT RUN PORT SWIFT CONTAINER CODESIGN CURL GIT SANDBOX_SH FT_NOTE_FILE F
 CHILD="" ABORT="" ABORT_CODE=0 CUR_ID="" CUR_NAME="" CUR_START=0
 CLEANED=0 SANDBOX_TOUCHED=0 BUILDER_TOUCHED=0 CTL_RC=0 CTL_OUT="" SANDBOX_UP=0 SERVER_PID="" SERVER_PATH="" WATCHDOG=""
 SERVER_URL="$model_server"
+
+# True when something that looks like a model server answers at $1: TUFF or
+# llama.cpp (any HTTP answer at /tuff/v1/status) or Ollama (/api/version).
+server_answers() {
+  local url="${1%/}"
+  [[ "$("$PY" "$helpers" http-code "$url/tuff/v1/status")" != 000 ]] && return 0
+  [[ "$("$PY" "$helpers" http-code "$url/api/version")" == 200 ]]
+}
 
 clean_field() { printf '%s' "$1" | tr '\t\n\r' '   ' | cut -c1-300; }
 
@@ -246,13 +276,12 @@ start_model_server() { # records step 6.0
   local begin=$SECONDS port home tmp args wait_limit="${FT_SERVER_WAIT:-180}" code
   # One model at a time on a 16 GB Mac: never start a second server.
   local busy="" url
-  for url in "$model_server" "http://127.0.0.1:8080"; do
-    code="$("$PY" "$helpers" http-code "${url%/}/tuff/v1/status")"
-    if [[ "$code" != 000 ]]; then busy="a model server already answers at $url"; break; fi
+  for url in "$model_server" "http://127.0.0.1:8080" "http://127.0.0.1:11434"; do
+    if server_answers "$url"; then busy="a model server already answers at $url"; break; fi
   done
   if [[ -z "$busy" ]]; then
     local program
-    for program in TUFFServer llama-server; do
+    for program in TUFFServer llama-server ollama; do
       if "$PGREP" -x "$program" >/dev/null 2>&1 </dev/null; then busy="a $program process is already running"; break; fi
     done
   fi
@@ -537,12 +566,13 @@ model_up=0
 if [[ -n "$start_server" ]]; then
   if [[ $sandbox_ready -eq 1 ]] && start_model_server; then model_up=1; fi
   [[ $sandbox_ready -eq 1 ]] || skip 6.0 "start model server" "the sandbox is not running"
-elif [[ "$("$PY" "$helpers" http-code "$SERVER_URL/tuff/v1/status")" != 000 ]]; then
+elif server_answers "$SERVER_URL"; then
   model_up=1
 fi
 
 research_args() { # mode
   local args=(--server "$SERVER_URL" --sandbox "http://127.0.0.1:$PORT")
+  if [[ -n "$server_type" ]]; then args+=(--server-type "$server_type"); fi
   if [[ -n "$api_key_file" ]]; then args+=(--api-key-file "$api_key_file"); fi
   if [[ -n "$model_name" ]]; then args+=(--model "$model_name"); fi
   # Quick: the CLI defaults, which equal the app's Quick preset (8 steps, 3 pages,
@@ -553,7 +583,7 @@ research_args() { # mode
 
 ask() { # id name limit mode question expected_regex
   local id="$1" name="$2" limit="$3" mode="$4" question="$5" expect="$6" args=() line note
-  if [[ -z "$model_name" ]]; then
+  if [[ -z "$model_name" && "$server_type" != ollama ]]; then
     # Without --model the question goes to the server's default model.
     if ! note="$("$PY" "$helpers" models-check "$SERVER_URL" "$api_key_file")"; then
       record "$id" "$name" FAIL 0 "$note"
@@ -602,9 +632,9 @@ if [[ $sandbox_ready -ne 1 ]]; then skip 7 "injection check" "the sandbox is not
 elif [[ $model_up -ne 1 ]]; then skip 7 "injection check" "it needs a model server, and none answers"
 elif [[ -z "$injection_base" ]]; then skip 7 "injection check" "it needs --injection-base-url, a public URL of the fixtures (the sandbox only fetches public addresses)"
 else
-  export FT_INJ_BASE="$injection_base" FT_SERVER_URL="$SERVER_URL" FT_KEY="$api_key_file" FT_MODEL="$model_name"
+  export FT_INJ_BASE="$injection_base" FT_SERVER_URL="$SERVER_URL" FT_KEY="$api_key_file" FT_MODEL="$model_name" FT_TYPE="$server_type"
   step 7 "injection check" 2400 \
-    '"$PY" "$ROOT/Scripts/research_injection_check.py" --base-url "$FT_INJ_BASE" --research-bin "$sandseek_bin" --server "$FT_SERVER_URL" --sandbox "http://127.0.0.1:$PORT" ${FT_KEY:+--api-key-file "$FT_KEY"} ${FT_MODEL:+--model "$FT_MODEL"}' || true
+    '"$PY" "$ROOT/Scripts/research_injection_check.py" --base-url "$FT_INJ_BASE" --research-bin "$sandseek_bin" --server "$FT_SERVER_URL" --sandbox "http://127.0.0.1:$PORT" ${FT_KEY:+--api-key-file "$FT_KEY"} ${FT_MODEL:+--model "$FT_MODEL"} ${FT_TYPE:+--server-type "$FT_TYPE"}' || true
 fi
 
 # ---- 7.1 and 7.2 safety test (--safety) -------------------------------------------------------

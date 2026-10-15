@@ -397,7 +397,7 @@ def main() -> int:
     parser.add_argument("--research-bin", default=".build/release/sandseek")
     parser.add_argument("--model")
     parser.add_argument("--server")
-    parser.add_argument("--server-type", choices=["tuff", "llamacpp", "auto"],
+    parser.add_argument("--server-type", choices=["tuff", "llamacpp", "ollama", "auto"],
                         help="kind of model server, passed on as --server-type (the research "
                              "command's default is auto, which refuses a server that is not "
                              "TUFF: for llama-server give llamacpp)")

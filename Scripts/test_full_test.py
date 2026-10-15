@@ -250,6 +250,18 @@ class ModelListHandler(BaseHTTPRequestHandler):
         pass
 
 
+class OllamaHandler(BaseHTTPRequestHandler):
+    """A server that answers like Ollama: /api/version only."""
+    def do_GET(self):
+        ok = self.path == "/api/version"
+        self.send_response(200 if ok else 404)
+        self.end_headers()
+        self.wfile.write(b'{"version":"0.0.0"}' if ok else b"{}")
+
+    def log_message(self, *args):
+        pass
+
+
 class FullTestCase(unittest.TestCase):
     def setUp(self):
         self.fx = Fixture()
@@ -635,6 +647,54 @@ class ModelServer(FullTestCase):
         self.assertIn("no answer", steps["6.0"]["note"])
 
 
+class OllamaServer(FullTestCase):
+    def serve_ollama(self):
+        server = HTTPServer(("127.0.0.1", 0), OllamaHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_port}"
+
+    def test_server_type_and_model_are_passed_to_the_cli(self):
+        process = self.fx.run("--server", self.serve_ollama(), "--server-type", "ollama",
+                              "--model", "qwen3:8b")
+        _, steps, _ = self.fx.results(process)
+        self.assertEqual(steps["6.1"]["result"], "PASS", process.stdout)
+        calls = self.fx.calls().replace("\n", " ")
+        self.assertIn("--server-type ollama", calls)
+        self.assertIn("--model qwen3:8b", calls)
+
+    def test_no_server_type_means_none_is_passed(self):
+        self.fx.run("--server", self.serve_ollama())
+        self.assertNotIn("--server-type", self.fx.calls())
+
+    def test_other_server_types_are_passed(self):
+        for kind in ("tuff", "llamacpp", "auto"):
+            with self.subTest(kind=kind):
+                self.fx.run("--server", self.serve_ollama(), "--server-type", kind)
+                self.assertIn(f"--server-type {kind}", self.fx.calls().replace("\n", " "))
+
+    def test_ollama_default_address_is_port_11434(self):
+        process = self.fx.run("--server-type", "ollama", "--model", "qwen3:8b",
+                              SANDSEEK_MODEL_SERVER="")
+        _, steps, _ = self.fx.results(process)
+        self.assertEqual(steps["6.1"]["result"], "SKIP")
+        self.assertIn("http://127.0.0.1:11434", steps["6.1"]["note"])
+
+    def test_an_explicit_server_wins_over_the_ollama_default(self):
+        process = self.fx.run("--server-type", "ollama", "--model", "qwen3:8b",
+                              "--server", "http://127.0.0.1:9")
+        _, steps, _ = self.fx.results(process)
+        self.assertIn("http://127.0.0.1:9", steps["6.1"]["note"])
+
+    def test_an_ollama_server_is_not_started_over(self):
+        process = self.fx.run("--start-server", f"{self.fx.repo}/server/TUFFServer",
+                              "--server", self.serve_ollama())
+        _, steps, _ = self.fx.results(process)
+        self.assertEqual(steps["6.0"]["result"], "FAIL")
+        self.assertIn("already answers", steps["6.0"]["note"])
+
+
 class Takeover(FullTestCase):
     def secret_exists(self):
         os.makedirs(self.fx.secret_folder, exist_ok=True)
@@ -836,6 +896,27 @@ class Usage(FullTestCase):
         process = self.fx.run("--start-server", f"{self.fx.repo}/server/TUFFServer",
                               "--models", "relative/folder")
         self.assertEqual(process.returncode, 2)
+
+    def test_start_server_with_ollama_is_a_usage_error(self):
+        process = self.fx.run("--server-type", "ollama", "--model", "qwen3:8b",
+                              "--start-server", f"{self.fx.repo}/server/TUFFServer")
+        self.assertEqual(process.returncode, 2)
+        self.assertIn("TUFFServer only", process.stderr)
+        self.assertNotIn("FULL_TEST_REPORT", process.stdout)
+
+    def test_ollama_needs_a_model(self):
+        process = self.fx.run("--server-type", "ollama")
+        self.assertEqual(process.returncode, 2)
+        self.assertIn("--model", process.stderr)
+
+    def test_unknown_server_type_is_a_usage_error(self):
+        process = self.fx.run("--server-type", "lmstudio")
+        self.assertEqual(process.returncode, 2)
+
+    def test_help_mentions_server_type(self):
+        process = self.fx.run("--help")
+        self.assertIn("--server-type", process.stdout)
+        self.assertIn("ollama", process.stdout)
 
     def test_help_mentions_background_run(self):
         process = self.fx.run("--help")
