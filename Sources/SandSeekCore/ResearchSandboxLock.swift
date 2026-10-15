@@ -38,7 +38,7 @@ public final class ResearchSandboxLock: @unchecked Sendable {
     }
 
     /// What a start says when the lock is held.
-    public static let busyMessage = "Another SandSeek is using the web sandbox. Close it first."
+    public static let busyMessage = "Another SandSeek is using the web sandbox. Close it first, or press Stop in it."
 
     private let guardLock = NSLock()
     private var descriptor: Int32
@@ -71,13 +71,15 @@ public final class ResearchSandboxLock: @unchecked Sendable {
 
     /// Whether the lock in `file` is free, held by a live process, or stale.
     /// A missing file is free. It takes the lock for an instant to find out
-    /// and lets go again; a start in that very instant can be told "busy"
-    /// and has to be tried again.
+    /// and lets go again. The probe is a shared lock (`LOCK_SH`), so several
+    /// probes never refuse each other; the holder's exclusive lock
+    /// (`LOCK_EX`) still excludes it, and a start in that very instant can
+    /// find the file busy for a moment (the script tries again).
     public static func status(of file: URL) -> Status {
         let descriptor = open(file.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK)
         guard descriptor >= 0 else { return .free }
         defer { close(descriptor) }
-        if flock(descriptor, LOCK_EX | LOCK_NB) == 0 {
+        if flock(descriptor, LOCK_SH | LOCK_NB) == 0 {
             let owner = parseOwner(ownerText(descriptor))
             flock(descriptor, LOCK_UN)
             if let pid = owner.pid { return .stale(pid: pid) }

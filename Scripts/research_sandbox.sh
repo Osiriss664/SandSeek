@@ -35,7 +35,11 @@
 # instead of stopping the first one's VM. The lock is an operating system
 # lock (flock) held by a small perl process that `start` leaves running; it
 # writes its pid and start time into the file. The system drops the lock when
-# that process ends, however it ends, so a crash never leaves a stale one.
+# that process ends, however it ends. That process does not end when the app
+# or the shell that ran `start` crashes: it and the VM keep running until a
+# `stop`, or until the next `start` of the same app, which is told the
+# holder's pid in SANDSEEK_SANDBOX_REPLACE and takes over from exactly that
+# one. Any other holder is left alone and `start` fails with a plain message.
 # `start` also records the port it picked (file `port`) and the VM's name
 # (file `vm-name`), both mode 0600, for the app, the command line and the
 # other commands to read. Under the lock, `start` removes the VMs and files a
@@ -132,8 +136,8 @@ old_secret_file="$HOME/Library/Application Support/TUFF/web-sandbox.secret"
 # Nothing to check when the port is not fixed.
 check_port() {
   [[ -n "$port_override" ]] || return 0
-  if ! [[ "$port" =~ ^[1-9][0-9]{1,4}$ ]] || (( 10#$port < 1 || 10#$port > 65535 )); then
-    echo "SANDSEEK_SANDBOX_PORT must be a port number from 10 to 65535, not: $port" >&2
+  if ! [[ "$port" =~ ^[1-9][0-9]{3,4}$ ]] || (( 10#$port < 1024 || 10#$port > 65535 )); then
+    echo "SANDSEEK_SANDBOX_PORT must be a port number from 1024 to 65535, not: $port" >&2
     exit 2
   fi
   port=$((10#$port))
@@ -455,12 +459,28 @@ private_file_ok() {
   [[ "$facts" == "$(/usr/bin/id -u) 600" ]]
 }
 
+# Sets $private_value to the first 64 bytes of the private file $1 without one
+# final line break (and no more: a second line break stays, so the checks
+# below refuse it, as the app and verify_sandbox_signature.py do). Fails when
+# the file is not private (see private_file_ok). The "x" keeps $(...) from
+# eating line breaks; call this directly, not inside $(...), for the same
+# reason.
+private_value=""
+private_text() {
+  local text
+  private_value=""
+  private_file_ok "$1" || return 1
+  text="$(head -c 64 "$1"; printf x)" || return 1
+  text="${text%x}"
+  private_value="${text%"$nl"}"
+}
+
 # Prints the port `start` recorded: digits only, 1024 to 65535, in a private
 # file. Fails when there is none or it is not like that.
 recorded_port() {
   local text
-  private_file_ok "$port_file" || return 1
-  text="$(head -c 16 "$port_file")" || return 1
+  private_text "$port_file" || return 1
+  text="$private_value"
   [[ "$text" =~ ^[0-9]{4,5}$ ]] || return 1
   (( 10#$text >= 1024 && 10#$text <= 65535 )) || return 1
   printf '%s' "$((10#$text))"
@@ -469,8 +489,8 @@ recorded_port() {
 # Prints the VM name `start` recorded (sandseek-sandbox- and 8 hex digits).
 recorded_name() {
   local text
-  private_file_ok "$name_file" || return 1
-  text="$(head -c 64 "$name_file")" || return 1
+  private_text "$name_file" || return 1
+  text="$private_value"
   [[ "$text" =~ ^sandseek-sandbox-[0-9a-f]{8}$ ]] || return 1
   printf '%s' "$text"
 }
@@ -543,8 +563,12 @@ while (1) {
 # A lock holder younger than this many seconds may still be starting its VM.
 lock_grace=300
 lock_pid=""
-# Set to 1 by the app when it starts a fresh VM in place of its own running one.
+# Set by the app to the pid of the lock holder it recorded after its own start,
+# when it starts a fresh VM in place of its own running one. Only a holder with
+# exactly that pid is ended; any other holder is somebody else's and stays.
+# The command line never sets it.
 replace_requested="${SANDSEEK_SANDBOX_REPLACE:-}"
+busy_message="Another SandSeek is using the web sandbox. Close it first, or press Stop in it."
 
 # Succeeds when process $1 exists and is not a zombie.
 process_alive() {
@@ -591,10 +615,12 @@ lock_holder_is_orphan() {
 
 # Takes the lock, for as long as the sandbox runs. Sets $lock_pid. Returns 75
 # with a plain message when another SandSeek holds it. A lock whose process is
-# gone is free (the system dropped it): it is simply taken.
+# gone is free (the system dropped it): it is simply taken. A holder that has
+# not written its pid yet, or a probe of the app that holds the lock for an
+# instant, is given a moment (up to three tries) before the lock counts as busy.
 take_lock() {
-  local attempt reply reply_file waited held_pid held_stamp
-  for attempt in 1 2; do
+  local attempt reply reply_file waited held_pid held_stamp took_over=0
+  for attempt in 1 2 3; do
     reply_file="$(umask 077 && mktemp -- "$secret_folder/.lock-reply.XXXXXX")" || return 1
     "$perl_bin" -e "$lock_helper_code" -- "$lock_marker" "$lock_file" "$(/bin/date +%s)" \
       >"$reply_file" 2>&1 </dev/null &
@@ -617,18 +643,26 @@ take_lock() {
         lock_pid=""
         held_pid="" held_stamp=""
         read -r held_pid held_stamp <<<"${reply#busy }" || true
-        if (( attempt == 1 )) && [[ "$replace_requested" == 1 ]] && lock_holder_is_ours "$held_pid"; then
-          # The caller says the sandbox that holds the lock is its own (the app
-          # makes a fresh VM for the next question): end that one first.
+        if (( ! took_over )) && [[ "$replace_requested" =~ ^[0-9]+$ && "$replace_requested" == "$held_pid" ]] \
+            && lock_holder_is_ours "$held_pid"; then
+          # The caller (the app) says the holder of the lock is the one it
+          # recorded after its own start, and it is: end it first.
+          took_over=1
           end_lock_holder "$held_pid" || true
           continue
         fi
-        if (( attempt == 1 )) && lock_holder_is_orphan "$held_pid" "$held_stamp"; then
+        if (( ! took_over )) && lock_holder_is_orphan "$held_pid" "$held_stamp"; then
           echo "the sandbox of another SandSeek (process $held_pid) is gone; taking over its lock" >&2
+          took_over=1
           end_lock_holder "$held_pid" || true
           continue
         fi
-        echo "Another SandSeek is using the web sandbox. Close it first." >&2
+        if (( attempt < 3 )) && ! { [[ "$held_pid" =~ ^[0-9]+$ ]] && process_alive "$held_pid"; }; then
+          # Nobody alive is named: the lock is held for an instant only.
+          sleep 0.3
+          continue
+        fi
+        echo "$busy_message" >&2
         return 75 ;;
       *)
         kill "$lock_pid" 2>/dev/null || true
@@ -638,6 +672,7 @@ take_lock() {
         return 1 ;;
     esac
   done
+  echo "$busy_message" >&2
   return 75
 }
 
@@ -958,6 +993,20 @@ case "${1:-}" in
     ;;
   stop)
     require_container
+    # `stop` does not take the lock, so it cannot tell a start in progress from
+    # a sandbox that runs. A lock holder under 5 seconds old whose VM is not
+    # recorded yet is a start that has just begun: leave it alone, or its
+    # files would be removed under it. (Anything older is stopped, also a
+    # start that hangs; the app's time limit ends those too.)
+    held_pid="" held_stamp=""
+    if [[ -f "$lock_file" ]]; then
+      read -r held_pid held_stamp <"$lock_file" || true
+    fi
+    if [[ "$held_stamp" =~ ^[0-9]+$ ]] && lock_holder_is_ours "$held_pid" \
+        && (( $(/bin/date +%s) - 10#$held_stamp < 5 )) && ! recorded_name >/dev/null; then
+      echo "A SandSeek is starting the web sandbox just now, so it was not stopped. Try again in a few seconds." >&2
+      exit 75
+    fi
     # Exactly the VM `start` recorded (or the plain name of 0.1.0's VM).
     name="$(recorded_name)" || name="$name_prefix"
     remove_vm "$name"
@@ -969,11 +1018,7 @@ case "${1:-}" in
     # No secret means no sandbox is running.
     remove_secret
     # The VM is gone, so the lock can go: end its holder, if the file names one.
-    if [[ -f "$lock_file" ]]; then
-      held_pid=""
-      read -r held_pid _ <"$lock_file" || true
-      end_lock_holder "$held_pid" || true
-    fi
+    end_lock_holder "$held_pid" || true
     echo "web research sandbox stopped"
     ;;
   status)

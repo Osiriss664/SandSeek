@@ -47,7 +47,10 @@
 #   --take-over-sandbox
 #                    by default the run FAILS step 5 when a sandbox is already
 #                    running (the app's: secret file, listener on the port or a
-#                    sandseek-sandbox container); this flag allows stopping it
+#                    sandseek-sandbox container); this flag stops it
+#                    (`research_sandbox.sh stop`) before the start and again at
+#                    the end. Without the flag the run never stops a sandbox it
+#                    did not start itself
 #   --injection-base-url URL
 #                    public URL of Sandbox/fixtures/injection for step 7
 #   --time-limit M   limit of the whole run in minutes (default 60); when it is
@@ -446,11 +449,30 @@ else
       step 5.1 "sandbox image build" 2700 '/bin/bash "$SANDBOX_SH" build' || true
     fi
     SANDBOX_TOUCHED=1   # the check passed and the start is attempted now
-    if step 5.2 "sandbox start" 300 '/bin/bash "$SANDBOX_SH" start'; then
+    if [[ $take_over -eq 1 ]]; then
+      # The sandbox that is running (the app's, or another run's) holds the
+      # lock, and `start` would stop at once with exit code 75. Stop it first,
+      # as asked. Whatever this says, the start below decides.
+      ctl 5.2-take-over 180 /bin/bash "$SANDBOX_SH" stop
+    fi
+    start_rc=0
+    step 5.2 "sandbox start" 300 '/bin/bash "$SANDBOX_SH" start' || start_rc=$?
+    if [[ $start_rc -ne 0 && $start_rc -ne 124 && $take_over -eq 0 ]]; then
+      # `start` failed on its own (busy, exit code 75, or before it took the
+      # lock) and cleaned up after itself. Whatever runs now is not ours: the
+      # cleanup must not stop it. (A start cut off by its time limit leaves its
+      # lock holder behind, so that case stays ours.)
+      SANDBOX_TOUCHED=0
+    fi
+    if [[ $start_rc -eq 0 ]]; then
       sandbox_ready=1
-      # The port `start` picked (digits only, 1024 to 65535), recorded beside the secret.
+      # The port `start` picked (digits only, 1024 to 65535), recorded beside the
+      # secret: one final line break at most, like the app reads it.
       if [[ -z "$PORT" ]]; then
-        PORT="$(head -c 16 "$secret_folder/port" 2>/dev/null || true)"
+        nl=$'\n'
+        PORT="$(head -c 64 "$secret_folder/port" 2>/dev/null; printf x)"
+        PORT="${PORT%x}"
+        PORT="${PORT%"$nl"}"
         if [[ "$PORT" =~ ^[0-9]{4,5}$ ]] && (( 10#$PORT >= 1024 && 10#$PORT <= 65535 )); then
           PORT=$((10#$PORT))
           export PORT

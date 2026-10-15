@@ -116,7 +116,7 @@ public final class ResearchSandboxController {
     /// `sandseek-sandbox-<8 hex digits>` and records the name (see
     /// `ResearchSandboxFiles`); plain `sandseek-sandbox` is the name SandSeek
     /// 0.1.0 used, which the next start still removes.
-    public static let containerName = ResearchSandboxFiles.namePrefix
+    public nonisolated static let containerName = ResearchSandboxFiles.namePrefix
     /// The nft table `firewall.nft` loads inside the VM.
     public static let firewallTable = "sandseek_sandbox"
     /// The port the server and the firewall use inside the VM. On the Mac the
@@ -154,6 +154,15 @@ public final class ResearchSandboxController {
     public private(set) var startedByApp = false {
         didSet { writeMarker() }
     }
+    /// The process that held the sandbox's lock after this app's own start
+    /// (the perl process `research_sandbox.sh start` leaves running; see
+    /// `ResearchSandboxLock`), kept in the marker file. The app stops, replaces
+    /// or quits a sandbox only while that same process holds the lock: if
+    /// another SandSeek has the lock now, the VM is theirs, not the app's. Nil
+    /// when the app's start left no holder.
+    public private(set) var ownedHolderPid: Int32? = nil {
+        didSet { writeMarker() }
+    }
     /// Fresh VMs this controller has started (`start` and `restart`). The
     /// workspace compares it to know whether a question ran in the current VM.
     public private(set) var freshStarts = 0
@@ -187,6 +196,10 @@ public final class ResearchSandboxController {
     private let secretFile: URL
     /// The clock for `lastSignedCheck`; tests pass a fixed one.
     private let now: @Sendable () -> Date
+    /// Whether process `pid` is the lock holder `research_sandbox.sh` left for
+    /// the lock file at the given URL (its command line says so). Tests pass
+    /// their own.
+    private let lockHolderCheck: @Sendable (Int32, URL) -> Bool
 
     public init(baseURL: URL? = nil,
                 runner: any ResearchProcessRunning = FoundationProcessRunner(),
@@ -197,8 +210,11 @@ public final class ResearchSandboxController {
                 resources: SandboxResources = SandboxResources(),
                 stateDirectory: URL = ResearchSandboxController.defaultStateDirectory(),
                 secretFile: URL = ResearchSandboxSecret.defaultFileURL,
-                now: @escaping @Sendable () -> Date = { Date() }) {
+                now: @escaping @Sendable () -> Date = { Date() },
+                lockHolderCheck: @escaping @Sendable (Int32, URL) -> Bool =
+                    ResearchSandboxController.processIsLockHolder) {
         self.fixedBaseURL = baseURL
+        self.lockHolderCheck = lockHolderCheck
         self.secretFile = secretFile
         self.sandboxFolder = ResearchSandboxFiles.folder(ofSecretFile: secretFile)
         self.now = now
@@ -211,6 +227,7 @@ public final class ResearchSandboxController {
         self.resources = resources
         // Set directly: didSet observers do not run in an initializer.
         startedByApp = FileManager.default.fileExists(atPath: markerURL.path)
+        ownedHolderPid = startedByApp ? Self.markerPid(at: markerURL) : nil
         adoptedFromLastRun = startedByApp
     }
 
@@ -264,13 +281,81 @@ public final class ResearchSandboxController {
 
     private var markerURL: URL { stateDirectory.appendingPathComponent(Self.markerName) }
 
+    /// The marker is empty, or holds the lock holder's pid and a line break.
     private func writeMarker() {
         if startedByApp {
             try? FileManager.default.createDirectory(at: stateDirectory, withIntermediateDirectories: true)
-            FileManager.default.createFile(atPath: markerURL.path, contents: Data())
+            let text = ownedHolderPid.map { "\($0)\n" } ?? ""
+            FileManager.default.createFile(atPath: markerURL.path, contents: Data(text.utf8))
         } else {
             try? FileManager.default.removeItem(at: markerURL)
         }
+    }
+
+    /// The pid a marker file holds: digits only, nil for an empty marker or
+    /// anything else.
+    static func markerPid(at url: URL) -> Int32? {
+        guard let data = try? Data(contentsOf: url), data.count <= 16 else { return nil }
+        let text = String(decoding: data, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, text.allSatisfy({ $0.isASCII && $0.isWholeNumber }),
+              let pid = Int32(text), pid > 0 else { return nil }
+        return pid
+    }
+
+    /// The app no longer owns a sandbox: forgets the marker and the holder.
+    private func dropOwnership() {
+        ownedHolderPid = nil
+        startedByApp = false
+        adoptedFromLastRun = false
+    }
+
+    /// Who holds the sandbox's lock, as far as this app is concerned.
+    enum LockOwner: Equatable {
+        /// Nobody (the lock is free, or its process is gone).
+        case nobody
+        /// The process this app recorded after its own start.
+        case thisApp
+        /// Another process: another SandSeek, or a start still writing its pid.
+        case someoneElse
+    }
+
+    func lockOwner() -> LockOwner {
+        switch ResearchSandboxLock.status(of: lockFile) {
+        case .free, .stale:
+            return .nobody
+        case .held(let pid, _):
+            if let pid, let ownedHolderPid, pid == ownedHolderPid { return .thisApp }
+            return .someoneElse
+        }
+    }
+
+    /// True when `pid` is a lock holder that `research_sandbox.sh` made for
+    /// `lockFile`: its command line has the holder's marker word and the lock
+    /// file's path, as the script checks before it ends one.
+    public nonisolated static func processIsLockHolder(_ pid: Int32, lockFile: URL) -> Bool {
+        guard pid > 0,
+              let result = runAndWait("/bin/ps", ["-ww", "-o", "command=", "-p", String(pid)],
+                                      environment: ["PATH": "/usr/bin:/bin", "LC_ALL": "C"],
+                                      timeout: 3),
+              result.status == 0 else { return false }
+        return result.output.contains("sandseek-lock-holder") && result.output.contains(lockFile.path)
+    }
+
+    /// After a start attempt, however it ended (it can end by the app's time
+    /// limit, which kills the script before it can clean up and leaves its lock
+    /// holder running): if a holder this attempt made holds the lock, remember
+    /// it as the app's own, so the next start, Stop and quitting deal with it.
+    /// A holder older than the attempt is not the app's. After a start that
+    /// did not succeed, the holder's command line must also be the script's
+    /// (`verify`); a start that succeeded took the lock itself.
+    private func adoptHolder(since began: Date, verify: Bool) {
+        guard case .held(let pidOrNil, let sinceOrNil) = ResearchSandboxLock.status(of: lockFile),
+              let pid = pidOrNil, let since = sinceOrNil,
+              Int(since.timeIntervalSince1970) >= Int(began.timeIntervalSince1970) - 2,
+              !verify || lockHolderCheck(pid, lockFile) else { return }
+        ownedHolderPid = pid
+        startedByApp = true
     }
 
     /// Finds the files the script runs from: the app's own, in place in the
@@ -305,9 +390,14 @@ public final class ResearchSandboxController {
                 lastCheckFailure = Self.checkFailureText(problem)
             }
             if adoptedFromLastRun {
-                // The marker outlived the VM; nothing is left to stop.
+                // The marker outlived the VM. Nothing is left to stop unless
+                // the holder this app started is still there: that one is
+                // kept, for Stop, quitting and the next start to deal with.
                 adoptedFromLastRun = false
-                startedByApp = false
+                if lockOwner() != .thisApp {
+                    ownedHolderPid = nil
+                    startedByApp = false
+                }
             }
         }
     }
@@ -645,8 +735,10 @@ public final class ResearchSandboxController {
         // so now instead of building an image first. (The script takes the
         // lock itself and decides again; this only saves the wait.)
         // (A sandbox this app started earlier and that no longer answers may
-        // still hold it: that one is the app's own to replace.)
-        if !startedByApp, case .held = ResearchSandboxLock.status(of: lockFile) {
+        // still hold it: that one is the app's own to replace, but only while
+        // the process that holds the lock is the one this app recorded.)
+        if lockOwner() == .someoneElse {
+            if startedByApp { dropOwnership() }
             state = .failed(ResearchSandboxLock.busyMessage)
             return
         }
@@ -670,7 +762,7 @@ public final class ResearchSandboxController {
             defaults.save(fingerprint, forKey: Self.fingerprintKey)
         }
         state = .starting
-        guard let started = await runScript(script, "start", replacing: startedByApp) else { return }
+        guard let started = await runStart(script) else { return }
         guard started.status == 0 else {
             state = .failed(Self.message(for: started, doing: "start the sandbox"))
             return
@@ -693,9 +785,10 @@ public final class ResearchSandboxController {
     /// marker file would be gone, so a crash during the start would leave the
     /// VM running with nobody to stop it. Here the state goes straight to
     /// `.starting`, `startedByApp` and the marker stay, and `start` of the
-    /// script does the work: told that the running sandbox is this app's own
-    /// (`SANDSEEK_SANDBOX_REPLACE`), it ends that one's hold on the lock,
-    /// removes its VM and makes a new VM with a new name and port. It
+    /// script does the work: told the pid of the process that holds the lock
+    /// for this app's own sandbox (`SANDSEEK_SANDBOX_REPLACE=<pid>`), it ends
+    /// that holder only if the lock is held by exactly that process, removes
+    /// its VM and makes a new VM with a new name and port. It
     /// rebuilds the image first when the sandbox's files changed. On any
     /// failure the state is `.failed` and no question may start. Does nothing
     /// for a sandbox the app did not start.
@@ -706,6 +799,13 @@ public final class ResearchSandboxController {
         // own, and a copy that was altered is replaced.
         guard let files = prepareFiles(reportFailure: true) else { return false }
         let script = files.script
+        // The lock must still be held by the process this app recorded (or by
+        // nobody). Another SandSeek's sandbox is never replaced.
+        if lockOwner() == .someoneElse {
+            dropOwnership()
+            state = .failed(ResearchSandboxLock.busyMessage)
+            return false
+        }
         selfTest = nil
         state = .starting
         restartNote = "Restarting the sandbox for this question"
@@ -729,9 +829,10 @@ public final class ResearchSandboxController {
             defaults.save(fingerprint, forKey: Self.fingerprintKey)
             state = .starting
         }
-        // The VM that holds the lock is this app's own, so the script may end
-        // it and take the lock itself in the same call.
-        guard let started = await runScript(script, "start", replacing: true) else { return false }
+        // The VM that holds the lock is this app's own (checked above, and the
+        // script checks the pid again), so the script may end it and take the
+        // lock itself in the same call.
+        guard let started = await runStart(script) else { return false }
         guard started.status == 0 else {
             state = .failed(Self.message(for: started, doing: "restart the sandbox"))
             return false
@@ -762,6 +863,15 @@ public final class ResearchSandboxController {
             state = .off
             return
         }
+        // Only the app's own sandbox is stopped: if another process holds the
+        // lock now, the VM is that SandSeek's, and Stop there ends it.
+        if lockOwner() == .someoneElse {
+            dropOwnership()
+            selfTest = nil
+            state = .failed("This sandbox belongs to another SandSeek, so it was left running. "
+                + "Press Stop in that SandSeek.")
+            return
+        }
         state = .stopping
         selfTest = nil
         // The script deletes the record of the VM's name, so read it first.
@@ -777,6 +887,7 @@ public final class ResearchSandboxController {
             state = .failed(problem)
             return
         }
+        ownedHolderPid = nil
         startedByApp = false
         adoptedFromLastRun = false
         state = .off
@@ -814,7 +925,7 @@ public final class ResearchSandboxController {
     /// Whether `name` is a name `start` gives a sandbox VM: `sandseek-sandbox-`
     /// and 8 lower-case hex digits, or the plain `sandseek-sandbox` of 0.1.0.
     /// A container someone started by hand under another name is not one.
-    static func isSandboxContainer(_ name: String) -> Bool {
+    nonisolated static func isSandboxContainer(_ name: String) -> Bool {
         name == containerName || ResearchSandboxFiles.parseName(name) != nil
     }
 
@@ -823,19 +934,19 @@ public final class ResearchSandboxController {
     /// the tests in ResearchAppTests should be updated with the new layout)
     /// that are sandbox VMs. These are the ones the script removes, under the
     /// lock, at the next start.
-    static func sandboxContainers(in output: String) -> [String] {
+    nonisolated static func sandboxContainers(in output: String) -> [String] {
         output.split(whereSeparator: \.isNewline).compactMap { line in
             line.split(whereSeparator: { $0.isWhitespace }).first.map(String.init)
-        }.filter(isSandboxContainer)
+        }.filter { Self.isSandboxContainer($0) }
     }
 
     /// Whether the output lists a sandbox VM at all.
-    static func listsContainer(_ output: String) -> Bool {
+    nonisolated static func listsContainer(_ output: String) -> Bool {
         !sandboxContainers(in: output).isEmpty
     }
 
     /// Whether the output lists the VM called `name`.
-    static func listsContainer(_ output: String, named name: String) -> Bool {
+    nonisolated static func listsContainer(_ output: String, named name: String) -> Bool {
         sandboxContainers(in: output).contains(name)
     }
 
@@ -864,6 +975,11 @@ public final class ResearchSandboxController {
     /// the next launch can still take over anything left running.
     public func stopWhenQuitting() {
         guard startedByApp, let script = prepareFiles(reportFailure: false)?.script else { return }
+        // Another SandSeek holds the lock now: its VM is not ours to stop.
+        if lockOwner() == .someoneElse {
+            dropOwnership()
+            return
+        }
         let vm = vmName()
         guard Self.runAndWait("/bin/bash", [script.path, "stop"],
                               environment: environment, timeout: 20)?.status == 0
@@ -879,6 +995,7 @@ public final class ResearchSandboxController {
             if let listed = Self.runAndWait(containerTool.path, ["list", "--all"],
                                             environment: environment, timeout: 2),
                listed.status == 0, !Self.listsContainer(listed.output, named: vm) {
+                ownedHolderPid = nil
                 startedByApp = false
                 adoptedFromLastRun = false
                 return
@@ -889,7 +1006,7 @@ public final class ResearchSandboxController {
 
     /// Runs a command synchronously, for the quit path only, and gives up
     /// after `timeout` seconds, leaving the process to finish on its own.
-    private static func runAndWait(_ executable: String, _ arguments: [String],
+    private nonisolated static func runAndWait(_ executable: String, _ arguments: [String],
                                    environment: [String: String],
                                    timeout: TimeInterval) -> ResearchProcessResult? {
         let process = Process()
@@ -910,12 +1027,24 @@ public final class ResearchSandboxController {
                                      output: String(decoding: data, as: UTF8.self))
     }
 
+    /// Runs the script's `start` and, whatever came of it, remembers the lock
+    /// holder it made (see `adoptHolder`). A busy answer (75) made none.
+    private func runStart(_ script: URL) async -> ResearchProcessResult? {
+        let began = Date()
+        let result = await runScript(script, "start", replacing: ownedHolderPid)
+        if result?.status != 75 {
+            let succeeded = result?.status == 0 && result?.timedOut != true
+            adoptHolder(since: began, verify: !succeeded)
+        }
+        return result
+    }
+
     private func runScript(_ script: URL, _ command: String,
-                           replacing: Bool = false) async -> ResearchProcessResult? {
+                           replacing holder: Int32? = nil) async -> ResearchProcessResult? {
         // A first image build downloads Python and its packages.
         let timeout: TimeInterval = command == "build" ? 1_800 : 180
         var environment = self.environment
-        if replacing { environment["SANDSEEK_SANDBOX_REPLACE"] = "1" }
+        if let holder { environment["SANDSEEK_SANDBOX_REPLACE"] = String(holder) }
         do {
             return try await runner.run(
                 executable: URL(fileURLWithPath: "/bin/bash"),

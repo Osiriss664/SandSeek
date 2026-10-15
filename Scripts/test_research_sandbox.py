@@ -383,7 +383,7 @@ class OneSandSeekAtATimeTests(unittest.TestCase):
     the VM's name and the removal of leftovers (docs/SECURITY.md)."""
 
     UNSIGNED = '{"error": {"message": "not signed", "code": "unauthorized"}}'
-    BUSY = "Another SandSeek is using the web sandbox. Close it first."
+    BUSY = "Another SandSeek is using the web sandbox. Close it first, or press Stop in it."
 
     def setUp(self):
         self.home = tempfile.mkdtemp()
@@ -514,15 +514,47 @@ exit 0
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn("127.0.0.1:" + self.lines(self.in_folder("port"))[0], done.stdout)
         # Not like the file says (digits only, 1024 to 65535): nothing is found.
-        for bad in ("80", "99999", "1234 ", "12a45", ""):
+        # One final line break, or none, is fine; a second one is not (the app
+        # and verify_sandbox_signature.py read it the same way).
+        for good in ("45678\n", "45678"):
+            with open(self.in_folder("port"), "w") as handle:
+                handle.write(good)
+            os.chmod(self.in_folder("port"), 0o600)
+            self.assertEqual(self.run_script("status").returncode, 0, repr(good))
+        for bad in ("80", "99999", "1234 ", "12a45", "", "45678\n", "\n45678"):
             with open(self.in_folder("port"), "w") as handle:
                 handle.write(bad + "\n")
             os.chmod(self.in_folder("port"), 0o600)
-            self.assertEqual(self.run_script("status").returncode, 1, bad)
+            self.assertEqual(self.run_script("status").returncode, 1, repr(bad))
         with open(self.in_folder("port"), "w") as handle:
             handle.write("45678\n")
         os.chmod(self.in_folder("port"), 0o644)
         self.assertEqual(self.run_script("status").returncode, 1)
+
+    def test_a_fixed_port_below_1024_or_above_65535_is_refused(self):
+        for bad in ("80", "1023", "10", "65536", "99999", "0", "abc", "1e4", "-1234"):
+            done = self.run_script("start", SANDSEEK_SANDBOX_PORT=bad)
+            self.assertEqual(done.returncode, 2, bad)
+            self.assertIn("from 1024 to 65535", done.stderr)
+            self.assertEqual(self.lines(self.vms), [], bad)
+            self.assertFalse(os.path.exists(self.in_folder("secret")), bad)
+        self.started(SANDSEEK_SANDBOX_PORT="1024")
+        self.assertEqual(self.lines(self.in_folder("port")), ["1024"])
+
+    def test_a_name_file_with_two_line_breaks_is_not_used(self):
+        self.started()
+        name = self.lines(self.in_folder("vm-name"))[0]
+        with open(self.in_folder("vm-name"), "w") as handle:
+            handle.write(name + "\n\n")
+        os.chmod(self.in_folder("vm-name"), 0o600)
+        # The record is not used: `stop` falls back to the plain 0.1.0 name and
+        # leaves the VM named in the file alone. (The holder is made older than
+        # 5 seconds, so this is not taken for a start in progress.)
+        holder = self.holder_pid()
+        with open(self.in_folder("lock"), "w") as handle:
+            handle.write(f"{holder} {int(time.time()) - 60}\n")
+        self.assertEqual(self.run_script("stop").returncode, 0)
+        self.assertEqual(self.lines(self.vms), [name])
 
     def test_a_second_start_fails_and_leaves_the_first_alone(self):
         self.started()
@@ -621,18 +653,104 @@ exit 0
         self.assertTrue(self.ended(old))
 
     def test_the_apps_own_running_sandbox_can_be_replaced_in_one_start(self):
-        # The app makes a fresh VM for the next question with this setting; any
-        # other start is still refused.
+        # The app makes a fresh VM for the next question with this setting, the
+        # pid of the holder it recorded; any other start is still refused.
         self.started()
         first = self.lines(self.in_folder("vm-name"))[0]
         old = self.holder_pid()
         self.assertEqual(self.run_script("start").returncode, 75)
-        self.started(SANDSEEK_SANDBOX_REPLACE="1")
+        self.started(SANDSEEK_SANDBOX_REPLACE=str(old))
         second = self.lines(self.in_folder("vm-name"))[0]
         self.assertNotEqual(first, second)
         self.assertEqual(self.lines(self.vms), [second])
         self.assertTrue(self.ended(old))
         self.assertNotEqual(self.holder_pid(), old)
+
+    def test_a_replace_for_another_holder_is_refused(self):
+        # A second app copy adopted this VM; its record names another pid (or
+        # an old one). Its replace must not end this holder or its VM.
+        self.started()
+        name = self.lines(self.in_folder("vm-name"))[0]
+        holder = self.holder_pid()
+        for wrong in ("1", str(holder + 1), "0" + str(holder), str(holder) + "0", "abc", " "):
+            before = len(self.lines(self.calls))
+            done = self.run_script("start", SANDSEEK_SANDBOX_REPLACE=wrong)
+            self.assertEqual(done.returncode, 75, wrong)
+            self.assertIn(self.BUSY, done.stderr)
+            self.assertEqual([c for c in self.lines(self.calls)[before:]
+                              if c.split()[0] in ("stop", "delete", "run")], [], wrong)
+            self.assertEqual(self.lines(self.vms), [name], wrong)
+            self.assertEqual(self.holder_pid(), holder, wrong)
+            os.kill(holder, 0)
+
+    def test_a_replace_for_a_holder_that_is_no_lock_holder_is_refused(self):
+        # The lock file names a live process that is not the script's holder:
+        # it is never signalled, even when REPLACE names it.
+        self.started()
+        holder = self.holder_pid()
+        sleeper = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(sleeper.kill)
+        self.addCleanup(sleeper.wait)
+        with open(self.in_folder("lock"), "w") as handle:
+            handle.write(f"{sleeper.pid} {int(time.time())}\n")
+        done = self.run_script("start", SANDSEEK_SANDBOX_REPLACE=str(sleeper.pid))
+        # The real holder keeps the flock, so the start is busy either way.
+        self.assertEqual(done.returncode, 75)
+        self.assertIsNone(sleeper.poll())
+        os.kill(holder, 0)
+
+    def test_a_killed_start_leaves_a_holder_that_the_next_replace_ends(self):
+        # The app's 180 s limit kills the script; its EXIT trap never runs and
+        # the detached holder stays. The app records that pid and the next
+        # start (REPLACE=<pid>) takes over and cleans up.
+        self.started()
+        holder = self.holder_pid()
+        done = self.run_script("start")
+        self.assertEqual(done.returncode, 75)
+        self.started(SANDSEEK_SANDBOX_REPLACE=str(holder))
+        self.assertTrue(self.ended(holder))
+        self.assertEqual(len(self.lines(self.vms)), 1)
+
+    def test_a_probe_that_holds_the_lock_for_an_instant_does_not_refuse_a_start(self):
+        import fcntl
+        os.makedirs(self.folder, mode=0o700)
+        descriptor = os.open(self.in_folder("lock"), os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_SH)
+        timer = __import__("threading").Timer(0.25, lambda: os.close(descriptor))
+        timer.start()
+        self.addCleanup(timer.join)
+        self.started()
+
+    def test_a_shared_lock_does_not_stop_the_holder_from_excluding_others(self):
+        # The app probes with a shared lock; the holder's exclusive one must
+        # still keep every other taker out.
+        import fcntl
+        self.started()
+        descriptor = os.open(self.in_folder("lock"), os.O_RDONLY)
+        self.addCleanup(os.close, descriptor)
+        with self.assertRaises(OSError):
+            fcntl.flock(descriptor, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        with self.assertRaises(OSError):
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_stop_leaves_a_start_that_has_just_begun_alone(self):
+        # A holder under 5 seconds old whose VM is not recorded yet is a start
+        # in progress (`stop` does not take the lock).
+        self.started()
+        holder = self.holder_pid()
+        os.remove(self.in_folder("vm-name"))
+        with open(self.in_folder("lock"), "w") as handle:
+            handle.write(f"{holder} {int(time.time())}\n")
+        done = self.run_script("stop")
+        self.assertEqual(done.returncode, 75)
+        self.assertIn("starting the web sandbox", done.stderr)
+        os.kill(holder, 0)
+        self.assertTrue(os.path.exists(self.in_folder("secret")))
+        # Older than that, or with the VM recorded, it is stopped.
+        with open(self.in_folder("lock"), "w") as handle:
+            handle.write(f"{holder} {int(time.time()) - 60}\n")
+        self.assertEqual(self.run_script("stop").returncode, 0)
+        self.assertTrue(self.ended(holder))
 
     def test_a_failed_start_lets_go_of_the_lock(self):
         done = self.run_script("start", FAKE_RUN_EXIT="1")
@@ -641,6 +759,98 @@ exit 0
             self.assertFalse(os.path.exists(self.in_folder(name)), name)
         self.assertTrue(self.ended(self.holder_pid()))
         self.started()
+
+
+class MacPythonTests(unittest.TestCase):
+    """The Mac-side scripts run with /usr/bin/python3, which is 3.9: `X | None`
+    and `list[str]` in annotations need `from __future__ import annotations`
+    there (the server inside the VM runs 3.12 and does not)."""
+
+    FOLDER = os.path.dirname(os.path.abspath(__file__))
+    BUILTIN_GENERICS = {"list", "dict", "tuple", "set", "frozenset", "type"}
+
+    def annotations(self, tree):
+        import ast
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                arguments = node.args
+                every = arguments.posonlyargs + arguments.args + arguments.kwonlyargs
+                every += [a for a in (arguments.vararg, arguments.kwarg) if a]
+                for argument in every:
+                    if argument.annotation:
+                        yield argument.annotation
+                if node.returns:
+                    yield node.returns
+            elif isinstance(node, ast.AnnAssign):
+                yield node.annotation
+
+    def test_new_style_annotations_come_with_the_future_import(self):
+        import ast
+        import glob
+        checked = 0
+        for path in sorted(glob.glob(os.path.join(self.FOLDER, "*.py"))):
+            with open(path, encoding="utf-8") as handle:
+                tree = ast.parse(handle.read())
+            future = any(isinstance(node, ast.ImportFrom) and node.module == "__future__"
+                         and any(alias.name == "annotations" for alias in node.names)
+                         for node in tree.body)
+            new_style = []
+            for annotation in self.annotations(tree):
+                for part in ast.walk(annotation):
+                    if isinstance(part, ast.BinOp) and isinstance(part.op, ast.BitOr):
+                        new_style.append(part.lineno)
+                    elif (isinstance(part, ast.Subscript) and isinstance(part.value, ast.Name)
+                          and part.value.id in self.BUILTIN_GENERICS):
+                        new_style.append(part.lineno)
+            checked += 1
+            with self.subTest(script=os.path.basename(path)):
+                self.assertTrue(future or not new_style,
+                                f"line(s) {new_style[:3]} need `from __future__ import annotations`")
+        self.assertGreater(checked, 5)
+
+
+class RecordedPortStrictnessTests(unittest.TestCase):
+    """verify_sandbox_signature.recorded_port reads the port file as the app
+    and the script do: yours, mode 0600 exactly, one line break at most."""
+
+    def setUp(self):
+        import importlib
+        import sys
+        folder = os.path.dirname(os.path.abspath(__file__))
+        if folder not in sys.path:
+            sys.path.insert(0, folder)
+        self.signing = importlib.import_module("verify_sandbox_signature")
+        self.folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.folder, True)
+        self.secret = os.path.join(self.folder, "secret")
+        self.port = os.path.join(self.folder, "port")
+
+    def write(self, text, mode=0o600):
+        with open(self.port, "w") as handle:
+            handle.write(text)
+        os.chmod(self.port, mode)
+
+    def test_only_mode_0600_is_accepted(self):
+        for mode, expected in ((0o600, 49152), (0o400, None), (0o640, None), (0o644, None),
+                               (0o660, None), (0o700, None), (0o200, None)):
+            self.write("49152\n", mode)
+            self.assertEqual(self.signing.recorded_port(self.secret), expected, oct(mode))
+
+    def test_at_most_one_line_break_and_a_port_from_1024(self):
+        for text, expected in (("49152", 49152), ("49152\n", 49152), ("49152\n\n", None),
+                               ("\n49152", None), ("1023\n", None), ("1024\n", 1024),
+                               ("65535\n", 65535), ("65536\n", None), ("4915a\n", None), ("", None)):
+            self.write(text)
+            self.assertEqual(self.signing.recorded_port(self.secret), expected, repr(text))
+
+    def test_a_fixed_port_follows_the_same_range(self):
+        saved = os.environ.get("SANDSEEK_SANDBOX_PORT")
+        self.addCleanup(lambda: os.environ.pop("SANDSEEK_SANDBOX_PORT", None) if saved is None
+                        else os.environ.__setitem__("SANDSEEK_SANDBOX_PORT", saved))
+        for text, expected in (("9555", 9555), ("1024", 1024), ("1023", None), ("80", None),
+                               ("65536", None), ("12 3", None)):
+            os.environ["SANDSEEK_SANDBOX_PORT"] = text
+            self.assertEqual(self.signing.sandbox_port(self.secret), expected, text)
 
 
 if __name__ == "__main__":

@@ -145,7 +145,7 @@ private func write(_ text: String, to name: String, in folder: URL, mode: Int = 
         let url = ResearchSandboxFiles.sandboxURL(
             folder: folder, environment: ["SANDSEEK_SANDBOX_PORT": "9555"])
         #expect(url.absoluteString == "http://127.0.0.1:9555")
-        for bad in ["", "abc", "0", "70000", "95 55"] {
+        for bad in ["", "abc", "0", "80", "1023", "70000", "95 55"] {
             #expect(ResearchSandboxFiles.sandboxURL(
                 folder: folder, environment: ["SANDSEEK_SANDBOX_PORT": bad]).absoluteString
                 == "http://127.0.0.1:49152", "\(bad)")
@@ -194,7 +194,33 @@ private func write(_ text: String, to name: String, in folder: URL, mode: Int = 
             #expect(ResearchSandboxLock.status(of: file) == .held(pid: getpid(), since: when))
         }
         #expect(ResearchSandboxLock.busyMessage
-            == "Another SandSeek is using the web sandbox. Close it first.")
+            == "Another SandSeek is using the web sandbox. Close it first, or press Stop in it.")
+    }
+
+    @Test func probingUsesASharedLockSoProbesAndHoldersKeepTheirRoles() throws {
+        let folder = try sandboxFolder()
+        let file = ResearchSandboxFiles.lockFile(in: folder)
+        try write("", to: "lock", in: folder)
+        // While other readers hold a shared lock (probes of other copies of
+        // the app), a probe still finds the lock free instead of "held".
+        let first = open(file.path, O_RDONLY)
+        let second = open(file.path, O_RDONLY)
+        defer { close(first); close(second) }
+        #expect(flock(first, LOCK_SH | LOCK_NB) == 0)
+        #expect(flock(second, LOCK_SH | LOCK_NB) == 0)
+        #expect(ResearchSandboxLock.status(of: file) == .free)
+        // But a shared lock still keeps the exclusive holder out for that instant.
+        #expect(ResearchSandboxLock.acquire(at: file) == nil)
+        flock(first, LOCK_UN)
+        flock(second, LOCK_UN)
+        // The holder's exclusive lock excludes shared and exclusive takers, and
+        // a probe sees it.
+        let lock = try #require(ResearchSandboxLock.acquire(at: file, now: when))
+        withExtendedLifetime(lock) {
+            #expect(flock(first, LOCK_SH | LOCK_NB) != 0)
+            #expect(flock(first, LOCK_EX | LOCK_NB) != 0)
+            #expect(ResearchSandboxLock.status(of: file) == .held(pid: getpid(), since: when))
+        }
     }
 
     @Test func releasingLetsTheNextOwnerIn() throws {

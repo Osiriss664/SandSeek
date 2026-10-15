@@ -200,16 +200,29 @@ These hold as long as the design is intact and the VM boundary holds.
   lock, the file `lock` in `~/Library/Application Support/SandSeek/sandbox`, and
   keeps it for as long as the sandbox runs: the app, the `sandseek` command's
   scripts and a second copy of the app share it. A second `start` fails with
-  "Another SandSeek is using the web sandbox. Close it first." and touches
-  nothing of the first one's. The lock is an operating system lock (`flock`),
+  "Another SandSeek is using the web sandbox. Close it first, or press Stop in
+  it." and touches nothing of the first one's. The lock is an operating system lock (`flock`),
   held by a small `perl` process (Apple's `/usr/bin/perl`) that `start` leaves
   running, because the script ends as soon as the VM is up and macOS has no
   `flock` command; the file holds that process's pid and start time. The
-  system drops the lock when that process ends, however it ends, so a crash
-  leaves no stale lock; a lock file that names a dead process is simply taken
-  over. If the process is alive but its VM is gone (older than five minutes and
-  not in `container list`), the next start ends it and takes over. `stop` ends
-  it too. Each start picks a free port on 127.0.0.1 (bind to port 0, read it
+  system drops the lock when that process ends, however it ends; a lock file
+  that names a dead process is simply taken over. The process does not end when
+  the app crashes or the script is killed by the app's time limit: it and the
+  VM then keep running until a Stop or the next start. If the process is alive
+  but its VM is gone (older than five minutes and not in `container list`), the
+  next start ends it and takes over. `stop` ends it too, except a holder under
+  five seconds old whose VM is not recorded yet (a start in progress, which
+  `stop` cannot tell from a running sandbox because it does not take the
+  lock). Whose sandbox is whose is decided by that process: after its own start
+  the app reads the holder's pid from the lock file and keeps it in its marker
+  file. Its Stop, Stop everything, restart before a question and quitting act
+  only while the lock is still held by that pid (or by nobody); a restart or a
+  start passes the pid in `SANDSEEK_SANDBOX_REPLACE`, and the script ends a
+  holder only if its pid is exactly that one (and its command line is the
+  script's holder). So a second copy of the app that finds the first copy's
+  sandbox cannot replace or stop it. The command line does not pass the
+  setting, and `research_sandbox.sh stop` run by hand stops whichever sandbox
+  runs. Each start picks a free port on 127.0.0.1 (bind to port 0, read it
   back, let go; a start that finds the port taken tries again, up to three
   times), publishes only that port, and records it in the file `port` beside
   the secret, with the VM's name in `vm-name`, both mode 0600. The app, the

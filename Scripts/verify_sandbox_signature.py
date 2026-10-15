@@ -13,6 +13,8 @@ Sandbox/server.py. Prints one line; exits 0 when the answer is a signed 200 that
 matches, 1 otherwise.
 """
 
+from __future__ import annotations
+
 import hashlib
 import hmac
 import http.client
@@ -79,7 +81,7 @@ def recorded_port(secret_path: str) -> int | None:
     try:
         info = os.fstat(descriptor)
         if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
-                or info.st_mode & 0o077):
+                or stat.S_IMODE(info.st_mode) != 0o600):
             return None
         with os.fdopen(descriptor, "rb") as handle:
             descriptor = -1
@@ -99,7 +101,7 @@ def sandbox_port(secret_path: str) -> int | None:
     """SANDSEEK_SANDBOX_PORT when it is set, else the recorded port."""
     fixed = os.environ.get("SANDSEEK_SANDBOX_PORT", "")
     if fixed:
-        return int(fixed) if fixed.isascii() and fixed.isdigit() and 0 < int(fixed) < 65536 else None
+        return int(fixed) if fixed.isascii() and fixed.isdigit() and 1024 <= int(fixed) <= 65535 else None
     return recorded_port(secret_path)
 
 

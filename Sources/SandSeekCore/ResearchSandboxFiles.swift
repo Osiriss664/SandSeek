@@ -119,12 +119,12 @@ public enum ResearchSandboxFiles {
     }
 
     /// Where the sandbox is: `SANDSEEK_SANDBOX_PORT` when `environment` has it
-    /// (for tests; digits only), else the recorded port, else `fallbackPort`.
-    /// A port file that cannot be used counts as none.
+    /// (for tests; digits only, 1024 to 65535 like a recorded port), else the
+    /// recorded port, else `fallbackPort`. A port file that cannot be used counts as none.
     public static func sandboxURL(folder: URL, environment: [String: String]) -> URL {
         if let fixed = environment["SANDSEEK_SANDBOX_PORT"], !fixed.isEmpty,
            fixed.allSatisfy({ $0.isASCII && $0.isWholeNumber }),
-           let port = Int(fixed), (1...65_535).contains(port) {
+           let port = Int(fixed), (lowestPort...65_535).contains(port) {
             return url(port: port)
         }
         let recorded = try? readPort(in: folder)

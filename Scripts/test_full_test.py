@@ -81,12 +81,18 @@ class Fixture:
             case "$1" in
               build) echo built ;;
               start)
-                mkdir -p "$FT_SECRET_FOLDER"; printf '%s' "{SECRET}" > "$FT_SECRET_FOLDER/secret"
+                mkdir -p "$FT_SECRET_FOLDER"
+                # Another SandSeek's lock (a file the test makes) refuses a
+                # start with exit code 75, as the real script does.
+                [ -e "$FT_SECRET_FOLDER/lock-held" ] && {{ echo "Another SandSeek is using the web sandbox."; exit 75; }}
+                [ "$FAKE_FAIL" = busy ] && {{ echo "Another SandSeek is using the web sandbox."; exit 75; }}
+                printf '%s' "{SECRET}" > "$FT_SECRET_FOLDER/secret"
                 echo "secret={SECRET} also {HEX_SECRET}"
-                [ "$FAKE_FAIL" = start ] && {{ echo "start failed"; exit 1; }}
+                # Like the real script, a failed start removes its own secret.
+                [ "$FAKE_FAIL" = start ] && {{ rm -f "$FT_SECRET_FOLDER/secret"; echo "start failed"; exit 1; }}
                 echo ready ;;
               stop) [ "$FAKE_SLEEP" = stop ] && sleep 8
-                    rm -f "$FT_SECRET_FOLDER/secret"; echo stopped ;;
+                    rm -f "$FT_SECRET_FOLDER/secret" "$FT_SECRET_FOLDER/lock-held"; echo stopped ;;
               status) echo answers ;;
               selftest)
                 echo "  ok    one"; echo "  ok    two"
@@ -293,16 +299,36 @@ class Failures(FullTestCase):
         self.assertIn("FAKE FAILURE LINE", markdown)
         self.assertIn("sandbox stop", self.fx.calls())  # the later steps still ran
 
-    def test_failed_start_skips_checks_and_still_cleans_up(self):
+    def test_failed_start_skips_checks_and_leaves_nothing_behind(self):
+        # A start that failed cleaned up after itself, so there is nothing of
+        # ours to stop (and a sandbox that runs now is not ours).
         process = self.fx.run(FAKE_FAIL="start")
         self.assertEqual(process.returncode, 1)
         _, steps, _ = self.fx.results(process)
         self.assertEqual(steps["5.2"]["result"], "FAIL")
         for step_id in ("5.3", "5.4", "5.5", "5.6", "5.7"):
             self.assertEqual(steps[step_id]["result"], "SKIP")
-        self.assertIn("sandbox stop", self.fx.calls())
+        self.assertNotIn("sandbox stop", self.fx.calls())
         self.assertFalse(os.path.exists(os.path.join(self.fx.secret_folder, "secret")))
-        self.assertEqual(steps["8"]["result"], "PASS")
+        self.assertNotEqual(steps["8"]["result"], "FAIL")
+
+    def test_a_busy_start_does_not_stop_the_other_sandseeks_sandbox(self):
+        # Exit code 75: another SandSeek holds the lock (the app, started
+        # after the run's check). The run fails, and its cleanup must not stop
+        # that sandbox.
+        os.makedirs(self.fx.secret_folder, exist_ok=True)
+        lock = os.path.join(self.fx.secret_folder, "lock-held")
+        with open(lock, "w") as handle:
+            handle.write("held")
+        process = self.fx.run()
+        self.assertEqual(process.returncode, 1)
+        _, steps, _ = self.fx.results(process)
+        self.assertEqual(steps["5.2"]["result"], "FAIL")
+        self.assertIn("exit code 75", steps["5.2"]["note"])
+        self.assertIn("sandbox start", self.fx.calls())
+        self.assertNotIn("sandbox stop", self.fx.calls())
+        self.assertTrue(os.path.exists(lock))
+        self.assertNotEqual(steps["8"]["result"], "FAIL")
 
     def test_selftest_fail_line_fails_the_step(self):
         process = self.fx.run(FAKE_FAIL="selftest-fail")
@@ -554,6 +580,33 @@ class Takeover(FullTestCase):
         _, steps, _ = self.fx.results(process)
         self.assertEqual(steps["5.2"]["result"], "PASS")
         self.assertEqual(steps["8"]["result"], "PASS")
+        self.assertEqual(process.returncode, 0, process.stdout)
+
+    def test_take_over_stops_the_running_sandbox_before_the_start(self):
+        # The running sandbox holds the lock, so a start alone would exit 75.
+        self.secret_exists()
+        lock = os.path.join(self.fx.secret_folder, "lock-held")
+        with open(lock, "w") as handle:
+            handle.write("held")
+        process = self.fx.run("--take-over-sandbox")
+        _, steps, _ = self.fx.results(process)
+        self.assertEqual(steps["5.2"]["result"], "PASS", process.stdout)
+        calls = self.fx.calls().splitlines()
+        stops = [i for i, line in enumerate(calls) if line == "sandbox stop"]
+        starts = [i for i, line in enumerate(calls) if line == "sandbox start"]
+        self.assertEqual(len(starts), 1)
+        self.assertEqual(len(stops), 2)  # before the start, and the cleanup
+        self.assertLess(stops[0], starts[0])
+        self.assertLess(starts[0], stops[1])
+        self.assertFalse(os.path.exists(lock))
+        self.assertEqual(steps["8"]["result"], "PASS")
+        self.assertEqual(process.returncode, 0, process.stdout)
+
+    def test_without_the_flag_nothing_is_stopped_before_the_start(self):
+        process = self.fx.run()
+        calls = self.fx.calls().splitlines()
+        self.assertEqual(calls.count("sandbox stop"), 1)  # the cleanup only
+        self.assertLess(calls.index("sandbox start"), calls.index("sandbox stop"))
         self.assertEqual(process.returncode, 0, process.stdout)
 
 

@@ -355,9 +355,11 @@ public final class ResearchWorkspace {
         if run.report?.id == report.id { run.reset() }
     }
 
-    /// Stops the question that is running, and the sandbox. Any sandbox: one
-    /// started by hand is stopped too, because `ResearchSandboxController.stop`
-    /// does not look at who started it.
+    /// Stops the question that is running, and the sandbox: this app's own, or
+    /// one nobody holds the lock for any more. A sandbox that another SandSeek
+    /// holds the lock for (also the command line's) is left running, because
+    /// `ResearchSandboxController.stop` acts only for the lock holder it
+    /// recorded after its own start.
     public func stopSandbox() async {
         ServiceLog.logger.notice(
             "Stopping the question and the sandbox (question running: \(self.run.isRunning, privacy: .public))")
@@ -365,8 +367,8 @@ public final class ResearchWorkspace {
         await sandbox.stop()
     }
 
-    /// Stops the question in progress, the sandbox (any sandbox, also one
-    /// started by hand), and the model server, but the server only if SandSeek
+    /// Stops the question in progress, the sandbox (as `stopSandbox` does),
+    /// and the model server, but the server only if SandSeek
     /// started it; one started by hand keeps running. The server and the
     /// sandbox are stopped together, so the slower one does not wait for the
     /// other. Does nothing while `startEverything` runs, a stop is under way,

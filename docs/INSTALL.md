@@ -321,11 +321,16 @@ them with a command**, so you can still get them back.
 - **The sandbox does not become Ready, or "Not verified"**: stop it and start it
   again. If it stays red, run `Scripts/research_sandbox.sh selftest` and read the
   `FAIL` lines.
-- **"Another SandSeek is using the web sandbox. Close it first."**: another
-  copy of the app, or `Scripts/research_sandbox.sh start`, has the sandbox. Stop
-  it there (**Stop Sandbox**, or `Scripts/research_sandbox.sh stop`) and start
-  again. A crash leaves no lock behind; the next start also removes the VM it
-  left.
+- **"Another SandSeek is using the web sandbox. Close it first, or press Stop in
+  it."**: another copy of the app, or `Scripts/research_sandbox.sh start`, has
+  the sandbox. Stop it there (**Stop Sandbox**, or `Scripts/research_sandbox.sh
+  stop`) and start again. If you cannot find who has it (for example the app
+  crashed), `Scripts/research_sandbox.sh stop` ends it. When the app crashes,
+  or a start is cut off by its time limit, the lock and the VM are not released:
+  a small helper process holds the lock and the VM keeps running until you press
+  **Stop** or the same app starts the sandbox again, which takes over from it
+  and removes the old VM. Only an app that did not start it, or a command line
+  start, sees the message.
 - **The model server card says "Not running"**: start the server (see above) and
   press **Check**. The address must be on 127.0.0.1 with a port, and not the
   sandbox's.

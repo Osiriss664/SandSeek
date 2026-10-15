@@ -30,12 +30,21 @@ Only SandSeek may use the sandbox.
 
 One SandSeek at a time.
 
-- The app, the `sandseek` command's scripts and a second copy of the app can no
-  longer stop each other's sandbox. `Scripts/research_sandbox.sh start` takes a
-  lock (a `lock` file in the sandbox folder, an operating system lock held by a
-  small perl process for as long as the sandbox runs) and a second start says
-  "Another SandSeek is using the web sandbox. Close it first." A crash releases
-  the lock; a lock whose process is gone is taken over.
+- The app, the `sandseek` command's scripts and a second copy of the app no
+  longer stop each other's sandbox by accident. `Scripts/research_sandbox.sh
+  start` takes a lock (a `lock` file in the sandbox folder, an operating system
+  lock held by a small perl process for as long as the sandbox runs) and a
+  second start says "Another SandSeek is using the web sandbox. Close it first,
+  or press Stop in it." and touches nothing. The app remembers which lock holder
+  its own start made (in its marker file) and Stop, Stop everything, the restart
+  before a question and quitting act only while that same process holds the
+  lock; if another SandSeek holds it, the app leaves that sandbox running. The
+  command `research_sandbox.sh stop` is an explicit order and still stops
+  whichever sandbox runs (not one whose start began under 5 seconds ago).
+  The system drops the lock when its holder ends; a lock whose process is gone
+  is taken over. If the app crashes or a start is cut off by the time limit, the
+  holder and its VM keep running until Stop or the next start of the same app,
+  which takes over from exactly that holder.
 - The sandbox is published on a free port of 127.0.0.1 picked at each start, no
   longer fixed 9100. The port is recorded beside the secret (`port`, mode 0600),
   and the app, `sandseek` (without `--sandbox`), `research_sandbox.sh status` and
@@ -47,7 +56,13 @@ One SandSeek at a time.
   run left, once it holds the lock; `stop` removes exactly the VM it started.
   The app's Stop looks only for its own VM.
 - The app still starts a fresh VM for each question, and now replaces its own
-  running VM in one `start` (`SANDSEEK_SANDBOX_REPLACE=1`).
+  running VM in one `start`, told the pid of its lock holder
+  (`SANDSEEK_SANDBOX_REPLACE=<pid>`); any other holder is refused.
+- `SANDSEEK_SANDBOX_PORT` must be 1024 to 65535 everywhere (`start` refuses
+  anything else). The port file is read the same way by the app, the scripts
+  and the check scripts: mode 0600, digits, at most one final line break.
+- `Scripts/verify_sandbox_signature.py` and the scripts that import it run on
+  macOS's Python 3.9 again.
 
 A sturdier sandbox server.
 
