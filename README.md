@@ -42,7 +42,7 @@ addresses go to the internet. More in [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.m
    model server. SandSeek works with three:
    - **TUFF** 8.3.1 or newer (tested with Qwen3.6 35B).
    - **llama.cpp** (`llama-server`), experimental.
-   - **Ollama**, experimental (not yet tested on a Mac): `ollama serve` and a
+   - **Ollama**, experimental (tested once on a Mac, see below): `ollama serve` and a
      model with tool support. See [docs/INSTALL.md](docs/INSTALL.md).
 
    LM Studio is planned; other servers are not supported yet.
@@ -264,9 +264,12 @@ To record real streams from a running server for test fixtures, use
   thinking setting is sent where llama.cpp ignores it (it reads only
   `chat_template_kwargs.enable_thinking`). The probe on a Mac confirmed the
   key file, `/props`, `/health`, tool calls and the context window.
-- Ollama support is experimental and has not been tested on a Mac yet: the
-  requests follow Ollama's documented API and a hand-written test server, not
-  a recorded session. LM Studio comes later.
+- Ollama support is experimental. It was tested once on a Mac (Ollama 0.40.4,
+  `gemma4:12b-mlx`, from the command line: the automatic test's quick question
+  and one research question). The app's Ollama card has not been tried by
+  hand, no other model was tried, and Ollama was not measured against the
+  injection pages. The test fixtures include recordings of that session.
+  LM Studio comes later.
 - Thorough preset values are a first guess; they will be adjusted after
   measuring.
 - The pre-question check does not yet verify mounts or that the recorded port

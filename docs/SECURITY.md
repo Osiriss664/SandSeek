@@ -499,8 +499,8 @@ does not control.
   makes Ollama itself refuse remote models. Start Ollama with
   `OLLAMA_HOST=127.0.0.1:11434` too; the exposure check says so when it finds
   Ollama listening beyond loopback. Ollama checks the `Host` header of requests
-  that arrive on loopback, which answers DNS rebinding. Not tested on a Mac, and
-  not measured against the injection pages.
+  that arrive on loopback, which answers DNS rebinding. Tested once on a Mac
+  from the command line; not measured against the injection pages.
 - **llama.cpp** is used only with `--host 127.0.0.1` and `--api-key-file`. The
   key makes rebinding useless (the page does not have it). The app makes the
   key itself, keeps it in a file only you can read (mode 0600 in a folder with

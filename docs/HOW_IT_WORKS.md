@@ -253,7 +253,7 @@ if it calls itself OpenAI-compatible.
   streamed) for now. If the server gives no context size, Settings has a prompt
   budget.
 
-- **Ollama (experimental, not yet tested on a Mac).** SandSeek uses Ollama's
+- **Ollama (experimental, tested once on a Mac from the command line).** SandSeek uses Ollama's
   own `/api/chat` (newline-delimited JSON, always streamed), not its
   OpenAI-compatible route, because only `/api/chat` sets the context size
   (`options.num_ctx`) and thinking (`think`). The status route is

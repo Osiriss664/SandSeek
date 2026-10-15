@@ -34,7 +34,7 @@ For what the security design does and does not promise, read
     project probed it with Bonsai). llama.cpp is experimental in 0.2.0: no
     streaming, the Thinking switch has no effect on it yet, and no research
     run was measured with it; see [SECURITY.md](SECURITY.md).
-  - **Ollama**, experimental (not yet tested on a Mac). See "Ollama" below.
+  - **Ollama**, experimental (tested once on a Mac). See "Ollama" below.
   - LM Studio is planned (the picker shows it as "later"); other servers are
     not supported yet.
 - Research makes many long prompts, so model speed matters. Qwen3.6 35B-A3B on
@@ -132,18 +132,26 @@ are done.
 
 ### Ollama (experimental)
 
-SandSeek talks to Ollama's own API (`/api/chat`) on `127.0.0.1:11434`. It has
-not been tested on a Mac yet.
+SandSeek talks to Ollama's own API (`/api/chat`) on `127.0.0.1:11434`. It was
+tested once on a Mac (Ollama 0.40.4, `gemma4:12b-mlx`, from the command line:
+the automatic test's quick question and one research question). The app's
+Ollama card was not tried by hand, and no other model was tried.
 
 1. Install Ollama. Two ways, which differ in updates: the app from
    ollama.com updates itself; `brew install ollama` does **not** update itself,
    so run `brew upgrade ollama` now and then.
 2. Start it yourself: the Ollama menu-bar app starts the server by itself;
-   with Homebrew run `ollama serve`. To make sure
-   it listens on this Mac only, start it as
-   `OLLAMA_HOST=127.0.0.1:11434 ollama serve`. SandSeek never starts or stops
-   Ollama; the **Start server** button is not offered for it.
-3. Pull a model that supports tool calls, for example `ollama pull qwen3:8b`.
+   with Homebrew run `ollama serve`. To make sure it listens on this Mac only
+   and never runs cloud models, start it from a terminal as
+   `OLLAMA_NO_CLOUD=1 OLLAMA_HOST=127.0.0.1:11434 ollama serve`.
+   `OLLAMA_NO_CLOUD=1` makes Ollama itself refuse cloud models, as a second
+   lock beside SandSeek's own check (see [SECURITY.md](SECURITY.md)). The
+   menu-bar app does not read these variables from your shell; its own
+   settings decide, so `ollama serve` in a terminal is the way to be sure.
+   SandSeek never starts or stops Ollama; the **Start server** button is not
+   offered for it.
+3. Pull a model that supports tool calls, for example `ollama pull gemma4:12b-mlx` (the model that was tried) or
+   `ollama pull qwen3:8b` (not tried).
    `ollama show <model>` lists "tools" under Capabilities. Models without it
    are refused. Cloud models (`:cloud`, `-cloud`, or a model that Ollama
    forwards to ollama.com) are refused too: SandSeek keeps your question on
