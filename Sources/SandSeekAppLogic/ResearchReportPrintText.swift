@@ -111,7 +111,7 @@ public enum ResearchReportPrintText {
         }
         let unreadable = report.unreadablePages
         if !unreadable.isEmpty {
-            parts.append(Section(style: .heading, text: "Pages that could not be read\n"))
+            parts.append(Section(style: .heading, text: "Pages that could not be read (\(unreadable.count))\n"))
             for page in unreadable {
                 parts.append(Section(style: .source, text: "\u{2022} " + page.line + "\n"))
             }

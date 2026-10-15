@@ -18,7 +18,7 @@ extension SavedResearchReport {
             result.append("The answer cites \(list), which is not a page the research read.")
         }
         if unverifiedFigureCount > 0 {
-            result.append("\(unverifiedFigureCount) \(unverifiedFigureCount == 1 ? "point" : "points") (figures, dates or names) could not be matched to the pages they cite. The saved report lists them under Figure check.")
+            result.append("\(unverifiedFigureCount) \(unverifiedFigureCount == 1 ? "point" : "points") (figures, dates or names) could not be matched to the pages they cite. They are listed under Figure check below.")
         }
         if budgetExhausted {
             result.append("The research ran out of steps, so this answer may be incomplete.")

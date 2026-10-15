@@ -60,6 +60,52 @@ import Testing
         #expect(saved().unreadablePages.isEmpty)
     }
 
+    @Test func anAddressReadLaterIsNotListed() {
+        let steps = [
+            step(0, .reading, "https://example.com/retry"),
+            step(1, .failed, "timed out"),
+            step(2, .reading, "https://example.com/retry"),
+            step(3, .searching, "query"),
+            step(4, .reading, "https://example.com/gone"),
+            step(5, .failed, "timed out"),
+            step(6, .reading, "https://example.com/gone"),
+            step(7, .failed, "timed out again"),
+        ]
+        let pages = saved(steps: steps).unreadablePages
+        #expect(pages.map(\.address) == ["https://example.com/gone"])
+    }
+
+    @Test func aSourceIsNotListedAsUnreadable() {
+        let steps = [
+            step(0, .reading, "https://example.com/a"),
+            step(1, .failed, "timed out"),
+            step(2, .reading, "https://example.com/b"),
+            step(3, .failed, "timed out"),
+        ]
+        // https://example.com/a is the report's source number 1.
+        let pages = saved(steps: steps).unreadablePages
+        #expect(pages.map(\.address) == ["https://example.com/b"])
+        #expect(!saved(steps: steps).markdown.contains("[https://example.com/a](https://example.com/a)"))
+    }
+
+    @Test func markdownAddressKeepsUnderscoresAndTheSectionFollowsFigureCheck() {
+        let steps = [
+            step(0, .reading, "https://example.com/a_b_c*d"),
+            step(1, .failed, "timed out"),
+        ]
+        let figures = [ResearchUnverifiedFigure(figure: "280", sources: [1])]
+        let markdown = saved(steps: steps, figures: figures).markdown
+        #expect(markdown.contains("(https://example.com/a_b_c*d)"))
+        let figure = markdown.range(of: "## Figure check")
+        let unreadable = markdown.range(of: "## Pages that could not be read")
+        let searches = markdown.range(of: "## Searches")
+        #expect(figure != nil && unreadable != nil && searches != nil)
+        if let figure, let unreadable, let searches {
+            #expect(figure.lowerBound < unreadable.lowerBound)
+            #expect(unreadable.lowerBound < searches.lowerBound)
+        }
+    }
+
     @Test func addressAndReasonAreCleaned() {
         let steps = [
             step(0, .reading, "https://example.com/\u{202E}a b\u{200B}c"),
@@ -77,7 +123,7 @@ import Testing
         ]
         let with = saved(steps: steps).markdown
         #expect(with.contains("## Pages that could not be read"))
-        #expect(with.contains("- https://example.com/a \u{2014} timed out"))
+        #expect(with.contains("- [https://example.com/a](https://example.com/a) \u{2014} timed out"))
         #expect(!saved().markdown.contains("could not be read"))
     }
 
@@ -111,7 +157,7 @@ import Testing
         let text = ResearchReportPrintText.plainText(for: saved(steps: steps, figures: figures))
         #expect(text.contains("Figure check (1)"))
         #expect(text.contains("\u{2022} 280 \u{2014} not on [1]"))
-        #expect(text.contains("Pages that could not be read"))
+        #expect(text.contains("Pages that could not be read (1)"))
         #expect(text.contains("\u{2022} https://example.com/a \u{2014} timed out"))
         let plain = ResearchReportPrintText.plainText(for: saved())
         #expect(!plain.contains("Figure check"))

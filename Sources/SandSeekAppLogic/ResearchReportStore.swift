@@ -153,8 +153,31 @@ public struct SavedResearchReport: Codable, Equatable, Identifiable, Sendable {
         savedFigureCheckMore = figureList.more == 0 ? nil : figureList.more
         unknownCitations = report.unknownCitations
         self.steps = steps
-        markdown = report.markdown + Self.unreadablePagesMarkdown(Self.unreadablePages(in: steps))
+        let unreadable = Self.unreadablePages(in: steps, sources: report.sources.map(\.url))
+        markdown = Self.markdownAdding(Self.unreadablePagesMarkdown(unreadable),
+                                       to: report.markdown)
         self.serverKind = serverKind?.rawValue
+    }
+}
+
+extension SavedResearchReport {
+    /// The report's Markdown with `section` placed directly after its Figure
+    /// check section, or after the Sources when there is none, or at the end.
+    static func markdownAdding(_ section: String, to base: String) -> String {
+        guard !section.isEmpty else { return base }
+        let lines = base.components(separatedBy: "\n")
+        // The heading the new section follows: Figure check, else Sources.
+        for heading in ["## Figure check", "## Sources"] {
+            guard let start = lines.lastIndex(of: heading) else { continue }
+            let next = lines[(start + 1)...].firstIndex { $0.hasPrefix("## ") }
+            if let next {
+                let before = lines[..<next].joined(separator: "\n")
+                let after = lines[next...].joined(separator: "\n")
+                return before + section + "\n" + after
+            }
+            break
+        }
+        return base + section
     }
 }
 
