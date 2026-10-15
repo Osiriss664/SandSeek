@@ -563,9 +563,12 @@ private final class FakeClock: @unchecked Sendable {
         #expect(ResearchSandboxController.checkedLabel(
             for: Date(timeIntervalSince1970: 1_700_000_000), timeZone: utc,
             locale: british) == "checked 22:13")
-        #expect(ResearchSandboxController.checkedLabel(
+        // The Mac's own format decides on a leading zero (macOS 27 writes 9:16
+        // for en_GB), so either is right.
+        let morning = ResearchSandboxController.checkedLabel(
             for: Date(timeIntervalSince1970: 1_700_000_000 + 11 * 3_600 + 3 * 60),
-            timeZone: utc, locale: british) == "checked 09:16")
+            timeZone: utc, locale: british)
+        #expect(morning == "checked 09:16" || morning == "checked 9:16")
     }
 
     @Test func theFailureTextSaysWhatHappenedInOneSentence() {
