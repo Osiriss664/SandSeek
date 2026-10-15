@@ -98,6 +98,16 @@ public struct SavedResearchReport: Codable, Equatable, Identifiable, Sendable {
     /// How many figures, dates or names in the answer could not be matched to
     /// the pages cited.
     public var unverifiedFigureCount: Int { unverifiedFigureTotal ?? 0 }
+    /// Optional so reports saved before it existed still load.
+    private let savedFigureCheck: [ResearchFigureCheckGroup]?
+    /// Optional so reports saved before it existed still load.
+    private let savedFigureCheckMore: Int?
+    /// The points of the figure check as the saved report words them, grouped
+    /// under their intros; empty when nothing was found (or the report is older
+    /// than the list).
+    public var figureCheckGroups: [ResearchFigureCheckGroup] { savedFigureCheck ?? [] }
+    /// How many more points the figure check found than it lists.
+    public var figureCheckMore: Int { savedFigureCheckMore ?? 0 }
     public let unknownCitations: [Int]
     public let steps: [ResearchStep]
     /// The report as `sandseek` prints it, made inert for viewers.
@@ -138,9 +148,12 @@ public struct SavedResearchReport: Codable, Equatable, Identifiable, Sendable {
         stoppedOnRepeats = report.stoppedRepeatedSearches
         endedEarlyReason = report.endedEarly.map(ResearchText.terminalSafe)
         unverifiedFigureTotal = report.unverifiedFigures.count
+        let figureList = report.figureCheckList()
+        savedFigureCheck = figureList.groups.isEmpty ? nil : figureList.groups
+        savedFigureCheckMore = figureList.more == 0 ? nil : figureList.more
         unknownCitations = report.unknownCitations
         self.steps = steps
-        markdown = report.markdown
+        markdown = report.markdown + Self.unreadablePagesMarkdown(Self.unreadablePages(in: steps))
         self.serverKind = serverKind?.rawValue
     }
 }

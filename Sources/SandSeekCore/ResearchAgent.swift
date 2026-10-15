@@ -120,6 +120,18 @@ public struct ResearchSource: Equatable, Sendable {
     public let url: String
 }
 
+/// One list of the "Figure check": its intro and its lines, as the report
+/// words them.
+public struct ResearchFigureCheckGroup: Codable, Equatable, Sendable {
+    public let intro: String
+    public let lines: [String]
+
+    public init(intro: String, lines: [String]) {
+        self.intro = intro
+        self.lines = lines
+    }
+}
+
 public struct ResearchReport: Equatable, Sendable {
     public let question: String
     public let answer: String
@@ -271,22 +283,35 @@ public struct ResearchReport: Equatable, Sendable {
     /// The "Figure check" section, or nothing when no point was found.
     var figureCheckSection: String {
         guard !unverifiedFigures.isEmpty else { return "" }
+        let list = figureCheckList(inert: true)
         var text = "\n## Figure check\n"
+        for group in list.groups {
+            text += "\n_\(group.intro)_\n\n"
+            for line in group.lines { text += "- \(line)\n" }
+        }
+        if list.more > 0 { text += "- and \(list.more) more\n" }
+        return text
+    }
+
+    /// The points of the "Figure check" section as lines, grouped under
+    /// their intros, with the number left out by the limit. `inert` escapes
+    /// the lines for Markdown (as the saved report has them); without it they
+    /// are plain text for a window or a print-out.
+    public func figureCheckList(inert: Bool = false)
+        -> (groups: [ResearchFigureCheckGroup], more: Int) {
+        var groups: [ResearchFigureCheckGroup] = []
         // The limit counts the points over all lists.
         var shown = 0
         for (kind, intro) in Self.figureCheckLists {
             let items = unverifiedFigures.filter { $0.kind == kind }
             guard !items.isEmpty, shown < Self.figureCheckLimit else { continue }
-            text += "\n_\(intro)_\n\n"
-            for item in items.prefix(Self.figureCheckLimit - shown) {
-                text += "- \(Self.figureCheckLine(item))\n"
-                shown += 1
-            }
+            let taken = items.prefix(Self.figureCheckLimit - shown)
+            groups.append(ResearchFigureCheckGroup(
+                intro: intro,
+                lines: taken.map { Self.figureCheckLine($0, inert: inert) }))
+            shown += taken.count
         }
-        if unverifiedFigures.count > shown {
-            text += "- and \(unverifiedFigures.count - shown) more\n"
-        }
-        return text
+        return (groups, max(0, unverifiedFigures.count - shown))
     }
 
     /// Points the report lists under "Figure check"; the rest are counted.
@@ -308,17 +333,19 @@ public struct ResearchReport: Equatable, Sendable {
     ]
 
     /// One point of the "Figure check" section as a line of text.
-    static func figureCheckLine(_ item: ResearchUnverifiedFigure) -> String {
-        let figure = ResearchText.inertMarkdown(ResearchText.oneLine(item.figure, limit: 40))
+    static func figureCheckLine(_ item: ResearchUnverifiedFigure, inert: Bool = true) -> String {
+        func clean(_ text: String) -> String {
+            let line = ResearchText.oneLine(text, limit: 40)
+            return inert ? ResearchText.inertMarkdown(line) : line
+        }
+        let figure = clean(item.figure)
         let cited = item.sources.map { "[\($0)]" }.joined(separator: ", ")
         switch item.kind {
         case .notOnPage:
             return cited.isEmpty
                 ? "\(figure) — not on any page read" : "\(figure) — not on \(cited)"
         case .elsewhereOnPage:
-            let near = item.names.map {
-                ResearchText.inertMarkdown(ResearchText.oneLine($0, limit: 40))
-            }.joined(separator: ", ")
+            let near = item.names.map(clean).joined(separator: ", ")
             return "\(figure) — found on \(cited), but not near \(near)"
         case .name:
             return cited.isEmpty

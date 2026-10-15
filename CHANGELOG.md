@@ -165,6 +165,11 @@ A better window.
   only while the sandbox is verified. It says so in plain words when that
   check fails. A failed security check opens the card and shows "Check
   failed" instead of "Ready".
+- The answer view, the report window, the saved report, Print and Export as PDF
+  now list what the orange line only counted: the figure check (each figure,
+  date or name that was not on the page it cites) and the pages that could not
+  be read, with the reason. On screen each list is folded until you click it,
+  and nothing shows when there is nothing to list.
 
 ## 0.1.0 (unreleased)
 

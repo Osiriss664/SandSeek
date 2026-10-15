@@ -93,6 +93,29 @@ public enum ResearchReportPrintText {
         for caution in cautions {
             parts.append(Section(style: .note, text: "Note: " + caution + "\n"))
         }
+        if !report.figureCheckGroups.isEmpty {
+            parts.append(Section(style: .heading,
+                                 text: "Figure check (\(report.unverifiedFigureCount))\n"))
+            for group in report.figureCheckGroups {
+                parts.append(Section(style: .note,
+                                     text: ResearchText.oneLine(group.intro, limit: 400) + "\n"))
+                for line in group.lines {
+                    parts.append(Section(style: .source,
+                                         text: "\u{2022} " + ResearchText.oneLine(line, limit: 400) + "\n"))
+                }
+            }
+            if report.figureCheckMore > 0 {
+                parts.append(Section(style: .source,
+                                     text: "\u{2022} and \(report.figureCheckMore) more\n"))
+            }
+        }
+        let unreadable = report.unreadablePages
+        if !unreadable.isEmpty {
+            parts.append(Section(style: .heading, text: "Pages that could not be read\n"))
+            for page in unreadable {
+                parts.append(Section(style: .source, text: "\u{2022} " + page.line + "\n"))
+            }
+        }
         if !report.sources.isEmpty {
             parts.append(Section(style: .heading, text: "Sources\n"))
             for source in report.sources {

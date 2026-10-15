@@ -78,6 +78,28 @@ struct ResearchStepRow: View {
     }
 }
 
+// MARK: - Folding sections
+
+/// A section under the orange cautions that is folded until one click opens it.
+struct ReportFoldSection<Content: View>: View {
+    let title: String
+    private let content: Content
+    @State private var isExpanded = false
+
+    init(title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $isExpanded) {
+            content.padding(.top, 4)
+        } label: {
+            Text(title).font(.caption).foregroundStyle(.orange)
+        }
+    }
+}
+
 // MARK: - Report
 
 struct ResearchReportView: View {
@@ -129,6 +151,43 @@ struct ResearchReportView: View {
                 Text(warning)
                     .font(.caption)
                     .foregroundStyle(.orange)
+            }
+            if !report.figureCheckGroups.isEmpty {
+                ReportFoldSection(title: "Figure check (\(report.unverifiedFigureCount))") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(report.figureCheckGroups.enumerated()), id: \.offset) { _, group in
+                            Text(group.intro)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            ForEach(Array(group.lines.enumerated()), id: \.offset) { _, line in
+                                Text("\u{2022} " + line)
+                                    .font(.callout)
+                                    .textSelection(.enabled)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        if report.figureCheckMore > 0 {
+                            Text("\u{2022} and \(report.figureCheckMore) more")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .id("figure-check-\(report.id)")
+            }
+            if !report.unreadablePages.isEmpty {
+                ReportFoldSection(title: "Pages that could not be read (\(report.unreadablePages.count))") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(report.unreadablePages.enumerated()), id: \.offset) { _, page in
+                            Text("\u{2022} " + page.line)
+                                .font(.callout)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+                .id("unreadable-pages-\(report.id)")
             }
             if !report.sources.isEmpty {
                 Text("Sources").font(.headline)
