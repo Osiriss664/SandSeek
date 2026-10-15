@@ -212,6 +212,12 @@ struct ResearchReportView: View {
                     note = "Copied."
                 }
                 Button("Save As…", action: saveAs)
+                Button("Export as PDF…") {
+                    if let message = ReportPrinting.exportPDF(report) { note = message }
+                }
+                .help("Writes the question, the answer and the numbered sources to a PDF.")
+                Button("Print…") { ReportPrinting.printReport(report) }
+                    .keyboardShortcut("p", modifiers: .command)
                 Button("Show in Finder") {
                     NSWorkspace.shared.activateFileViewerSelecting([markdownURL])
                 }
