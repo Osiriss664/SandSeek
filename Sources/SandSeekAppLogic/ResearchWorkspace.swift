@@ -26,6 +26,14 @@ public final class ResearchWorkspace {
     public private(set) var isStartingEverything = false
     /// What `startEverything` is doing now, in a few words; nil otherwise.
     public private(set) var startEverythingNote: String?
+    /// Why the last `startEverything` stopped before everything was ready, in
+    /// plain words; nil when it got through or has not run. Stays until the
+    /// next run.
+    public private(set) var startEverythingStopNote: String?
+    /// Remembers whether the cards were folded for the current stretch in
+    /// which both are ready. Kept here, not in a screen, so switching to
+    /// Reports or Settings and back does not fold an opened card again.
+    @ObservationIgnored private var cardFolding = ResearchCardFolding()
 
     public init(sandbox: ResearchSandboxController,
                 server: ResearchServerController,
@@ -80,7 +88,8 @@ public final class ResearchWorkspace {
         switch sandbox.state {
         case .ready:
             switch sandbox.protection {
-            case .verified: sandboxReady = true
+            // A failed security check keeps the card open, so it is seen.
+            case .verified: sandboxReady = sandbox.securityCheckFailed ? false : true
             case .notVerified: sandboxReady = false
             case .checking, .unknown: sandboxReady = nil
             }
@@ -90,6 +99,14 @@ public final class ResearchWorkspace {
             sandboxReady = false
         }
         return ResearchCardReadiness(server: serverReady, sandbox: sandboxReady)
+    }
+
+    /// The folds the two cards should have now, given how they are. Call it
+    /// whenever `cardReadiness` changes (see `ResearchCardFolding`).
+    public func foldsAfterReadinessChange(
+        current: ResearchCardFolding.Folds
+    ) -> ResearchCardFolding.Folds {
+        cardFolding.update(cardReadiness, folds: current)
     }
 
     /// True when a saved report should open in a window of its own: a
@@ -181,13 +198,17 @@ public final class ResearchWorkspace {
     }
 
     /// Gets everything ready for a question, in this order, and stops at the
-    /// first thing that fails (its card shows the error):
+    /// first thing that fails (its card shows the error, and
+    /// `startEverythingStopNote` says in a few words where to look):
     ///
-    /// 1. The model server. Already ready: left alone. A program is chosen
-    ///    under "Start it from SandSeek": it is started (a server that
-    ///    answers already is found first, so none is started twice).
-    ///    Otherwise the server is only checked.
-    /// 2. The web sandbox. Already ready, or starting: not started again.
+    /// 1. The model server. Already ready: left alone. Off, with a program
+    ///    chosen under "Start it from SandSeek" and a start that is allowed:
+    ///    it is started (a server that answers already is found first, so
+    ///    none is started twice). Otherwise the server is only checked. A
+    ///    start, stop or Check that is under way is waited for. A server the
+    ///    person has just stopped is not started again.
+    /// 2. The web sandbox. Already ready, or starting: not started again. Its
+    ///    protection check, if one is under way, is waited for.
     /// 3. The security check, unless a passing result for this sandbox is
     ///    already there.
     ///
@@ -195,30 +216,45 @@ public final class ResearchWorkspace {
     public func startEverything() async {
         guard canStartEverything else { return }
         isStartingEverything = true
+        startEverythingStopNote = nil
         defer {
             isStartingEverything = false
             startEverythingNote = nil
         }
 
-        // 1. The model server. A start or stop under way (from the card's own
-        // buttons) is waited for, not repeated.
-        await wait(while: { launch.state.isBusy })
+        // 1. The model server. A start, stop or Check under way (from the
+        // card's own buttons) is waited for, not repeated.
+        let wasStopping = launch.state == .stopping
+        await wait(while: { launch.state.isBusy || server.state.isBusy })
         if Task.isCancelled { return }
+        if wasStopping {
+            // The person stopped the server on purpose: do not undo that.
+            startEverythingStopNote = "You just stopped the model server, so it was left off. "
+                + "Start it from its card."
+            return
+        }
         if server.state != .ready {
-            startEverythingNote = "Looking for the model server…"
+            startEverythingNote = "Looking for the model server\u{2026}"
             await server.refresh()
         }
         if server.state != .ready {
-            if launch.owned == nil, launch.programs[server.serverType] != nil {
-                startEverythingNote = "Starting the model server…"
+            if server.state == .off, launch.owned == nil,
+               launch.startBlocker(for: server) == nil {
+                startEverythingNote = "Starting the model server\u{2026}"
                 await launch.start(using: server)
-                if case .failed = launch.state { return }
+                if case .failed = launch.state {
+                    startEverythingStopNote = "The model server did not start: open its card."
+                    return
+                }
             } else {
-                startEverythingNote = "Checking the model server…"
+                startEverythingNote = "Checking the model server\u{2026}"
                 await server.check()
             }
         }
-        guard server.state == .ready else { return }
+        guard server.state == .ready else {
+            startEverythingStopNote = "The model server is not ready: open its card."
+            return
+        }
 
         // 2. The sandbox. One that is starting or stopping is waited for; one
         // that already runs (the periodic look may not have seen it yet) is
@@ -226,21 +262,36 @@ public final class ResearchWorkspace {
         await wait(while: { sandbox.state.isBusy })
         if Task.isCancelled { return }
         if sandbox.state != .ready {
-            startEverythingNote = "Looking for the sandbox…"
+            startEverythingNote = "Looking for the sandbox\u{2026}"
             await sandbox.refresh()
         }
         if sandbox.state != .ready {
-            startEverythingNote = "Starting the sandbox…"
+            startEverythingNote = "Starting the sandbox\u{2026}"
             await sandbox.start()
         }
-        guard sandbox.state == .ready else { return }
+        // A protection check under way (this one's or the periodic look's) is
+        // waited for, then decides.
+        await wait(while: { sandbox.protection == .checking })
+        if Task.isCancelled { return }
+        guard sandbox.state == .ready else {
+            startEverythingStopNote = "The sandbox is not running: open its card."
+            return
+        }
         if sandbox.protection == .unknown { await sandbox.verifyProtection() }
-        guard sandbox.protection == .verified else { return }
+        guard sandbox.protection == .verified else {
+            startEverythingStopNote = "The sandbox is not verified: open its card."
+            return
+        }
 
-        // 3. The security check.
+        // 3. The security check. One the person started is waited for.
+        await wait(while: { sandbox.isRunningSelfTest })
+        if Task.isCancelled { return }
         if sandbox.selfTest?.passed != true {
-            startEverythingNote = "Running the security check…"
+            startEverythingNote = "Running the security check\u{2026}"
             await sandbox.runSelfTest()
+        }
+        if sandbox.selfTest?.passed != true {
+            startEverythingStopNote = "The security check did not pass: open the sandbox card."
         }
     }
 

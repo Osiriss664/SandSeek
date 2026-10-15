@@ -443,24 +443,43 @@ public final class ResearchSandboxController {
         break
     """
 
-    /// What the card says when a running sandbox stops passing the check.
+    /// What the card says when a running sandbox stops passing the check, in
+    /// one short sentence (plus the reason when it is not simply "gone").
     static func checkFailureText(_ problem: ResearchError?) -> String {
-        guard let problem else { return "The sandbox stopped passing its signed check." }
-        let reason = problem.description
-        return "The sandbox stopped passing its signed check. "
-            + reason.prefix(1).uppercased() + reason.dropFirst()
+        switch problem {
+        case .none, .some(.sandboxUnavailable):
+            return "The sandbox stopped answering."
+        case .some(.sandboxNotSigned):
+            return "Something answered on the sandbox\u{2019}s port without SandSeek\u{2019}s signature."
+        case .some(let other):
+            let reason = other.description
+            return "The sandbox check failed. " + reason.prefix(1).uppercased() + reason.dropFirst()
+        }
     }
 
     /// "checked 14:05": the time of a passing signed health check, as the card
-    /// shows it.
+    /// shows it. It follows the Mac's 12 or 24 hour setting (`locale`).
     public nonisolated static func checkedLabel(
-        for date: Date, timeZone: TimeZone = .current
+        for date: Date, timeZone: TimeZone = .current,
+        locale: Locale = .autoupdatingCurrent
     ) -> String {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = timeZone
-        formatter.dateFormat = "HH:mm"
-        return "checked " + formatter.string(from: date)
+        let style = Date.FormatStyle(
+            date: .omitted, time: .shortened, locale: locale,
+            calendar: Calendar(identifier: .gregorian), timeZone: timeZone)
+        return "checked " + date.formatted(style)
+    }
+
+    /// True when the sandbox runs but its last security check failed. The
+    /// card must not look fine then, whether it is folded or not.
+    public var securityCheckFailed: Bool {
+        state == .ready && selfTest?.passed == false
+    }
+
+    /// Whether the card may say "Signed": the sandbox is ready, its protection
+    /// was verified, no security check failed, and a signed health check passed.
+    public var showsSignedSeal: Bool {
+        state == .ready && protection == .verified && !securityCheckFailed
+            && lastSignedCheck != nil
     }
 
     /// Why the sandbox does not count as running: nil when it answers a signed

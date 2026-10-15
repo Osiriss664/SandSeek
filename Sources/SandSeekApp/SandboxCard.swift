@@ -15,7 +15,8 @@ struct SandboxCard: View {
         VStack(alignment: .leading, spacing: 12) {
             FoldingCardHeader(
                 icon: "shippingbox.and.arrow.backward", title: "Web sandbox",
-                subject: "web sandbox", badge: badge, folded: $folded,
+                subject: "web sandbox", badge: badge, summaryText: summaryText,
+                folded: $folded,
                 summary: { signedSummary },
                 accessory: {
                     if sandbox.state.isBusy || sandbox.isRunningSelfTest {
@@ -67,7 +68,9 @@ struct SandboxCard: View {
     private var badge: (label: String, color: Color) {
         if sandbox.state == .ready {
             switch sandbox.protection {
-            case .verified: return ("Ready", .green)
+            case .verified:
+                // A failed security check is never hidden behind "Ready".
+                return sandbox.securityCheckFailed ? ("Check failed", .red) : ("Ready", .green)
             case .checking, .unknown: return ("Checking", .orange)
             case .notVerified: return ("Not verified", .red)
             }
@@ -82,16 +85,32 @@ struct SandboxCard: View {
         }
     }
 
+    /// The summary as text: "Signed \u{00B7} checked 14:05" (only when the
+    /// sandbox is verified), "Security check failed", or "Check failed" when
+    /// the sandbox stopped passing its signed health check.
+    private var summaryText: String? {
+        if sandbox.securityCheckFailed { return "Security check failed" }
+        if sandbox.showsSignedSeal, let checked = sandbox.lastSignedCheck {
+            return "Signed \u{00B7} " + ResearchSandboxController.checkedLabel(for: checked)
+        }
+        if sandbox.lastCheckFailure != nil { return "Check failed" }
+        return nil
+    }
+
     /// After the badge, also on the folded row: "Signed" with a checkmark and
-    /// the time of the last signed health check, or, if that check failed,
-    /// a plain "Check failed".
+    /// the time of the last signed health check (only while the sandbox is
+    /// verified), a red "Security check failed", or, if the signed health
+    /// check failed, a plain "Check failed".
     @ViewBuilder
     private var signedSummary: some View {
-        if sandbox.state == .ready, let checked = sandbox.lastSignedCheck {
+        if sandbox.securityCheckFailed {
+            Label("Security check failed", systemImage: "xmark.seal.fill")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.red)
+        } else if sandbox.showsSignedSeal, let checked = sandbox.lastSignedCheck {
             Label {
-                Text("Signed").font(.caption.weight(.semibold))
-                    + Text(" \u{00B7} ").font(.caption)
-                    + Text(ResearchSandboxController.checkedLabel(for: checked)).font(.caption)
+                Text("\(Text("Signed").fontWeight(.semibold)) \u{00B7} \(ResearchSandboxController.checkedLabel(for: checked))")
+                    .font(.caption)
             } icon: {
                 Image(systemName: "checkmark.seal.fill")
             }

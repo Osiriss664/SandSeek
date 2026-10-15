@@ -16,7 +16,6 @@ struct ResearchWorkspaceView: View {
     // restarts. The window also folds them on its own (see `applyFolding`).
     @AppStorage("ServerCardFolded") private var serverFolded = false
     @AppStorage("SandboxCardFolded") private var sandboxFolded = false
-    @State private var folding = ResearchCardFolding()
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -68,7 +67,9 @@ struct ResearchWorkspaceView: View {
 
     private func applyFolding() {
         let current = ResearchCardFolding.Folds(server: serverFolded, sandbox: sandboxFolded)
-        let next = folding.update(workspace.cardReadiness, folds: current)
+        // The memory of "folded once" lives in the workspace, so it survives
+        // switching to Reports or Settings and back.
+        let next = workspace.foldsAfterReadinessChange(current: current)
         guard next != current else { return }
         withAnimation(.easeOut(duration: 0.15)) {
             serverFolded = next.server
@@ -98,6 +99,12 @@ struct ResearchWorkspaceView: View {
                     Text(workspace.startEverythingNote ?? "Working\u{2026}")
                         .font(.callout)
                         .foregroundStyle(.secondary)
+                } else if let stopped = workspace.startEverythingStopNote {
+                    // Why it stopped, so a click never seems to do nothing.
+                    Label(stopped, systemImage: "exclamationmark.triangle.fill")
+                        .font(.callout)
+                        .foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 0)
             }
@@ -196,7 +203,7 @@ struct ResearchWorkspaceView: View {
 
     /// Why the Research button is off, in a few words.
     private var readinessHint: String {
-        if workspace.isStartingEverything { return workspace.startEverythingNote ?? "Starting\u{2026}" }
+        if workspace.isStartingEverything { return "Starting everything\u{2026}" }
         if let note = workspace.sandbox.restartNote { return note }
         if workspace.server.state != .ready || workspace.server.models.isEmpty {
             return "Connect a model server first."

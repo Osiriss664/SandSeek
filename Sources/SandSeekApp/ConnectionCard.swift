@@ -41,6 +41,8 @@ struct ConnectionCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
+            // The one security caveat about TUFF stays in view, folded or not.
+            if tuffInUse { tuffCaption }
             if !folded { details }
         }
         .cardStyle()
@@ -128,14 +130,25 @@ struct ConnectionCard: View {
     @ViewBuilder
     private var helpText: some View {
         HelpParagraph(text: ResearchServerController.memoryNote)
-        if server.serverType == .tuff {
-            HelpParagraph(text: "TUFF does not check which web page a request comes from. "
-                + "Quit the server when you are not using it.")
-        }
         if server.serverType == .llamacpp {
             HelpParagraph(text: ResearchServerController.keyNote)
         }
         HelpParagraph(text: server.startHint)
+    }
+
+    /// A TUFF server is in use: SandSeek started one, or the chosen type is
+    /// TUFF and it answers.
+    private var tuffInUse: Bool {
+        launch.owned?.type == .tuff || (server.serverType == .tuff && server.state == .ready)
+    }
+
+    private var tuffCaption: some View {
+        Label("TUFF does not check which web page a request comes from. "
+              + "Quit the server when you are not using it.",
+              systemImage: "exclamationmark.triangle")
+            .font(.caption)
+            .foregroundStyle(.orange)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     private var badge: (label: String, color: Color) {

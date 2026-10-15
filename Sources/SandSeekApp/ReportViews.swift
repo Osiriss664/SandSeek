@@ -205,7 +205,7 @@ struct ResearchReportView: View {
                     note = "Copied."
                 }
                 .disabled(report.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                .help("Copies the answer as plain text, without the sources.")
+                .help("Copies the answer as plain text.")
                 Button("Copy as Markdown") {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(report.markdown, forType: .string)

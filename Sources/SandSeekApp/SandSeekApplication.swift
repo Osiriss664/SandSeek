@@ -70,5 +70,9 @@ struct SandSeekMain: App {
             ReportWindowView(workspace: workspace, reportID: reportID.wrappedValue)
         }
         .defaultSize(width: 760, height: 720)
+        // No File > New / Cmd-N for it: that would open a Report window with no
+        // report. Reports open from the Reports list.
+        .commandsRemoved()
+        .commands { CommandGroup(replacing: .newItem) {} }
     }
 }

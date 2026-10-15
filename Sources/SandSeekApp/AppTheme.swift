@@ -59,11 +59,14 @@ struct FoldingCardHeader<Summary: View, Accessory: View>: View {
     /// What the card is about, for the screen reader: "Show model server details".
     let subject: String
     let badge: (label: String, color: Color)
+    /// What the summary says, as text, so the screen reader can say it too.
+    let summaryText: String?
     @Binding var folded: Bool
     let summary: Summary
     let accessory: Accessory
 
     init(icon: String, title: String, subject: String, badge: (label: String, color: Color),
+         summaryText: String? = nil,
          folded: Binding<Bool>,
          @ViewBuilder summary: () -> Summary,
          @ViewBuilder accessory: () -> Accessory) {
@@ -71,6 +74,7 @@ struct FoldingCardHeader<Summary: View, Accessory: View>: View {
         self.title = title
         self.subject = subject
         self.badge = badge
+        self.summaryText = summaryText
         _folded = folded
         self.summary = summary()
         self.accessory = accessory()
@@ -100,6 +104,8 @@ struct FoldingCardHeader<Summary: View, Accessory: View>: View {
             .buttonStyle(.plain)
             .help(folded ? "Show the details" : "Hide the details")
             .accessibilityLabel((folded ? "Show " : "Hide ") + subject + " details")
+            // The status is part of what a folded card says.
+            .accessibilityValue(summaryText.map { badge.label + ", " + $0 } ?? badge.label)
             accessory
         }
     }

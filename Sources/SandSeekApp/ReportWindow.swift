@@ -24,7 +24,9 @@ struct ReportWindowView: View {
                             proxy: proxy)
                             .cardStyle()
                     } else {
-                        Text("This report is no longer there. It may have been moved to the Trash.")
+                        Text(reportID == nil
+                             ? "No report chosen. Open one from the Reports list."
+                             : "This report is no longer there. It may have been moved to the Trash.")
                             .font(.callout)
                             .foregroundStyle(.secondary)
                             .cardStyle()

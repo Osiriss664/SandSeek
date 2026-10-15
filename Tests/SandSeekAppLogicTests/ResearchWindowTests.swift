@@ -65,6 +65,28 @@ import Testing
 
 // MARK: - Test rig
 
+/// Holds the sandbox script's `start` and the firewall look (`nft`) while the
+/// matching flag is set, so a test can look at the moment in between.
+private final class GatedRunner: ResearchProcessRunning, @unchecked Sendable {
+    let inner: FakeProcessRunner
+    let holdStart = LockedFlag()
+    let holdFirewallLook = LockedFlag()
+
+    init(_ inner: FakeProcessRunner) { self.inner = inner }
+
+    func run(executable: URL, arguments: [String], environment: [String: String],
+             timeout: TimeInterval) async throws -> ResearchProcessResult {
+        if arguments.last == "start" {
+            while holdStart.value { try await Task.sleep(for: .milliseconds(10)) }
+        }
+        if arguments.contains("nft") {
+            while holdFirewallLook.value { try await Task.sleep(for: .milliseconds(10)) }
+        }
+        return try await inner.run(executable: executable, arguments: arguments,
+                                   environment: environment, timeout: timeout)
+    }
+}
+
 private final class FakeClock: @unchecked Sendable {
     private let lock = NSLock()
     private var current: Date
@@ -84,6 +106,7 @@ private final class FakeClock: @unchecked Sendable {
     let launch: ResearchServerLaunchController
     let launcher: FakeServerLauncher
     let runner: FakeProcessRunner
+    let gate: GatedRunner
     let serverServices: FakeResearchServices
     let sandboxServices: FakeResearchServices
 
@@ -99,6 +122,7 @@ private final class FakeClock: @unchecked Sendable {
     /// `sandboxStartFails`: the `start` script fails.
     static func make(serverUp: Bool = true, program: Bool = false, startsServer: Bool = true,
                      sandboxUp: Bool = false, sandboxStartFails: Bool = false,
+                     selfTestFails: Bool = false, firewallMissing: Bool = false,
                      timing: ResearchServerLaunchController.Timing = .init(
                         poll: .milliseconds(5), tuffReady: .milliseconds(100),
                         stopGrace: .milliseconds(100), killGrace: .milliseconds(100))
@@ -122,20 +146,28 @@ private final class FakeClock: @unchecked Sendable {
 
         let sandboxServices = FakeResearchServices(sandboxHealthy: sandboxUp)
         let runner = FakeProcessRunner { command in
+            if firewallMissing, command.contains("nft") {
+                return ResearchProcessResult(status: 1, output: "")
+            }
             guard command.first == "bash" else { return FakeProcessRunner.healthy(command) }
             switch command.last {
             case "start":
                 if sandboxStartFails { return ResearchProcessResult(status: 1, output: "boom") }
                 sandboxServices.setSandboxHealthy(true)
             case "selftest":
+                if selfTestFails {
+                    return ResearchProcessResult(
+                        status: 1, output: "A public page must still work:\n  FAIL  not fetched\n")
+                }
                 return ResearchProcessResult(
                     status: 0, output: "A public page must still work:\n  ok    fetched\nall sandbox checks passed\n")
             default: break
             }
             return ResearchProcessResult(status: 0, output: "")
         }
+        let gate = GatedRunner(runner)
         let sandbox = ResearchSandboxController(
-            runner: runner, transport: sandboxServices, defaults: MemorySettings(),
+            runner: gate, transport: sandboxServices, defaults: MemorySettings(),
             environment: [:], resources: try testResources(),
             stateDirectory: temporaryDirectory(), secretFile: TestSandboxSecret.file)
 
@@ -147,7 +179,7 @@ private final class FakeClock: @unchecked Sendable {
                 sandboxSecretFile: TestSandboxSecret.file),
             presets: ResearchPresetStore(defaults: MemorySettings()), launch: launch)
         return Rig(workspace: workspace, server: server, sandbox: sandbox, launch: launch,
-                   launcher: launcher, runner: runner, serverServices: serverServices,
+                   launcher: launcher, runner: runner, gate: gate, serverServices: serverServices,
                    sandboxServices: sandboxServices)
     }
 }
@@ -277,15 +309,82 @@ private final class FakeClock: @unchecked Sendable {
 
     @Test func aSandboxStartedMeanwhileIsWaitedForNotStartedAgain() async throws {
         let rig = try await Rig.make(serverUp: true)
-        // The Start Sandbox button was clicked a moment before.
+        // The Start Sandbox button was clicked a moment before, and its VM is
+        // not up yet.
+        rig.gate.holdStart.value = true
         let starting = Task { await rig.sandbox.start() }
         await waitUntil { rig.sandbox.state.isBusy }
-        await rig.workspace.startEverything()
+        #expect(rig.sandbox.state.isBusy)
+
+        let everything = Task { await rig.workspace.startEverything() }
+        await waitUntil { rig.workspace.isStartingEverything }
+        // It really waits: no second start, and it has not finished.
+        try await Task.sleep(for: .milliseconds(500))
+        #expect(rig.workspace.isStartingEverything)
+        #expect(rig.sandbox.state.isBusy)
+        #expect(!rig.scripts.contains("start"))
+
+        rig.gate.holdStart.value = false
         await starting.value
+        await everything.value
 
         #expect(rig.scripts.filter { $0 == "start" }.count == 1)
         #expect(rig.sandbox.state == .ready)
         #expect(rig.sandbox.selfTest?.passed == true)
+        #expect(rig.workspace.startEverythingStopNote == nil)
+    }
+
+    @Test func aProtectionCheckUnderWayIsWaitedForNotSkipped() async throws {
+        // The periodic look found the sandbox and is checking its firewall.
+        let rig = try await Rig.make(serverUp: true, sandboxUp: true)
+        rig.gate.holdFirewallLook.value = true
+        let looking = Task { await rig.sandbox.refresh() }
+        await waitUntil { rig.sandbox.protection == .checking }
+        #expect(rig.sandbox.protection == .checking)
+
+        let everything = Task { await rig.workspace.startEverything() }
+        await waitUntil { rig.workspace.isStartingEverything }
+        try await Task.sleep(for: .milliseconds(500))
+        #expect(rig.workspace.isStartingEverything)
+        #expect(rig.sandbox.selfTest == nil)
+
+        rig.gate.holdFirewallLook.value = false
+        await looking.value
+        await everything.value
+
+        #expect(rig.sandbox.protection == .verified)
+        #expect(rig.sandbox.selfTest?.passed == true)
+        #expect(rig.workspace.startEverythingStopNote == nil)
+        // Found by the look, not started: only the security check ran a script.
+        #expect(rig.scripts == ["selftest"])
+    }
+
+    @Test func everyStopSaysWhy() async throws {
+        let noServer = try await Rig.make(serverUp: false)
+        await noServer.workspace.startEverything()
+        #expect(noServer.workspace.startEverythingStopNote?.contains("model server") == true)
+
+        let failedStart = try await Rig.make(serverUp: false, program: true, startsServer: false)
+        await failedStart.workspace.startEverything()
+        #expect(failedStart.workspace.startEverythingStopNote?.contains("did not start") == true)
+
+        let noSandbox = try await Rig.make(serverUp: true, sandboxStartFails: true)
+        await noSandbox.workspace.startEverything()
+        #expect(noSandbox.workspace.startEverythingStopNote?.contains("sandbox") == true)
+
+        let unverified = try await Rig.make(serverUp: true, firewallMissing: true)
+        await unverified.workspace.startEverything()
+        #expect(unverified.workspace.startEverythingStopNote?.contains("not verified") == true)
+        #expect(!unverified.scripts.contains("selftest"))
+
+        let unsafe = try await Rig.make(serverUp: true, selfTestFails: true)
+        await unsafe.workspace.startEverything()
+        #expect(unsafe.workspace.startEverythingStopNote?.contains("security check") == true)
+
+        // A run that gets through clears the note, and so does a new run.
+        let fine = try await Rig.make(serverUp: true)
+        await fine.workspace.startEverything()
+        #expect(fine.workspace.startEverythingStopNote == nil)
     }
 
     @Test func theButtonShowsOnlyWhileSomethingIsNotReady() async throws {
@@ -337,10 +436,57 @@ private final class FakeClock: @unchecked Sendable {
     }
 }
 
+@Suite @MainActor struct ResearchFailedCheckTests {
+    @Test func aFailedSecurityCheckOpensTheCardAndTakesTheSeal() async throws {
+        let rig = try await Rig.make(serverUp: true, selfTestFails: true)
+        await rig.workspace.startEverything()
+
+        #expect(rig.sandbox.state == .ready)
+        #expect(rig.sandbox.protection == .verified)
+        #expect(rig.sandbox.securityCheckFailed)
+        #expect(!rig.sandbox.showsSignedSeal)
+        #expect(rig.workspace.cardReadiness.sandbox == false)
+
+        // Folded cards open for it, and a passing check closes the case.
+        let folded = ResearchCardFolding.Folds(server: true, sandbox: true)
+        #expect(rig.workspace.foldsAfterReadinessChange(current: folded).sandbox == false)
+    }
+
+    @Test func aPassingCheckShowsTheSealOnlyWhileVerified() async throws {
+        let rig = try await Rig.make(serverUp: true)
+        await rig.sandbox.start()
+        #expect(rig.sandbox.showsSignedSeal)
+        #expect(!rig.sandbox.securityCheckFailed)
+        await rig.sandbox.stop()
+        #expect(!rig.sandbox.showsSignedSeal)
+    }
+
+    @Test func noSealWhileTheProtectionIsNotVerified() async throws {
+        let rig = try await Rig.make(serverUp: true, firewallMissing: true)
+        await rig.sandbox.start()
+        #expect(rig.sandbox.state == .ready)
+        #expect(rig.sandbox.lastSignedCheck != nil)
+        #expect(!rig.sandbox.showsSignedSeal)
+    }
+
+    @Test func foldingMemoryLivesInTheWorkspace() async throws {
+        let rig = try await Rig.make(serverUp: true)
+        await rig.sandbox.start()
+        let open = ResearchCardFolding.Folds(server: false, sandbox: false)
+        let folded = rig.workspace.foldsAfterReadinessChange(current: open)
+        #expect(folded == ResearchCardFolding.Folds(server: true, sandbox: true))
+
+        // The person opens the sandbox card; leaving the screen and coming
+        // back asks again with the same readiness and must not fold it.
+        let opened = ResearchCardFolding.Folds(server: true, sandbox: false)
+        #expect(rig.workspace.foldsAfterReadinessChange(current: opened) == opened)
+    }
+}
+
 // MARK: - The sandbox's last signed check
 
 @Suite @MainActor struct ResearchSandboxCheckTimeTests {
-    private func sandbox(_ services: FakeResearchServices, clock: FakeClock) throws
+    private func makeSandbox(_ services: FakeResearchServices, clock: FakeClock) throws
         -> ResearchSandboxController {
         ResearchSandboxController(
             runner: FakeProcessRunner(), transport: services, defaults: MemorySettings(),
@@ -351,7 +497,7 @@ private final class FakeClock: @unchecked Sendable {
 
     @Test func aPassingSignedCheckIsTimestamped() async throws {
         let clock = FakeClock(Date(timeIntervalSince1970: 1_700_000_000))
-        let sandbox = try sandbox(FakeResearchServices(), clock: clock)
+        let sandbox = try makeSandbox(FakeResearchServices(), clock: clock)
         #expect(sandbox.lastSignedCheck == nil)
 
         await sandbox.refresh()
@@ -367,7 +513,7 @@ private final class FakeClock: @unchecked Sendable {
     @Test func aFailedCheckClearsTheTimeAndSaysSo() async throws {
         let clock = FakeClock(Date(timeIntervalSince1970: 1_700_000_000))
         let services = FakeResearchServices()
-        let sandbox = try sandbox(services, clock: clock)
+        let sandbox = try makeSandbox(services, clock: clock)
         await sandbox.refresh()
         #expect(sandbox.state == .ready)
 
@@ -376,7 +522,7 @@ private final class FakeClock: @unchecked Sendable {
         await sandbox.refresh()
         #expect(sandbox.state == .off)
         #expect(sandbox.lastSignedCheck == nil)
-        #expect(sandbox.lastCheckFailure?.contains("stopped passing its signed check") == true)
+        #expect(sandbox.lastCheckFailure?.isEmpty == false)
 
         // Back again: the note goes and the time is the new one.
         services.setSandboxHealthy(true)
@@ -389,7 +535,7 @@ private final class FakeClock: @unchecked Sendable {
 
     @Test func aSandboxThatNeverRanHasNoTimeAndNoFailure() async throws {
         let clock = FakeClock(Date(timeIntervalSince1970: 1_700_000_000))
-        let sandbox = try sandbox(FakeResearchServices(sandboxHealthy: false), clock: clock)
+        let sandbox = try makeSandbox(FakeResearchServices(sandboxHealthy: false), clock: clock)
         await sandbox.refresh()
         #expect(sandbox.state == .off)
         #expect(sandbox.lastSignedCheck == nil)
@@ -398,7 +544,7 @@ private final class FakeClock: @unchecked Sendable {
 
     @Test func startingTheSandboxTimestampsItsFirstCheck() async throws {
         let clock = FakeClock(Date(timeIntervalSince1970: 1_700_000_000))
-        let sandbox = try sandbox(FakeResearchServices(), clock: clock)
+        let sandbox = try makeSandbox(FakeResearchServices(), clock: clock)
         await sandbox.start()
         #expect(sandbox.state == .ready)
         #expect(sandbox.lastSignedCheck == Date(timeIntervalSince1970: 1_700_000_000))
@@ -408,11 +554,23 @@ private final class FakeClock: @unchecked Sendable {
 
     @Test func theTimeIsShownAsHoursAndMinutes() throws {
         let utc = try #require(TimeZone(identifier: "UTC"))
+        let british = Locale(identifier: "en_GB")
         #expect(ResearchSandboxController.checkedLabel(
-            for: Date(timeIntervalSince1970: 1_700_000_000), timeZone: utc) == "checked 22:13")
+            for: Date(timeIntervalSince1970: 1_700_000_000), timeZone: utc,
+            locale: british) == "checked 22:13")
         #expect(ResearchSandboxController.checkedLabel(
             for: Date(timeIntervalSince1970: 1_700_000_000 + 11 * 3_600 + 3 * 60),
-            timeZone: utc) == "checked 09:16")
+            timeZone: utc, locale: british) == "checked 09:16")
+    }
+
+    @Test func theFailureTextSaysWhatHappenedInOneSentence() {
+        #expect(ResearchSandboxController.checkFailureText(nil) == "The sandbox stopped answering.")
+        #expect(ResearchSandboxController.checkFailureText(.sandboxUnavailable("refused"))
+            == "The sandbox stopped answering.")
+        #expect(ResearchSandboxController.checkFailureText(.sandboxNotSigned(address: "127.0.0.1:9100"))
+            .contains("without SandSeek"))
+        #expect(ResearchSandboxController.checkFailureText(.sandboxWrongVersion)
+            .hasPrefix("The sandbox check failed."))
     }
 }
 
