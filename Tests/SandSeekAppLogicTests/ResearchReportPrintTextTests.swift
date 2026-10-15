@@ -83,6 +83,6 @@ import Testing
         let text = ResearchReportPrintText.plainText(for: saved)
         #expect(text.contains("The research ran out of steps, so this answer may be incomplete."))
         #expect(text.contains("Only one search was run"))
-        for warning in saved.answerWarnings { #expect(text.contains(warning)) }
+        for warning in saved.printedAnswerWarnings { #expect(text.contains(warning)) }
     }
 }

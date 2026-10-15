@@ -150,20 +150,21 @@ import Testing
         #expect(report.markdown.contains("- and 5 more"))
     }
 
-    @Test func printTextHasBothListsBelowTheSummary() {
+    @Test func printTextLeavesBothListsOut() {
         // Not one of the report's sources (example.com/a is source 1).
         let steps = [
             step(0, .reading, "https://example.com/unread"),
             step(1, .failed, "timed out"),
         ]
         let figures = [ResearchUnverifiedFigure(figure: "280", sources: [1])]
-        let text = ResearchReportPrintText.plainText(for: saved(steps: steps, figures: figures))
-        #expect(text.contains("Figure check (1)"))
-        #expect(text.contains("\u{2022} 280 \u{2014} not on [1]"))
-        #expect(text.contains("Pages that could not be read (1)"))
-        #expect(text.contains("\u{2022} https://example.com/unread \u{2014} timed out"))
-        let plain = ResearchReportPrintText.plainText(for: saved())
-        #expect(!plain.contains("Figure check"))
-        #expect(!plain.contains("could not be read"))
+        let report = saved(steps: steps, figures: figures)
+        let text = ResearchReportPrintText.plainText(for: report)
+        #expect(!text.contains("Figure check ("))
+        #expect(!text.contains("not on [1]"))
+        #expect(!text.contains("could not be read"))
+        #expect(!text.contains("example.com/unread"))
+        #expect(text.contains("The app and the saved report list them under Figure check."))
+        #expect(!text.contains("listed under Figure check below"))
+        #expect(report.answerWarnings.contains { $0.hasSuffix("They are listed under Figure check below.") })
     }
 }

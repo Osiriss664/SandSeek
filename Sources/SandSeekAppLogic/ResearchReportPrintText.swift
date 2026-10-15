@@ -4,9 +4,10 @@ import SandSeekCore
 
 /// The text of a report as it is printed or exported to PDF: the question as
 /// the title, the date and the model, the answer and the numbered sources with
-/// their full addresses. Everything is plain text. A web address is written
-/// out for a reader of the paper and is never a link, and neither is anything
-/// in the answer.
+/// their full addresses. The figure check and the pages that could not be read
+/// are left out; the app and the saved report list them. Everything is plain
+/// text. A web address is written out for a reader of the paper and is never a
+/// link, and neither is anything in the answer.
 public enum ResearchReportPrintText {
     /// The report as text without formatting.
     public static func plainText(for report: SavedResearchReport) -> String {
@@ -89,32 +90,9 @@ public enum ResearchReportPrintText {
             parts.append(Section(style: .answer, text: answer + "\n"))
         }
         let cautions = [report.emptyAnswerNotice].compactMap { $0 }
-            + report.answerWarnings + [report.singleSearchNotice].compactMap { $0 }
+            + report.printedAnswerWarnings + [report.singleSearchNotice].compactMap { $0 }
         for caution in cautions {
             parts.append(Section(style: .note, text: "Note: " + caution + "\n"))
-        }
-        if !report.figureCheckGroups.isEmpty {
-            parts.append(Section(style: .heading,
-                                 text: "Figure check (\(report.unverifiedFigureCount))\n"))
-            for group in report.figureCheckGroups {
-                parts.append(Section(style: .note,
-                                     text: ResearchText.oneLine(group.intro, limit: 400) + "\n"))
-                for line in group.lines {
-                    parts.append(Section(style: .source,
-                                         text: "\u{2022} " + ResearchText.oneLine(line, limit: 400) + "\n"))
-                }
-            }
-            if report.figureCheckMore > 0 {
-                parts.append(Section(style: .source,
-                                     text: "\u{2022} and \(report.figureCheckMore) more\n"))
-            }
-        }
-        let unreadable = report.unreadablePages
-        if !unreadable.isEmpty {
-            parts.append(Section(style: .heading, text: "Pages that could not be read (\(unreadable.count))\n"))
-            for page in unreadable {
-                parts.append(Section(style: .source, text: "\u{2022} " + page.line + "\n"))
-            }
         }
         if !report.sources.isEmpty {
             parts.append(Section(style: .heading, text: "Sources\n"))

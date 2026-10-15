@@ -11,14 +11,20 @@ extension SavedResearchReport {
     }
 
     /// Every caution about the answer, in the order the screen shows them.
-    public var answerWarnings: [String] {
+    public var answerWarnings: [String] { warnings(figureListBelow: true) }
+
+    /// The same cautions for Print and the PDF, which leave out the figure
+    /// check list, so the note points to the app and the saved report instead.
+    public var printedAnswerWarnings: [String] { warnings(figureListBelow: false) }
+
+    private func warnings(figureListBelow: Bool) -> [String] {
         var result: [String] = []
         if !unknownCitations.isEmpty {
             let list = unknownCitations.map { "[\($0)]" }.joined(separator: ", ")
             result.append("The answer cites \(list), which is not a page the research read.")
         }
         if unverifiedFigureCount > 0 {
-            result.append("\(unverifiedFigureCount) \(unverifiedFigureCount == 1 ? "point" : "points") (figures, dates or names) could not be matched to the pages they cite. They are listed under Figure check below.")
+            result.append("\(unverifiedFigureCount) \(unverifiedFigureCount == 1 ? "point" : "points") (figures, dates or names) could not be matched to the pages they cite. \(figureListBelow ? "They are listed under Figure check below." : "The app and the saved report list them under Figure check.")")
         }
         if budgetExhausted {
             result.append("The research ran out of steps, so this answer may be incomplete.")
