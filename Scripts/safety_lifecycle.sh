@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SandSeek's safety test, the parts that start and stop the sandbox: a fake
 # sandbox on the port, a crash of the lock holder, a stop, and a second starter
-# (TUFF's parts D and F, without clicks).
+# (modelled on TUFF's safety test, without clicks).
 #
 #   Scripts/safety_lifecycle.sh [--running]
 #

@@ -12,7 +12,7 @@ install it, see [INSTALL.md](INSTALL.md).
 ```
 Mac
   model server        127.0.0.1:8080 (TUFF) or :8081 (llama.cpp)
-                      runs the model on the GPU; started by you
+                      runs the model on the GPU; started by you or by SandSeek
   SandSeek            the app, or the `sandseek` command: the loop that asks
                       the model, runs its tool calls and writes the report
       |
@@ -160,7 +160,9 @@ keeps the first answer.
   the pages the same sentence cites do not back up: numbers not on the cited
   pages, numbers on a page but not next to what the sentence names, and names a
   cited page does not have. It is a hint, not proof: a page can state a figure
-  in words or in another unit.
+  in words or in another unit. The app lists them under **Figure check (N)**
+  below the answer, folded until you click it; the saved Markdown has the same
+  list.
 
 **Time limits.** A step with reasoning on that takes longer than the thinking
 limit (3 minutes by default) is cancelled and asked again without reasoning,
@@ -256,7 +258,8 @@ On a Mac with 16 GB, run only one model server with a loaded model at a time.
 
 Every finished question is saved as Markdown and JSON in
 `~/Library/Application Support/SandSeek/Reports`. A report holds the question,
-the answer with numbered sources, the searches, the figure check and, if the
+the answer with numbered sources, the searches, the figure check, the pages that
+could not be read (with the reason) and, if the
 server sent it, the model's thinking. Reports load nothing when opened.
 Reports saved by TUFF's research screen are copied once each into this folder
 (the originals stay).

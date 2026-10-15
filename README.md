@@ -18,7 +18,7 @@ Swift package. Built, tested and tried by hand on a Mac with macOS 27, TUFF
 8.3.1 and Qwen3.6 35B (11 October 2026); Start server was tried with TUFF 8.3.11
 and llama.cpp.
 
-![The SandSeek app: the question box on top, then the folded Model server and Web sandbox cards showing Connected, Ready and Signed](docs/assets/sandseek-app.png)
+![An earlier layout of the SandSeek window: the Model server and Web sandbox cards above the question box, with the badges Not running and Off](docs/assets/sandseek-app.png)
 
 ## How it works, in one minute
 
@@ -117,7 +117,7 @@ above all test reports.
     open build/SandSeek.app
 
 The script builds `SandSeekApp` in release mode, assembles `SandSeek.app`
-(bundle id `io.github.osiriss664.sandseek`, version 0.1.0, macOS 26 or newer),
+(bundle id `io.github.osiriss664.sandseek`, the version `sandseek --version` prints, macOS 26 or newer),
 copies the sandbox files into `Contents/Resources/sandbox` and signs the bundle
 ad hoc. There is no Sparkle update and no notarization yet. `swift run
 SandSeekApp` also opens the window, but a bare executable has no sandbox
@@ -188,9 +188,9 @@ and a model server SandSeek started.
   auto-open, nudges and rewrite on, and thinking left to the server (no
   setting is sent, like the `sandseek` command; Settings can turn it on or
   off). Settings edits the numbers within the ranges the command accepts, and
-  stores only what differs from the defaults. The Thorough values are not
-  tested yet; they are measured in step 2c (the mock-up said 10 pages; 6 is
-  what the top-up that opens search results can reach).
+  stores only what differs from the defaults. The Thorough values are a
+  first guess and will be adjusted after measuring (6 pages is what the loop's
+  top-up can reach).
 - **Safety rules** (shown in Settings, not editable): two tools only, a
   firewall in the VM, no root in the sandbox, a check before every question,
   and links open only after you confirm the full address.
@@ -206,15 +206,20 @@ The app does this itself. By hand:
 `build` is needed once. `start` publishes the sandbox on a free port of
 127.0.0.1 and records it (and the VM's name) beside the secret; `sandseek` and
 the other scripts find it there. Only one SandSeek can run the sandbox at a
-time: a second `start` says so and changes nothing.
+time: a second `start` says so and changes nothing. VMs and files left by a
+run that did not end normally are removed by the next `start`.
 `selftest` is optional and checks the VM's isolation.
 
 ## Run
 
     .build/release/sandseek --server http://127.0.0.1:8080 "your question"
 
-`sandseek --help` lists all options. Tests: `swift test`, and for the sandbox
-server `python3 -m unittest Sandbox/test_server.py`.
+`sandseek --help` lists all options. Tests: `swift test`, for the sandbox
+server `python3 -m unittest Sandbox/test_server.py`, and for the scripts
+`python3 -m unittest discover -s Scripts -p 'test_*.py'`.
+`Scripts/full_test.sh` runs every check that needs no clicks (build, tests,
+packaging, sandbox, self-test, one question); `--help` lists its options,
+`--safety` adds the safety test ([docs/SAFETY_TEST.md](docs/SAFETY_TEST.md)).
 
 Security checks (see [docs/SECURITY.md](docs/SECURITY.md)):
 
@@ -256,7 +261,7 @@ To record real streams from a running server for test fixtures, use
   display names.
 - The Quick answer / Thorough switch is labelled in English like the rest of
   the window.
-- No app icon, no Sparkle updates, no notarization.
+- No Sparkle updates and no notarization yet.
 
 ## Security in short
 

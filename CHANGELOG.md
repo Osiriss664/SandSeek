@@ -88,6 +88,9 @@ SandSeek runs only Apple's `container`.
   that it is signed by Apple (not just by anyone), and that it is version 1.5.0
   or newer. If not, nothing is started and the sandbox card says why in plain
   words. **Apple container 1.5.0 or newer is now required.**
+- The app checks the `container` tool again before a command if the file at its
+  path is no longer the one it verified (file number, size and change time):
+  the Apple signature and the version are then checked anew.
 - `container`, `codesign` and the sandbox script run with a clean, fixed
   environment instead of a filtered copy of yours: only `HOME`, `USER`,
   `LOGNAME`, `TMPDIR`, a fixed `PATH` and language, and the settings the script
@@ -96,7 +99,7 @@ SandSeek runs only Apple's `container`.
 - A `container` command that hangs is ended (`SIGTERM`, then `SIGKILL` three
   seconds later), and only the last 1 MiB of a command's output is kept.
 - Calls to the sandbox have time limits of their own: 10 seconds for the health
-  check, 60 for a search and 90 for a page, instead of the transport's half hour.
+  check, 100 for a search and 140 for a page, instead of the transport's half hour.
 
 Fewer ways out of the sandbox.
 
@@ -138,8 +141,9 @@ A better window.
   saying where to look. It waits for a start or check that is already under
   way, never starts a second server or sandbox, and does not start a server
   you just stopped.
-- **Stop everything** stops the question, the sandbox (also one you started
-  yourself), and the model server if SandSeek started it. A server you started
+- **Stop everything** stops the question, the sandbox this app started (a
+  sandbox another SandSeek or `research_sandbox.sh start` holds is left
+  running), and the model server if SandSeek started it. A server you started
   yourself keeps running. The server and the sandbox are stopped together, and
   the start and stop buttons wait while it works. SandSeek writes when it
   starts and stops things to the system log (subsystem
@@ -165,13 +169,25 @@ A better window.
   only while the sandbox is verified. It says so in plain words when that
   check fails. A failed security check opens the card and shows "Check
   failed" instead of "Ready".
-- The answer view, the report window, the saved report, Print and Export as PDF
-  now list what the orange line only counted: the figure check (each figure,
-  date or name that was not on the page it cites) and the pages that could not
-  be read, with the reason. On screen each list is folded until you click it,
-  and nothing shows when there is nothing to list.
+- The answer view, the report window and the saved report now list the figure
+  check (each figure, date or name the cited page does not back up; the orange
+  line counted them) and the pages that could not be read, with the reason,
+  under **Figure check (N)** and **Pages that could not be read (N)**. On
+  screen each list is folded until you click it, and nothing shows when there
+  is nothing to list.
 
-## 0.1.0 (unreleased)
+### Tests
+
+- `Scripts/full_test.sh` runs every check that needs no clicks (build, tests,
+  packaging, sandbox, self-test, one question). Options: `--quick`,
+  `--no-sandbox`, `--thorough`, `--model`, `--take-over-sandbox`, `--safety`
+  and `--start-server`.
+- `Scripts/safety_probe.sh` and `Scripts/safety_lifecycle.sh` are the safety
+  test, described in `docs/SAFETY_TEST.md`.
+- Python tests for the scripts in `Scripts/`:
+  `python3 -m unittest discover -s Scripts -p 'test_*.py'`.
+
+## 0.1.0 (11 October 2026)
 
 First release. SandSeek lets a local model research the web from a sandbox
 on your Mac.

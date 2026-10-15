@@ -1,7 +1,7 @@
 # Installing SandSeek
 
-SandSeek is built from source on your Mac. There is no installer and no
-download of a finished app yet. This page covers what you need, how to build and
+You can download the app from the release page (it is not notarized; see the
+README) or build it from source on your Mac. This page covers what you need, how to build and
 package the app, how to start a model server safely, the first run, where
 things are stored and how to remove everything again.
 
@@ -51,7 +51,11 @@ From the folder of your SandSeek checkout:
 swift build -c release
 swift test
 python3 -m unittest Sandbox/test_server.py
+python3 -m unittest discover -s Scripts -p 'test_*.py'
 ```
+
+`Scripts/full_test.sh` runs every check that needs no clicks; `--help` lists
+its options.
 
 The first build fetches nothing from the internet: SandSeek uses only Apple's
 own libraries. `swift build` produces the `sandseek` command in
@@ -210,12 +214,13 @@ note if it could not tell.
 
 1. Open `SandSeek.app`. The window has a sidebar (Research, Reports, Settings).
    The Research screen has the question box on top, then a **Model server**
-   card and a **Sandbox** card. The arrow by a card's title folds it; the (i)
+   card and a **Web sandbox** card. The arrow by a card's title folds it; the (i)
    button has the longer explanations. **Start everything** does steps 2 and 3
    for you (it starts the model server only if you chose a program for it, see
    above), then runs the security check. **Stop everything** stops the
-   question and the sandbox (also one you started yourself), and the model
-   server only if SandSeek started it.
+   question, the sandbox this app started, and the model server only if
+   SandSeek started it. A sandbox started from Terminal is left running; stop
+   it with `Scripts/research_sandbox.sh stop`.
 2. On the model server card, choose TUFF or llama.cpp, check the address, and
    press **Check**. It should say **Connected** and list the models.
 3. On the sandbox card, press **Start Sandbox**. The first start builds the
@@ -228,6 +233,10 @@ note if it could not tell.
    **Stop** ends the question. A saved report opened during a run gets its own
    window. Sources are cards; **Copy answer** copies the answer as plain text,
    and a report can be printed (Command-P) or exported with **Export as PDF…**.
+   Under the answer, **Figure check (N)** lists figures, dates or names the
+   cited pages do not back up, and **Pages that could not be read (N)** lists
+   the pages that failed, with the reason; click a list to open it. Both are
+   also in the report window and the saved Markdown, not in Print or the PDF.
 
 From Terminal, with the sandbox started (`Scripts/research_sandbox.sh build`
 once, then `start`) and a server running:
@@ -252,7 +261,8 @@ rounds the model may take (default 8). `sandseek --help` lists all options.
 | The log of the model server SandSeek started | `~/Library/Application Support/SandSeek/Logs/model-server.log` |
 | The app's settings (server choice, addresses, the chosen server program, model and models folder, presets, last question) | the app's preferences file in `~/Library/Preferences` (its name contains `sandseek`) |
 | The sandbox image and VM | Apple `container`: image `sandseek-sandbox:latest`, VM `sandseek-sandbox-<random>` (a new one at each start; `container list | grep sandseek`) |
-| The sandbox's port, VM name and lock | `port`, `vm-name` and `lock` in `~/Library/Application Support/SandSeek/sandbox`, beside the secret |
+| The sandbox's secret, port, VM name, lock and the Mac's blocked addresses | `secret`, `port`, `vm-name`, `lock`, `blocked-addresses` in `~/Library/Application Support/SandSeek/sandbox` (removed by Stop) |
+| A note that the app started the sandbox | `~/Library/Application Support/SandSeek/State/sandbox-started-by-app` |
 | The built app and command | `build/SandSeek.app`, `.build/release/sandseek` in your checkout |
 
 Reports from TUFF's research screen (in `~/Library/Application Support/TUFF/Research
@@ -291,7 +301,7 @@ them with a command**, so you can still get them back.
    you want to keep them, copy that folder somewhere else first. Then, in
    Finder, choose Go > Go to Folder, open `~/Library/Application Support` and
    move the `SandSeek` folder to the Trash. It holds the reports, the key
-   file and the model server's log; move that folder only when you no longer need any of them. A llama.cpp
+   file, the model server's log and the sandbox folder; move that folder only when you no longer need any of them. A llama.cpp
    server started with that key file will not start again without it.
 5. In `~/Library/Preferences`, move the preferences file whose name contains
    `sandseek` to the Trash.

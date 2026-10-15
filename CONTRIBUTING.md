@@ -11,14 +11,19 @@ and careful changes are all welcome.
 
 ## Setting up
 
-You need an Apple silicon Mac with macOS 26 or newer, Apple `container` and a
-Swift 6.2 toolchain. [docs/INSTALL.md](docs/INSTALL.md) has the details.
+You need an Apple silicon Mac with macOS 26 or newer, Apple `container` (1.5.0 or
+newer, at `/usr/local/bin/container`) and a Swift 6.2 toolchain. [docs/INSTALL.md](docs/INSTALL.md) has the details.
 
 ```
 swift build
 swift test
 python3 -m unittest Sandbox/test_server.py
+python3 -m unittest discover -s Scripts -p 'test_*.py'
+Scripts/full_test.sh
 ```
+
+`Scripts/full_test.sh` runs every check that needs no clicks. For a change to
+the sandbox, add `--safety`.
 
 The sandbox tests run without the VM. Tests that need a real sandbox or a
 model server are described in [docs/SECURITY.md](docs/SECURITY.md).

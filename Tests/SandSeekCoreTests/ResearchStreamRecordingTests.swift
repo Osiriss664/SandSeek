@@ -3,7 +3,7 @@ import Testing
 @testable import SandSeekCore
 
 // Real recordings of TUFF 8.3.1 (Tests/Fixtures/streams/*.sse, recorded with
-// Scripts/record_stream.py on the Mac, Abschnitt 2a), run through the same
+// Scripts/record_stream.py on the Mac), run through the same
 // code the client uses: the byte splitter (`SSELineBuffer`), the assembler
 // (`ResearchStreamAssembler`) and `ResearchChatClient.complete`. The files
 // are byte for byte what the server wrote: LF line ends, `: ping` comments,

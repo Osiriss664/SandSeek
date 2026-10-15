@@ -13,6 +13,12 @@ Scripts/safety_probe.sh              # only the probe, against a sandbox that is
 Scripts/safety_lifecycle.sh          # only the fake sandbox and lifecycle parts (starts its own sandbox)
 ```
 
+Stop the app's sandbox first, or pass `--take-over-sandbox` to `full_test.sh`.
+`safety_lifecycle.sh` refuses (exit 2) when any sandbox already runs; it starts
+and stops its own. `Scripts/full_test.sh --help` lists its other options. The
+test scripts fall back to `container` on PATH if `/usr/local/bin/container` is
+missing (the app never does).
+
 Nothing asks for input, a password or a click. `SKIP_PORT_SCAN=1` skips the scan
 of every port of the Mac, which is the longest part. `SKIP_FAKE_SANDBOX=1` and
 `SKIP_LIFECYCLE=1` skip the parts of `safety_lifecycle.sh`. A full run takes
@@ -80,8 +86,9 @@ no lock holder and nothing on the old port.
   address, a VPN) is not in the blocked sets until the next start. The probe
   reports it as a FAIL; stop and start the sandbox and run it again. The bridge
   address the Mac gets while the VM runs is private and already refused.
-- A host on your network with a global IPv6 address is reachable if the VM has
-  IPv6; the probe says whether it does.
+- A host on your network with a global IPv6 address is reachable if the VM has a
+  global IPv6 address, because the firewall accepts global IPv6 (2000::/3); the
+  probe says whether it does.
 - The secret is readable inside the VM. It protects against other programs on
   the Mac, not against code that took over the server.
 - Any program on the Mac can reach the sandbox's loopback port; it needs the

@@ -133,11 +133,15 @@ These hold as long as the design is intact and the VM boundary holds.
   everyone. Over IPv6 nothing but loopback is accepted inbound. The server
   listens on 0.0.0.0 because the published port reaches the VM's network
   address, not its loopback, and the Mac side is published on 127.0.0.1 only.
-  A client that connects and goes silent is dropped after 30 seconds (a body
-  that stops short gets a 408, signed like any other answer; the same limit
-  applies to writing the answer). IPv6 neighbour discovery
-  is dropped inbound as well; IPv6 was already unusable because the output
-  chain does not allow link-local traffic.
+  A whole request must arrive within 10 seconds (a body that stops short gets
+  a signed 408); a connection that goes silent is dropped after 30 seconds
+  (the same limit applies to writing the answer). IPv6 neighbour discovery
+  is dropped inbound as well. Outbound, the firewall accepts global IPv6
+  (2000::/3) except the refused ranges and the Mac's own addresses, but it has
+  no rule for link-local traffic, so IPv6 normally does not work from the VM.
+  If the VM does have a global IPv6 address, a host on your network with a
+  global address is reachable (see below); the safety probe says whether the VM
+  has one.
 - **The sandbox fetches public addresses only.** It resolves each name, refuses
   the request if any answer is not public (loopback, private, link-local,
   shared, multicast, reserved, and IPv6 forms that carry an IPv4 address such
@@ -229,7 +233,7 @@ These hold as long as the design is intact and the VM boundary holds.
   command and the scripts read them as strictly as the secret (a plain file
   of yours, nothing but the value, a port from 1024 to 65535). Inside the VM
   the server and the firewall keep port 9100. `SANDSEEK_SANDBOX_PORT` still
-  fixes the port, for tests. Each VM is called `sandseek-sandbox-` and eight
+  fixes the port, for tests (command line and scripts only; the app ignores it). Each VM is called `sandseek-sandbox-` and eight
   random hex digits. Under the lock, a start removes every VM with that name
   form (and the plain `sandseek-sandbox` of 0.1.0) and the secret, port, name
   and address files that a run that did not end normally left; nothing is
@@ -356,7 +360,8 @@ program has full control of the sandbox. It is therefore not looked up through
 - Every command has a time limit. The app ends one that hangs with `SIGTERM`
   and, three seconds later, `SIGKILL`, and keeps only the last 1 MiB of what a
   command prints. Every call to the sandbox also has its own limit (10 seconds
-  for the health check, 60 for a search, 90 for a page).
+  for the health check, 100 for a search, 140 for a page, so that each outlasts
+  the sandbox's own limits).
 
 What this does not do: the check and the first command are separate steps, so
 a program that could replace `/usr/local/bin/container` in between could still
@@ -601,8 +606,9 @@ does and does not do:
 - **Only TUFF with Qwen has been measured against the injection pages** so far.
   llama.cpp with Bonsai: not measured yet. Until it is, llama.cpp counts as only
   partly tested.
-- **No signature, no notarization.** The packaged app is signed ad hoc and
-  runs on the Mac that built it.
+- **Ad hoc signature, no notarization.** The app is signed ad hoc and not
+  notarized: a copy downloaded from the release page needs Open Anyway (System
+  Settings → Privacy & Security) on first launch.
 - **The self-test and address check run from outside.** They try the sandbox as
   a client would and look inside the VM through `container exec`; they cannot
   prove that no bug exists.
@@ -756,7 +762,6 @@ you can reinstall, or in a throwaway container.
 
 If you find a way past any of this (a fetch of a private address, a path from a
 page to your files, a prompt injection that makes the model do something
-beyond searching and reading), please open an issue in the repository. If you
-would rather not make it public yet: while the repository is private, tell the
-person who gave you access; once it is public, use GitHub's private
-vulnerability reporting if it is switched on there.
+beyond searching and reading), please report it privately as described in
+[SECURITY.md](../SECURITY.md) (GitHub's Security tab, Report a vulnerability),
+not in a public issue.

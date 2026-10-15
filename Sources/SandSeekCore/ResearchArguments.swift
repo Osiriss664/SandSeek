@@ -69,10 +69,9 @@ public struct ResearchArguments: Equatable, Sendable {
                                command asks TUFF's /tuff/v1/status and uses
                                TUFF when it answers; any other server is
                                refused). A llama.cpp server must be named
-                               with llamacpp. Its connector comes in
-                               Abschnitt 2b; for now it gets the plain
-                               non-streaming request. With tuff the status
-                               route is asked too: a server that does not
+                               with llamacpp; it is experimental and gets
+                               plain (non-streaming) requests. With tuff the
+                               status route is asked too: a server that does not
                                answer at all ends the run (exit code 1), one
                                that answers something else gives a warning.
       --api-key-file <path>    File with the key of a model server that asks

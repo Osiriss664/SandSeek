@@ -3,8 +3,7 @@
 # the Mac and from inside its VM, and says PASS, FAIL or NOTE for each promise
 # docs/SECURITY.md makes. It starts nothing, stops nothing and changes nothing
 # (only `container exec` probes, small signed requests and read-only looks at
-# the Mac). It is SandSeek's version of the probe TUFF's safety test used
-# (research/tuff-sandbox/safety-test/probe.sh).
+# the Mac). It is modelled on TUFF's safety test.
 #
 #   Scripts/safety_probe.sh
 #

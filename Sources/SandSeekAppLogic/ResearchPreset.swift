@@ -111,11 +111,11 @@ public struct ResearchPreset: Equatable, Sendable {
     /// search, thinking left to the server.
     ///
     /// NOT TESTED YET. These values come from the app mockup. They are
-    /// measured in Abschnitt 2c (a run on TUFF with Qwen and thinking, and one
+    /// measured later (a run on TUFF with Qwen and thinking, and one
     /// on llama.cpp) and fixed afterwards. The mockup said 10 pages; 6 is what
     /// the top-up that opens search results can reach (`autoOpenAttempts` is
-    /// 6), so a higher number would only be a request to the model. 2c
-    /// measures whether more is worth it.
+    /// 6), so a higher number would only be a request to the model. Measuring
+    /// will show whether more is worth it.
     public static let thorough = ResearchPreset(
         maxSteps: 30, minimumPages: 6, searchResults: 8)
 

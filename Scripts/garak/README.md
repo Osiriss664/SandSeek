@@ -71,7 +71,7 @@ curl -s http://127.0.0.1:8080/v1/models
 4. Smoke test with one small probe class:
 
 ```sh
-cd ~/Developer/TUFF
+cd <your SandSeek checkout>
 GARAK_SPEC=probes.encoding.InjectBase64 GARAK_PROMPT_CAP=4 Scripts/garak/run_garak.sh
 ```
 
@@ -80,7 +80,7 @@ The first call creates `~/Developer/garak-venv` and installs garak, which takes 
 5. The default run:
 
 ```sh
-cd ~/Developer/TUFF
+cd <your SandSeek checkout>
 Scripts/garak/run_garak.sh
 ```
 
