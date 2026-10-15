@@ -446,6 +446,11 @@ private final class FakeClock: @unchecked Sendable {
         #expect(rig.sandbox.securityCheckFailed)
         #expect(!rig.sandbox.showsSignedSeal)
         #expect(rig.workspace.cardReadiness.sandbox == false)
+        // No question runs in a sandbox whose security check failed, and the
+        // Start everything row (with its note) stays on screen.
+        #expect(!rig.workspace.servicesReady)
+        #expect(rig.workspace.showsStartEverything)
+        #expect(rig.workspace.startEverythingStopNote != nil)
 
         // Folded cards open for it, and a passing check closes the case.
         let folded = ResearchCardFolding.Folds(server: true, sandbox: true)

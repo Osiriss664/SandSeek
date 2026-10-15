@@ -210,6 +210,9 @@ struct ResearchWorkspaceView: View {
         }
         if workspace.sandbox.state != .ready { return "Start the sandbox first." }
         if workspace.sandbox.protection != .verified { return "Waiting for the sandbox check." }
+        if workspace.sandbox.securityCheckFailed {
+            return "The security check failed: see the sandbox card."
+        }
         return "Check the model server address."
     }
 

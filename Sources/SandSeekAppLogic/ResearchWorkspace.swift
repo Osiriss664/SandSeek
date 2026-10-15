@@ -66,9 +66,11 @@ public final class ResearchWorkspace {
     }
 
     /// Questions need the model server and a sandbox whose firewall and
-    /// privileges were checked from outside the VM.
+    /// privileges were checked from outside the VM, and whose last security
+    /// check (if one ran on this VM) passed.
     public var servicesReady: Bool {
         sandbox.state == .ready && sandbox.protection == .verified
+            && !sandbox.securityCheckFailed
             && server.state == .ready && !server.models.isEmpty
             && server.serverURL != nil
     }
