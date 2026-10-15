@@ -88,6 +88,11 @@ public enum ResearchReportPrintText {
         if !answer.isEmpty {
             parts.append(Section(style: .answer, text: answer + "\n"))
         }
+        let cautions = [report.emptyAnswerNotice].compactMap { $0 }
+            + report.answerWarnings + [report.singleSearchNotice].compactMap { $0 }
+        for caution in cautions {
+            parts.append(Section(style: .note, text: "Note: " + caution + "\n"))
+        }
         if !report.sources.isEmpty {
             parts.append(Section(style: .heading, text: "Sources\n"))
             for source in report.sources {
@@ -118,8 +123,12 @@ public enum ResearchReportPrintText {
         let base = NSFont.systemFont(ofSize: 11)
         let manager = NSFontManager.shared
         let result = NSMutableAttributedString()
-        for run in formatted.runs {
-            let text = String(formatted[run.range].characters)
+        var trimmed = formatted
+        while let last = trimmed.characters.last, last.isWhitespace || last.isNewline {
+            trimmed.characters.removeLast()
+        }
+        for run in trimmed.runs {
+            let text = String(trimmed[run.range].characters)
             var font = base
             if let intent = run.inlinePresentationIntent {
                 if intent.contains(.code) {

@@ -102,9 +102,9 @@ struct ResearchReportView: View {
                 } icon: {
                     Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)
                 }
-            } else if report.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            } else if let notice = report.emptyAnswerNotice {
                 Label {
-                    Text("The model stopped without writing an answer. This usually means it used up its token budget while thinking. Try again, or turn thinking off for this mode in Settings.")
+                    Text(notice)
                         .font(.callout)
                         .fixedSize(horizontal: false, vertical: true)
                 } icon: {
@@ -125,44 +125,8 @@ struct ResearchReportView: View {
                     }
                     return .handled
                 })
-            if !report.unknownCitations.isEmpty {
-                Text("The answer cites \(report.unknownCitations.map { "[\($0)]" }.joined(separator: ", ")), which is not a page the research read.")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            }
-            if report.unverifiedFigureCount > 0 {
-                Text("\(report.unverifiedFigureCount) \(report.unverifiedFigureCount == 1 ? "point" : "points") (figures, dates or names) could not be matched to the pages they cite. The saved report lists them under Figure check.")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            }
-            if report.budgetExhausted {
-                Text("The research ran out of steps, so this answer may be incomplete.")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            }
-            if report.stoppedRepeatedSearches {
-                Text("The research stopped early because the model kept repeating searches it had already run, so this answer may be incomplete.")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            }
-            if report.sources.isEmpty
-                && !report.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Text("No web page was read for this answer, so it comes from the model's memory or search previews and has no sources to check.")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            }
-            if report.answerCutOff {
-                Text("The answer stopped at the model's length limit, so its end may be missing.")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            }
-            if report.answerEndsMidSentence {
-                Text("The answer seems to stop mid-sentence and may be incomplete.")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            }
-            if report.repeatedSourceEntries > 0, !report.sources.isEmpty {
-                Text("The answer's own source list repeats \(report.repeatedSourceEntries) \(report.repeatedSourceEntries == 1 ? "entry" : "entries") it already lists; only the pages under Sources were read.")
+            ForEach(report.answerWarnings, id: \.self) { warning in
+                Text(warning)
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
@@ -188,8 +152,8 @@ struct ResearchReportView: View {
                             .textSelection(.enabled)
                     }
                 }
-                if report.searchQueries.count == 1 {
-                    Text("Only one search was run, so other sources may have been missed.")
+                if let notice = report.singleSearchNotice {
+                    Text(notice)
                         .font(.caption)
                         .foregroundStyle(.orange)
                 }
@@ -217,7 +181,6 @@ struct ResearchReportView: View {
                 }
                 .help("Writes the question, the answer and the numbered sources to a PDF.")
                 Button("Print…") { ReportPrinting.printReport(report) }
-                    .keyboardShortcut("p", modifiers: .command)
                 Button("Show in Finder") {
                     NSWorkspace.shared.activateFileViewerSelecting([markdownURL])
                 }
@@ -245,6 +208,8 @@ struct ResearchReportView: View {
             Text(source.webURL?.absoluteString ?? source.url)
         }
         .onChange(of: report.id) { note = nil }
+        // The Print command in the File menu (⌘P) prints the report on screen.
+        .focusedSceneValue(\.shownReport, report)
     }
 
     private var footer: String {
@@ -314,5 +279,30 @@ struct ResearchReportView: View {
         } catch {
             note = "Could not save: \(error.localizedDescription)"
         }
+    }
+}
+
+/// The report a window shows, so the File > Print command can reach it.
+struct ShownReportKey: FocusedValueKey {
+    typealias Value = SavedResearchReport
+}
+
+extension FocusedValues {
+    var shownReport: SavedResearchReport? {
+        get { self[ShownReportKey.self] }
+        set { self[ShownReportKey.self] = newValue }
+    }
+}
+
+/// File > Print…, for whichever report window or screen has focus.
+struct PrintReportCommand: View {
+    @FocusedValue(\.shownReport) private var report
+
+    var body: some View {
+        Button("Print…") {
+            if let report { ReportPrinting.printReport(report) }
+        }
+        .keyboardShortcut("p")
+        .disabled(report == nil)
     }
 }

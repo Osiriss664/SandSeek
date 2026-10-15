@@ -1,5 +1,6 @@
 import AppKit
 import SandSeekAppLogic
+import UniformTypeIdentifiers
 
 /// Prints a report or writes it to a PDF. The text comes from
 /// `ResearchReportPrintText`; this draws it in a text view that is never shown
@@ -15,8 +16,9 @@ enum ReportPrinting {
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, let destination = panel.url else { return nil }
 
-        // Written to a temporary file first, so a failure never leaves a
-        // half-written PDF, or damages one that is already at the destination.
+        // Printed to a temporary file first, then copied over in one atomic
+        // write, so a failure never leaves a half-written PDF or damages one
+        // that is already at the destination.
         let temporary = FileManager.default.temporaryDirectory
             .appendingPathComponent("SandSeek-\(UUID().uuidString).pdf")
         defer { try? FileManager.default.removeItem(at: temporary) }
@@ -30,17 +32,15 @@ enum ReportPrinting {
         let operation = NSPrintOperation(view: textView(for: report, info: info), printInfo: info)
         operation.showsPrintPanel = false
         operation.showsProgressPanel = false
+        operation.jobTitle = ResearchReportPrintText.suggestedFileName(for: report)
         guard operation.run(),
               FileManager.default.fileExists(atPath: temporary.path) else {
             fail("The PDF could not be written, so nothing was saved. Try another folder.")
             return "Not saved."
         }
         do {
-            if FileManager.default.fileExists(atPath: destination.path) {
-                _ = try FileManager.default.replaceItemAt(destination, withItemAt: temporary)
-            } else {
-                try FileManager.default.moveItem(at: temporary, to: destination)
-            }
+            // Read and written in place of a move, which fails across disks.
+            try Data(contentsOf: temporary).write(to: destination, options: .atomic)
             return "Saved."
         } catch {
             fail("The PDF could not be saved to that place: \(error.localizedDescription)")

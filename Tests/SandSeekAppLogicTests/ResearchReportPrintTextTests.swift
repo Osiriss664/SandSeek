@@ -71,4 +71,18 @@ import Testing
         #expect(ResearchReportPrintText.suggestedFileName(
             for: report(question: String(repeating: "x", count: 200))).count <= 60)
     }
+
+    @Test func warningsFromTheScreenAreInThePrintedText() {
+        let base = ResearchReport(
+            question: "q", answer: "Answer [7].",
+            sources: [ResearchSource(number: 1, title: "t", url: "https://example.com/")],
+            modelTurns: 1, budgetExhausted: true, searchQueries: ["one"])
+        let saved = SavedResearchReport(
+            report: base, model: "m", createdAt: Date(timeIntervalSince1970: 1_790_000_000),
+            durationSeconds: 1, steps: [])
+        let text = ResearchReportPrintText.plainText(for: saved)
+        #expect(text.contains("The research ran out of steps, so this answer may be incomplete."))
+        #expect(text.contains("Only one search was run"))
+        for warning in saved.answerWarnings { #expect(text.contains(warning)) }
+    }
 }

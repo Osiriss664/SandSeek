@@ -48,7 +48,9 @@ A better window.
   button copies the answer as plain text.
 - A report can be printed (⌘P) or exported as a PDF (**Export as PDF…**) from
   the Research screen and from a report window: question, date, model, answer
-  and the numbered sources with their full addresses as plain text.
+  and the numbered sources with their full addresses as plain text, with the
+  same warnings the screen shows. The PDF lists source addresses as plain text;
+  some PDF viewers may still make them clickable.
 - The sandbox card shows **Signed** with a checkmark and the time of its last
   signed health check ("checked 14:05", in the Mac's 12 or 24 hour style),
   only while the sandbox is verified. It says so in plain words when that

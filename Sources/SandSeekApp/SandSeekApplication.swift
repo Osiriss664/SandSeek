@@ -64,6 +64,7 @@ struct SandSeekMain: App {
         }
         .defaultSize(width: 1_180, height: 760)
         .windowResizability(.contentMinSize)
+        .commands { CommandGroup(replacing: .printItem) { PrintReportCommand() } }
         // A saved report opened while a question runs, in a window of its own.
         // Declared after the main window, which is the one that opens at launch.
         WindowGroup("Report", for: UUID.self) { reportID in
