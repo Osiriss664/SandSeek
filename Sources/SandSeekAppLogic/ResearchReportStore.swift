@@ -40,10 +40,14 @@ public struct SavedResearchReport: Codable, Equatable, Identifiable, Sendable {
             self.url = url
         }
 
-        /// The address only when it is plain http or https, the only kinds
+        /// The address only when it is plain http or https, without a user
+        /// name or password and not on a local or private network (the checks
+        /// every page address gets, `ResearchFinalAddress`), the only kinds
         /// the app will hand to the browser.
         public var webURL: URL? {
-            guard let url = URL(string: ResearchText.url(url)),
+            let cleaned = ResearchText.url(url)
+            guard ResearchFinalAddress.problem(with: cleaned) == nil,
+                  let url = URL(string: cleaned),
                   let scheme = url.scheme?.lowercased(),
                   scheme == "http" || scheme == "https",
                   url.host?.isEmpty == false else { return nil }
@@ -94,6 +98,16 @@ public struct SavedResearchReport: Codable, Equatable, Identifiable, Sendable {
     /// How many figures, dates or names in the answer could not be matched to
     /// the pages cited.
     public var unverifiedFigureCount: Int { unverifiedFigureTotal ?? 0 }
+    /// Optional so reports saved before it existed still load.
+    private let savedFigureCheck: [ResearchFigureCheckGroup]?
+    /// Optional so reports saved before it existed still load.
+    private let savedFigureCheckMore: Int?
+    /// The points of the figure check as the saved report words them, grouped
+    /// under their intros; empty when nothing was found (or the report is older
+    /// than the list).
+    public var figureCheckGroups: [ResearchFigureCheckGroup] { savedFigureCheck ?? [] }
+    /// How many more points the figure check found than it lists.
+    public var figureCheckMore: Int { savedFigureCheckMore ?? 0 }
     public let unknownCitations: [Int]
     public let steps: [ResearchStep]
     /// The report as `sandseek` prints it, made inert for viewers.
@@ -120,7 +134,7 @@ public struct SavedResearchReport: Codable, Equatable, Identifiable, Sendable {
         answer = ResearchText.terminalSafe(report.answer)
         sources = report.sources.map {
             Source(number: $0.number,
-                   title: ResearchText.terminalSafe($0.title),
+                   title: ResearchText.oneLine($0.title, limit: 300),
                    url: ResearchText.url($0.url))
         }
         self.model = model
@@ -134,10 +148,36 @@ public struct SavedResearchReport: Codable, Equatable, Identifiable, Sendable {
         stoppedOnRepeats = report.stoppedRepeatedSearches
         endedEarlyReason = report.endedEarly.map(ResearchText.terminalSafe)
         unverifiedFigureTotal = report.unverifiedFigures.count
+        let figureList = report.figureCheckList()
+        savedFigureCheck = figureList.groups.isEmpty ? nil : figureList.groups
+        savedFigureCheckMore = figureList.more == 0 ? nil : figureList.more
         unknownCitations = report.unknownCitations
         self.steps = steps
-        markdown = report.markdown
+        let unreadable = Self.unreadablePages(in: steps, sources: report.sources.map(\.url))
+        markdown = Self.markdownAdding(Self.unreadablePagesMarkdown(unreadable),
+                                       to: report.markdown)
         self.serverKind = serverKind?.rawValue
+    }
+}
+
+extension SavedResearchReport {
+    /// The report's Markdown with `section` placed directly after its Figure
+    /// check section, or after the Sources when there is none, or at the end.
+    static func markdownAdding(_ section: String, to base: String) -> String {
+        guard !section.isEmpty else { return base }
+        let lines = base.components(separatedBy: "\n")
+        // The heading the new section follows: Figure check, else Sources.
+        for heading in ["## Figure check", "## Sources"] {
+            guard let start = lines.lastIndex(of: heading) else { continue }
+            let next = lines[(start + 1)...].firstIndex { $0.hasPrefix("## ") }
+            if let next {
+                let before = lines[..<next].joined(separator: "\n")
+                let after = lines[next...].joined(separator: "\n")
+                return before + section + "\n" + after
+            }
+            break
+        }
+        return base + section
     }
 }
 

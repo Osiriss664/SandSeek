@@ -51,6 +51,14 @@ final class FakeResearchServices: ResearchHTTPTransport, @unchecked Sendable {
 
     var authorizations: [(path: String, value: String?)] { lock.withLock { seenAuthorization } }
 
+    /// The `Authorization` value of each signed (sandbox) request, by path, in
+    /// order. Kept apart from `authorizations`, which holds the model server's
+    /// requests only.
+    private var seenSandboxAuthorization: [(path: String, value: String?)] = []
+    var sandboxAuthorizations: [(path: String, value: String?)] {
+        lock.withLock { seenSandboxAuthorization }
+    }
+
     func send(method: String, url: URL, body: Data?, timeout: TimeInterval?,
               authorization: String?) async throws -> ResearchHTTPResponse {
         lock.withLock { seenAuthorization.append((url.path, authorization)) }
@@ -59,6 +67,16 @@ final class FakeResearchServices: ResearchHTTPTransport, @unchecked Sendable {
 
     func send(method: String, url: URL, body: Data?) async throws -> ResearchHTTPResponse {
         try await respond(url: url, body: body, authorization: nil)
+    }
+
+    /// The sandbox's requests carry the signing headers; the answer is signed
+    /// as the real sandbox signs it (with `TestSandboxSecret`), from the
+    /// request's nonce, method and path.
+    func send(method: String, url: URL, body: Data?, timeout: TimeInterval?,
+              authorization: String?, headers: [String: String]) async throws -> ResearchHTTPResponse {
+        lock.withLock { seenSandboxAuthorization.append((url.path, authorization)) }
+        let response = try await respond(url: url, body: body, authorization: authorization)
+        return TestSandboxSecret.signed(response, for: method, url: url, headers: headers)
     }
 
     private func respond(url: URL, body: Data?,
@@ -98,7 +116,7 @@ final class FakeResearchServices: ResearchHTTPTransport, @unchecked Sendable {
                 ]))
             case "/health":
                 return sandboxHealthy
-                    ? Self.json(.object(["status": .string("ok")]))
+                    ? Self.json(.object(["status": .string("ok"), "api": .integer(1)]))
                     : ResearchHTTPResponse(status: 503, body: Data())
             case "/v1/search":
                 return Self.json(.object(["results": .array([.object([
@@ -158,6 +176,7 @@ final class FakeProcessRunner: ResearchProcessRunning, @unchecked Sendable {
     private let reply: @Sendable ([String]) -> ResearchProcessResult
     private var recorded: [[String]] = []
     private var recordedEnvironments: [[String: String]] = []
+    private var recordedExecutables: [URL] = []
 
     /// By default every command succeeds, and the in-VM privilege check
     /// reports the unprivileged user the sandbox should run as.
@@ -168,15 +187,40 @@ final class FakeProcessRunner: ResearchProcessRunning, @unchecked Sendable {
     var commands: [[String]] { lock.withLock { recorded } }
     /// The environment each command ran with, in order.
     var environments: [[String: String]] { lock.withLock { recordedEnvironments } }
+    /// The full path of the program each command ran, in order.
+    var executables: [URL] { lock.withLock { recordedExecutables } }
 
     @Sendable static func healthy(_ command: [String]) -> ResearchProcessResult {
+        // What Apple's tool says about itself, for `ResearchContainerTool.verify()`.
+        if command.first == "codesign", command.contains("-dv") {
+            return ResearchProcessResult(status: 0, output: appleSignatureDetails)
+        }
+        if command.first == "codesign" { return ResearchProcessResult(status: 0, output: "") }
+        if command == ["container", "--version"] {
+            return ResearchProcessResult(
+                status: 0, output: "container CLI version 1.5.0 (build: release, commit: 0123abc)\n")
+        }
         if command.contains("python3") { return ResearchProcessResult(status: 0, output: "10001 none\n") }
         if command.contains("nft") { return ResearchProcessResult(status: 0, output: firewallListing) }
         return ResearchProcessResult(status: 0, output: "")
     }
 
-    /// What `nft list table inet sandseek_sandbox` prints for firewall.nft with
-    /// the Mac as DNS server.
+    /// What `codesign -dv --verbose=2` prints for Apple's `container`.
+    static let appleSignatureDetails = """
+    Executable=/usr/local/bin/container
+    Identifier=com.apple.container-cli
+    Format=Mach-O thin (arm64)
+    Authority=Developer ID Application: Apple Inc. - Containerization (UPBK2H6LZM)
+    Authority=Developer ID Certification Authority
+    Authority=Apple Root CA
+    TeamIdentifier=UPBK2H6LZM
+
+    """
+
+    /// What `nft list table inet sandseek_sandbox` (nft 1.0.9) prints after
+    /// `firewall.nft` is loaded with a sample gateway and the commands from
+    /// `entrypoint.sh` run with sample values: the Mac as DNS server and some
+    /// of the Mac's addresses in the blocked sets. Captured, not hand-written.
     static let firewallListing = """
     table inet sandseek_sandbox {
     \tset private4 {
@@ -191,10 +235,24 @@ final class FakeProcessRunner: ResearchProcessRunning, @unchecked Sendable {
     \t\t\t     203.0.113.0/24, 224.0.0.0/3 }
     \t}
 
+    \tset blocked4 {
+    \t\ttype ipv4_addr
+    \t\telements = { 10.8.0.2, 127.0.0.1,
+    \t\t\t     192.168.64.1, 198.41.0.4,
+    \t\t\t     203.0.113.9 }
+    \t}
+
+    \tset blocked6 {
+    \t\ttype ipv6_addr
+    \t\telements = { ::1,
+    \t\t\t     2001:db8::1 }
+    \t}
+
     \tset refused6 {
     \t\ttype ipv6_addr
     \t\tflags interval
-    \t\telements = { 2001::/32, 2001:db8::/32,
+    \t\telements = { 2001::/32,
+    \t\t\t     2001:db8::/32,
     \t\t\t     2002::/16 }
     \t}
 
@@ -204,14 +262,25 @@ final class FakeProcessRunner: ResearchProcessRunning, @unchecked Sendable {
     \t\tip daddr 192.168.64.1 udp dport 53 accept
     \t\toifname "lo" accept
     \t\tct state established,related accept
-    \t\tmeta nfproto ipv4 ip daddr @private4 meta l4proto tcp reject with tcp reset
-    \t\tmeta nfproto ipv4 ip daddr @private4 reject
+    \t\tip daddr @blocked4 meta l4proto tcp reject with tcp reset
+    \t\tip daddr @blocked4 reject with icmp port-unreachable
+    \t\tip6 daddr @blocked6 meta l4proto tcp reject with tcp reset
+    \t\tip6 daddr @blocked6 reject with icmpv6 port-unreachable
+    \t\tip daddr @private4 meta l4proto tcp reject with tcp reset
+    \t\tip daddr @private4 reject with icmp port-unreachable
     \t\tmeta nfproto ipv4 accept
-    \t\tmeta nfproto ipv6 ip6 daddr @refused6 meta l4proto tcp reject with tcp reset
-    \t\tmeta nfproto ipv6 ip6 daddr @refused6 reject
+    \t\tip6 daddr @refused6 meta l4proto tcp reject with tcp reset
+    \t\tip6 daddr @refused6 reject with icmpv6 port-unreachable
     \t\tip6 daddr 2000::/3 accept
     \t\tmeta l4proto tcp reject with tcp reset
     \t\treject
+    \t}
+
+    \tchain input {
+    \t\ttype filter hook input priority filter; policy drop;
+    \t\tiifname "lo" accept
+    \t\tct state established,related accept
+    \t\tip saddr 192.168.64.1 tcp dport 9100 accept
     \t}
     }
 
@@ -225,11 +294,13 @@ final class FakeProcessRunner: ResearchProcessRunning, @unchecked Sendable {
     func run(executable: URL,
              arguments: [String],
              environment: [String: String],
-             timeout: TimeInterval) async throws -> ResearchProcessResult {
+             timeout: TimeInterval,
+             killGrace: TimeInterval) async throws -> ResearchProcessResult {
         let command = [executable.lastPathComponent] + arguments
         lock.withLock {
             recorded.append(command)
             recordedEnvironments.append(environment)
+            recordedExecutables.append(executable)
         }
         return reply(command)
     }
@@ -440,4 +511,48 @@ func testLaunchController(settings: MemorySettings = MemorySettings(),
         defaults: settings, launcher: launcher, transport: transport,
         stateDirectory: stateDirectory, logURL: logURL,
         timing: timing, identityOf: identityOf, checkProgram: { .success($0) })
+}
+
+/// The secret that tests sign with: one file for the whole test run, written
+/// the way the launcher writes it (64 hex characters, mode 0600).
+enum TestSandboxSecret {
+    static let text = String(repeating: "0123456789abcdef", count: 4)
+    static let key = Data(text.utf8)
+
+    static let file: URL = {
+        let folder = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SandSeekTestSecret-\(UUID().uuidString)", isDirectory: true)
+        try! FileManager.default.createDirectory(
+            at: folder, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        let file = folder.appendingPathComponent("secret")
+        try! Data(text.utf8).write(to: file)
+        try! FileManager.default.setAttributes(
+            [.posixPermissions: 0o600], ofItemAtPath: file.path)
+        return file
+    }()
+
+    /// `response` with the signature the sandbox would put on it, when the
+    /// request carried a nonce.
+    static func signed(_ response: ResearchHTTPResponse, for method: String, url: URL,
+                       headers: [String: String]) -> ResearchHTTPResponse {
+        guard let nonce = headers[ResearchSandboxSigning.nonceHeader] else { return response }
+        var signedHeaders = response.headers
+        signedHeaders[ResearchSandboxSigning.answerAuthHeader] = ResearchSandboxSigning.responseAuth(
+            key: key, method: method, path: url.path, nonce: nonce,
+            status: response.status, body: response.body)
+        return ResearchHTTPResponse(status: response.status, body: response.body, headers: signedHeaders)
+    }
+}
+
+extension ResearchContainerTool {
+    /// A tool that passes `verify()` without looking at this Mac: the file
+    /// counts as root's, and the commands it runs (`codesign`, `--version`)
+    /// are answered by `runner` (a fake that says "Apple, 1.5.0" by default).
+    static func trustedForTests(runner: (any ResearchProcessRunning)? = nil,
+                                path: String = ResearchContainerTool.installedPath) -> ResearchContainerTool {
+        ResearchContainerTool(
+            runner: runner ?? FakeProcessRunner(), path: path, environment: [:],
+            untrustedPath: { _ in nil }, fileExists: { _ in true }, identity: { _ in "test" })
+    }
 }

@@ -53,7 +53,7 @@ if let path = arguments.replayFiguresPath {
 if arguments.checkExposure {
     let result = await ResearchExposureCommand.run(
         serverPort: arguments.serverURL.port ?? 80,
-        sandboxPort: arguments.sandboxURL.port ?? 80)
+        sandboxPort: arguments.resolvedSandboxURL().port ?? 80)
     print(result.text)
     exit(result.exitCode)
 }
@@ -85,7 +85,7 @@ do {
 let sandboxTransport = URLSessionResearchTransport()
 let quiet = arguments.quiet
 
-// Which server this is decides how it is asked (Abschnitt 2a: TUFF, with
+// Which server this is decides how it is asked (TUFF, with
 // streaming). A server that is not recognised is refused before any research
 // runs. A model server that does not answer ends the run with exit code 1, as
 // it always did (it is now found before the sandbox check, not after); a
@@ -113,7 +113,7 @@ let agent = ResearchAgent(
         authorization: authorization,
         transport: transport),
     sandbox: ResearchSandboxClient(
-        baseURL: arguments.sandboxURL, transport: sandboxTransport,
+        baseURL: arguments.resolvedSandboxURL(), transport: sandboxTransport,
         secretFile: ResearchSandboxSecret.defaultFileURL),
     options: arguments.options,
     onEvent: { event in

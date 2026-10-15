@@ -185,10 +185,12 @@ public final class ResearchServerController {
     /// answering. The transport's own limit is longer, so this one is the one
     /// the message names: a busy server is not reported as gone after 3 s.
     nonisolated static let requestTimeout: TimeInterval = 8
-    /// The sandbox listens here. A model server at this port is refused, so
-    /// the llama.cpp key can never be sent to the sandbox. Kept equal to
-    /// `ResearchSandboxController.port` (a test checks it).
-    nonisolated static let sandboxPort = 9100
+    /// The sandbox's port inside its VM, and the port assumed for it when none
+    /// is recorded. A model server at this port is refused, and so is one at
+    /// the port the last sandbox start recorded, so the llama.cpp key can never
+    /// be sent to the sandbox. Kept equal to `ResearchSandboxController.port`
+    /// (a test checks it).
+    nonisolated static let sandboxPort = ResearchSandboxFiles.fallbackPort
 
     static let typeKey = "ResearchServerType"
     static func addressKey(_ type: ResearchServerType) -> String {
@@ -334,9 +336,10 @@ public final class ResearchServerController {
             throw ResearchError.invalidEndpoint(
                 "The server address needs a port, such as http://127.0.0.1:8080")
         }
-        guard port != sandboxPort else {
+        let recorded = try? ResearchSandboxFiles.readPort(in: ResearchSandboxFiles.defaultFolder)
+        guard port != sandboxPort, port != recorded else {
             throw ResearchError.invalidEndpoint(
-                "Port \(sandboxPort) is the web sandbox's. Give the model server another port.")
+                "Port \(port) is the web sandbox's. Give the model server another port.")
         }
         return url
     }

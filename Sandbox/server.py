@@ -12,49 +12,43 @@ Endpoints (JSON in, JSON out):
   POST /v1/search  {"query": str, "max_results": int?}
   POST /v1/fetch   {"url": str, "offset": int?, "max_chars": int?,
                     "passages": bool?, "query": str?}
-  POST /v1/raw     {"url": str, "accept": str?, "max_bytes": int?,
-                    "timeout_seconds": number?}
 
 Fetches refuse anything but http(s) on ports 80 and 443, and refuse every
 address that is not globally routable. The resolved address is the one
 connected to, so a DNS answer cannot change between the check and the
-connection. Redirects are followed by hand and checked the same way. That keeps
-the Mac (the VM's gateway), the local network and cloud metadata addresses out
-of reach.
+connection. Redirects are followed by hand and checked the same way; a redirect
+from https to http is refused, and so is an answer with more than one Location
+header. That keeps the Mac (the VM's gateway), the local network and cloud
+metadata addresses out of reach. The Mac's own interface addresses, public ones
+included, are refused too: the launcher writes them to a file in the secret
+folder (see "Blocked addresses" below).
 
 PDFs: when /v1/fetch gets an application/pdf page (or, for a response typed
 application/octet-stream or not typed at all, one whose body starts with
 "%PDF-"), the text is read with pypdf in a child process, like the HTML
 fallback parser, with limits on size, pages, time and memory. Encrypted PDFs
 are refused and nothing is OCR'd. The text then takes the same path as HTML
-text. /v1/raw never parses a PDF: it returns the bytes, as for any type.
+text.
 
-/v1/raw is for a caller that reads pages itself (TUFF's page reader). It does
-the same address checks, but returns the site's bytes as they came: base64 in
-JSON, with the site's status, content type and content encoding. Invisible-
-character stripping and text extraction deliberately do NOT apply to it, and a
-compressed body is not unpacked; the caller parses and cleans what it gets.
-Unlike /v1/fetch it never follows a redirect from https to http, reports a body
-over its size limit as an error instead of cutting it, sends no
-Accept-Encoding, and never uses the page cache. All of its redirects share one
-time limit.
-
-Signed answers: when SANDSEEK_SANDBOX_SECRET is set, a request that carries an
-X-Sandbox-Nonce header gets an X-Sandbox-Signature header on every answer (see
-"Signed answers" below), so a caller can tell this server from another program
-that took over the port. Without the secret, or without the nonce header,
-answers are unsigned, as before.
+Signed requests: every request must carry X-Sandbox-Nonce, X-Sandbox-Time and
+X-Sandbox-Auth (see "Signing" below), made with a secret the server reads from
+a file when it starts. A request without a correct signature is refused with
+401, and so is one that repeats an earlier request. Every answer to a request
+with a well-formed nonce is signed too, so a caller can tell this server from
+another program that took over the port. Without a secret the server does not
+start.
 
 Those checks live in this process, so they would not bind code that took it
 over. firewall.nft, loaded by entrypoint.sh before this server starts, applies
 the same rule to the whole VM, with one exception for DNS to the VM's name
 server, and the server then drops root and every Linux
-capability so it cannot change the firewall.
+capability so it cannot change the firewall. The Mac's own addresses are in
+that firewall as well (entrypoint.sh adds them to the sets blocked4 and
+blocked6).
 """
 
 from __future__ import annotations
 
-import base64
 import codecs
 import ctypes
 import errno
@@ -74,7 +68,9 @@ import re
 import resource
 import signal
 import socket
+import socketserver
 import ssl
+import stat
 import sys
 import threading
 import time
@@ -99,7 +95,7 @@ try:
 except ImportError:  # Without pypdf a PDF is refused as before; /health says "pdf": false.
     pypdf = PdfReader = None
 
-PORT = int(os.environ.get("PORT", "9100"))
+PORT = int(os.environ.get("PORT") or "9100")
 SEARXNG_URL = os.environ.get("SEARXNG_URL", "").rstrip("/")
 # Kept unchanged until the q3 comparison, so search results stay comparable.
 USER_AGENT = os.environ.get(
@@ -149,8 +145,26 @@ PDF_SNIFFED_TYPES = ("", "application/octet-stream", "binary/octet-stream")
 PDF_MAGIC = b"%PDF-"
 MAX_REDIRECTS = 5
 MAX_REQUEST_BYTES = 64 * 1024
+# After an answer on a connection that is being closed, the server discards
+# what the client still sends for at most this long and this many bytes, so
+# the close does not turn into a reset that destroys the answer.
+LINGER_SECONDS = 1.0
+LINGER_BYTES = 1 << 20
+
 # Seconds a client may stay silent on an open connection (see Handler.timeout).
 REQUEST_TIMEOUT = 30
+# The whole request (line, headers and body) must arrive within this many
+# seconds; the processing of an authenticated request is not limited by it.
+READ_DEADLINE = 10.0
+# Connections served at the same time. One more is closed without an answer, so
+# idle or slow connections cannot use up the VM's process limit.
+MAX_CONNECTIONS = 32
+# The request line and all headers together, the number of headers, and the
+# length of the request target. A caller of this API sends a handful of short
+# headers; anything bigger is refused.
+MAX_HEAD_BYTES = 16 * 1024
+MAX_HEADERS = 50
+MAX_TARGET_CHARS = 2048
 DEFAULT_SLICE_CHARS = 6000
 MAX_SLICE_CHARS = 20000
 MAX_SEARCH_RESULTS = 10
@@ -164,23 +178,6 @@ PASSAGE_SEPARATOR = "\n[...]\n"
 BM25_K1 = 1.5
 BM25_B = 0.75
 ALLOWED_PORTS = {"http": 80, "https": 443}
-REDIRECT_STATUSES = (301, 302, 303, 307, 308)
-# /v1/raw: the Accept value used when a request has none (it is what TUFF's
-# page reader sends), and the limits on a request's own values.
-RAW_DEFAULT_ACCEPT = "text/html,application/xhtml+xml,text/plain;q=0.9,application/pdf;q=0.8"
-RAW_MAX_ACCEPT_CHARS = 512
-RAW_DEFAULT_TIMEOUT = 15
-RAW_MAX_TIMEOUT = 60
-RAW_MAX_MESSAGE_CHARS = 200
-# A success is refused when its final address, content type or content
-# encoding is longer than this: the caller reserves a fixed room for them, and
-# a site (or a redirect chain) must not be able to make them longer.
-RAW_MAX_FINAL_URL_CHARS = 2048
-RAW_MAX_CONTENT_TYPE_CHARS = 256
-RAW_MAX_CONTENT_ENCODING_CHARS = 64
-# check_url and the transport name two errors differently from what /v1/raw
-# promises its caller. /v1/fetch and /v1/search keep the old names.
-RAW_CODES = {"blocked_address": "private_address", "fetch_timeout": "timed_out"}
 TEXT_TYPES = ("text/html", "application/xhtml+xml", "text/plain")
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "[::1]", "::1"}
 # Titles sit in the head; searching further only gives a hostile page more
@@ -221,8 +218,21 @@ IPV6_UNICAST = ipaddress.ip_network("2000::/3")
 # (6to4, Teredo), or reserved for documentation.
 IPV6_REFUSED = [ipaddress.ip_network(n) for n in ("2002::/16", "2001::/32", "2001:db8::/32")]
 
+# Addresses the sandbox must never connect to, even when they are public: the
+# Mac's own interface addresses. Scripts/research_sandbox.sh writes them, one
+# per line, to BLOCKED_FILE_NAME in the folder that holds the secret, and
+# main() reads that file once, as root, through load_blocked_file(). The
+# addresses are not secret.
+BLOCKED_ADDRESSES: frozenset = frozenset()
+BLOCKED_FILE_NAME = "blocked-addresses"
+MAX_BLOCKED_ADDRESSES = 256
+MAX_BLOCKED_FILE_BYTES = 64 * 1024
+
 
 def is_public_address(address: str) -> bool:
+    # A zone id ("fe80::1%eth0") makes the lookup in the blocked set miss.
+    if "%" in address:
+        return False
     try:
         ip = ipaddress.ip_address(address)
     except ValueError:
@@ -235,7 +245,17 @@ def is_public_address(address: str) -> bool:
         # the global unicast range is allowed.
         elif ip not in IPV6_UNICAST or any(ip in net for net in IPV6_REFUSED):
             return False
+    if ip in BLOCKED_ADDRESSES:
+        return False
     return ip.is_global and not ip.is_multicast
+
+
+def url_scheme(url: str) -> str:
+    """The lowercase scheme of `url`, or "" when it cannot be read."""
+    try:
+        return urllib.parse.urlsplit(url.strip()).scheme.lower()
+    except ValueError:
+        return ""
 
 
 def system_resolver(host: str, port: int) -> list[str]:
@@ -378,8 +398,8 @@ class Response:
     truncated: bool = False
 
 
-# Called with (method, target, headers, body); /v1/raw adds the keyword
-# arguments `deadline` and `max_bytes`.
+# Called with (method, target, headers, body) and the keyword argument
+# `deadline`.
 Transport = Callable[..., Response]
 
 
@@ -427,22 +447,13 @@ class _PinnedHTTPSConnection(_SendOnlyGivenHeaders, http.client.HTTPSConnection)
             raise OSError("the deadline passed during the handshake") from None
 
 
-def declared_length(headers: dict[str, str]) -> int | None:
-    """The Content-Length a response announces, if it is a plain number."""
-    value = headers.get("content-length", "").strip()
-    return int(value) if value.isascii() and value.isdigit() else None
-
-
 def pinned_transport(method: str, target: Target, headers: dict[str, str],
-                     body: bytes | None, deadline: float | None = None,
-                     max_bytes: int | None = None) -> Response:
-    """`deadline` bounds the whole request in seconds. `max_bytes` caps the
-    body that is read (at most MAX_DOWNLOAD_BYTES by default); a longer body,
-    or a Content-Length above it, comes back as `truncated` without the rest
-    being read."""
+                     body: bytes | None, deadline: float | None = None) -> Response:
+    """`deadline` bounds the whole request in seconds. The body that is read
+    is capped at MAX_DOWNLOAD_BYTES; a longer one comes back as `truncated`."""
     cls = _PinnedHTTPSConnection if target.scheme == "https" else _PinnedHTTPConnection
     limit = FETCH_DEADLINE if deadline is None else deadline
-    cap = MAX_DOWNLOAD_BYTES if max_bytes is None else min(max_bytes, MAX_DOWNLOAD_BYTES)
+    cap = MAX_DOWNLOAD_BYTES
     # A wait longer than the deadline is cut by the timer; one second more
     # lets the timer win the race and report a timeout, not a failed connect.
     connection = cls(target, min(FETCH_TIMEOUT, limit + 1))
@@ -472,28 +483,21 @@ def pinned_transport(method: str, target: Target, headers: dict[str, str],
         connection.request(method, target.path, body=body, headers=headers)
         response = connection.getresponse()
         received = {k.lower(): v for k, v in response.getheaders()}
-        announced = declared_length(received)
-        if max_bytes is not None:
-            if announced is not None and announced > cap:
-                return Response(response.status, received, b"", truncated=True)
-            if response.status in REDIRECT_STATUSES and received.get("location", "").strip():
-                # The caller follows the redirect; its body is not wanted.
-                return Response(response.status, received, b"")
-        chunks, size, ended = [], 0, False
+        # The dictionary above keeps one value per name, so a second Location
+        # header would go unseen. Which of two addresses a client follows
+        # differs between clients; this one follows neither.
+        if sum(1 for name, _ in response.getheaders() if name.lower() == "location") > 1:
+            raise ToolError(f"{target.host} sent more than one redirect address",
+                            "fetch_failed", 502)
+        chunks, size = [], 0
         while size <= cap and not expired.is_set():
             chunk = response.read1(min(65536, cap + 1 - size))
             if not chunk:
-                ended = True
                 break
             chunks.append(chunk)
             size += len(chunk)
         if expired.is_set():
             raise too_slow
-        if max_bytes is not None and ended and response.length:
-            # The connection closed before the announced length arrived. A
-            # short body must not look like the whole page.
-            raise ToolError(f"{target.host} closed the connection before the whole body "
-                            f"arrived ({size} of {announced} bytes)", "fetch_failed", 502)
         data = b"".join(chunks)
         return Response(
             status=response.status,
@@ -509,7 +513,13 @@ def pinned_transport(method: str, target: Target, headers: dict[str, str],
         connection.close()
 
 
-def decode_body(response: Response) -> bytes:
+def decode_body(response: Response, limit: int | None = None, cut: bool = False) -> bytes:
+    """The body, unpacked when the site sent it gzip or deflate (the sandbox
+    asks for gzip, and some sites send either unasked). A body that unpacks
+    to more than `limit` bytes is refused (`oversized`), or with `cut` cut
+    at `limit` and marked `truncated`, as an identity body is. Never more
+    than limit+1 bytes are unpacked."""
+    limit = MAX_DOWNLOAD_BYTES if limit is None else limit
     encoding = response.headers.get("content-encoding", "identity").lower()
     if encoding in ("", "identity"):
         return response.body
@@ -518,10 +528,17 @@ def decode_body(response: Response) -> bytes:
     wbits = 16 + zlib.MAX_WBITS if encoding == "gzip" else zlib.MAX_WBITS
     try:
         inflater = zlib.decompressobj(wbits)
-        # Bounded so a small compressed bomb cannot fill the VM's memory.
-        return inflater.decompress(response.body, MAX_DOWNLOAD_BYTES)
+        # Bounded so a small compressed bomb cannot fill the VM's memory: one
+        # byte past the limit is enough to know the body is too long.
+        data = inflater.decompress(response.body, limit + 1)
     except (zlib.error, gzip.BadGzipFile):
         raise ToolError("response body could not be decompressed", "unsupported_content", 502)
+    if len(data) > limit:
+        if not cut:
+            raise ToolError(f"the body is larger than {limit} bytes", "oversized", 502)
+        response.truncated = True
+        return data[:limit]
+    return data
 
 
 def charset_of(content_type: str) -> str:
@@ -734,10 +751,10 @@ def extract_text_bounded(markup: str, url: str, timeout: float | None = None,
     text = _run_in_child(extractor, markup, url, EXTRACT_TIMEOUT if timeout is None else timeout)
     if text is not None:
         return text
-    sys.stderr.write(f"extraction of {url} timed out or failed; used the fallback parser\n")
+    sys.stderr.write("extraction timed out or failed; used the fallback parser\n")
     text = _run_in_child(_fallback_in_child, markup[:MAX_FALLBACK_CHARS], url, FALLBACK_TIMEOUT)
     if text is None:
-        sys.stderr.write(f"the fallback parser could not read {url} either; no text\n")
+        sys.stderr.write("the fallback parser could not read the page either; no text\n")
         return ""
     return text
 
@@ -1018,31 +1035,6 @@ def rank_passages(text: str, query: str) -> list[tuple[int, int]]:
 
 # --- Tools ------------------------------------------------------------------
 
-def url_scheme(url: str) -> str:
-    try:
-        return urllib.parse.urlsplit(url.strip()).scheme.lower()
-    except ValueError:
-        return ""
-
-
-def check_raw_url(url: str, resolver: Callable[[str, int], list[str]]) -> Target:
-    """check_url, except that a scheme other than http and https is reported as
-    `unsupported_scheme`. (/v1/fetch keeps calling that `invalid_url`.)"""
-    if isinstance(url, str) and url_scheme(url) not in ("", *ALLOWED_PORTS):
-        raise ToolError("only http and https URLs can be fetched", "unsupported_scheme")
-    return check_url(url, resolver)
-
-
-def raw_error(error: ToolError) -> ToolError:
-    """An error as /v1/raw reports it: its own code names, and a message
-    without control characters or line breaks, of limited length."""
-    text = clean_text(error.message)
-    text = "".join(" " if c.isspace() else c for c in text)
-    text = "".join(c for c in text if unicodedata.category(c)[0] != "C").strip()
-    return ToolError(text[:RAW_MAX_MESSAGE_CHARS], RAW_CODES.get(error.code, error.code),
-                     error.status)
-
-
 @dataclass
 class Page:
     url: str
@@ -1085,95 +1077,24 @@ class WebTools:
             response = self.transport(method, target, headers, body,
                                       deadline=min(FETCH_DEADLINE, remaining))
             if response.status in (301, 302, 303, 307, 308):
-                location = response.headers.get("location")
+                location = (response.headers.get("location") or "").strip()
                 if not location:
                     raise ToolError("redirect without a location", "fetch_failed", 502)
                 current = urllib.parse.urljoin(target.url, location)
+                # One rule for every request this tool makes, pages and search
+                # alike: a page read over https is never sent on over http.
+                if target.scheme == "https" and url_scheme(current) == "http":
+                    raise ToolError("a redirect from https to http was refused",
+                                    "insecure_redirect", 502)
                 if response.status == 303 or (response.status in (301, 302) and method == "POST"):
                     method, body, content_type = "GET", None, None
                 continue
             return target.url, response
         raise ToolError("too many redirects", "too_many_redirects", 502)
 
-    def raw(self, url, accept=RAW_DEFAULT_ACCEPT, max_bytes=MAX_DOWNLOAD_BYTES,
-            timeout_seconds=RAW_DEFAULT_TIMEOUT) -> dict:
-        """The site's own bytes, for a caller that parses them itself. No text
-        extraction, no cleaning, no decompression, no cache, no cookies."""
-        try:
-            return self._raw(url, accept, max_bytes, timeout_seconds)
-        except ToolError as error:
-            raise raw_error(error) from None
-
-    def _raw(self, url, accept, max_bytes, timeout_seconds) -> dict:
-        if (not isinstance(accept, str) or len(accept) > RAW_MAX_ACCEPT_CHARS
-                or not accept.isascii() or not accept.isprintable()):
-            raise ToolError(f"accept must be at most {RAW_MAX_ACCEPT_CHARS} printable ASCII "
-                            "characters", "invalid_argument")
-        accept = accept or RAW_DEFAULT_ACCEPT  # an empty value means "not given"
-        if (not isinstance(max_bytes, int) or isinstance(max_bytes, bool)
-                or not 1 <= max_bytes <= MAX_DOWNLOAD_BYTES):
-            raise ToolError(f"max_bytes must be between 1 and {MAX_DOWNLOAD_BYTES}",
-                            "invalid_argument")
-        if (not isinstance(timeout_seconds, (int, float)) or isinstance(timeout_seconds, bool)
-                or not 0 < timeout_seconds <= RAW_MAX_TIMEOUT):
-            raise ToolError(f"timeout_seconds must be more than 0 and at most {RAW_MAX_TIMEOUT}",
-                            "invalid_argument")
-        # One deadline for the name lookups, connections and reads of every hop.
-        expires = self.clock() + timeout_seconds
-        too_slow = ToolError(f"the request took longer than {timeout_seconds:g} s",
-                             "timed_out", 504)
-        current = url
-        for _ in range(MAX_REDIRECTS + 1):
-            target = self._checked_target(current, expires - self.clock(), too_slow)
-            remaining = expires - self.clock()
-            if remaining <= 0:
-                raise too_slow
-            # No Accept-Encoding, no cookies, no language: only what the caller
-            # asked for and the sandbox's own User-Agent.
-            headers = {"Host": target.host_header, "User-Agent": USER_AGENT, "Accept": accept}
-            try:
-                response = self.transport("GET", target, headers, None,
-                                          deadline=remaining, max_bytes=max_bytes)
-            except ToolError as error:
-                raise too_slow if error.code == "fetch_timeout" else error
-            location = response.headers.get("location", "").strip()
-            if response.status in REDIRECT_STATUSES and location:
-                current = urllib.parse.urljoin(target.url, location)
-                if target.scheme == "https" and url_scheme(current) == "http":
-                    raise ToolError("a redirect from https to http was refused",
-                                    "insecure_redirect", 502)
-                continue
-            announced = declared_length(response.headers)
-            if (response.truncated or len(response.body) > max_bytes
-                    or (announced is not None and announced > max_bytes)):
-                raise ToolError(f"the body is larger than {max_bytes} bytes", "oversized", 502)
-            content_type = response.headers.get("content-type", "")
-            if len(target.url) > RAW_MAX_FINAL_URL_CHARS:
-                raise ToolError(f"the final address is longer than {RAW_MAX_FINAL_URL_CHARS} "
-                                "characters", "fetch_failed", 502)
-            if len(content_type) > RAW_MAX_CONTENT_TYPE_CHARS:
-                raise ToolError(f"the content type is longer than {RAW_MAX_CONTENT_TYPE_CHARS} "
-                                "characters", "fetch_failed", 502)
-            content_encoding = response.headers.get("content-encoding")
-            if (content_encoding is not None
-                    and len(content_encoding) > RAW_MAX_CONTENT_ENCODING_CHARS):
-                raise ToolError(f"the content encoding is longer than "
-                                f"{RAW_MAX_CONTENT_ENCODING_CHARS} characters", "fetch_failed", 502)
-            result = {
-                "final_url": target.url,
-                "status": response.status,
-                "content_type": content_type,
-                "body_base64": base64.b64encode(response.body).decode("ascii"),
-                # null when the site sent no Content-Encoding.
-                "content_encoding": content_encoding,
-            }
-            return result
-        raise ToolError("too many redirects", "too_many_redirects", 502)
-
     def _checked_target(self, url, remaining: float, too_slow: ToolError,
-                        check: Callable[..., Target] = check_raw_url) -> Target:
-        """`check` (check_raw_url for /v1/raw, check_url for /v1/fetch), but
-        given up on when the name lookup outlasts the deadline. The lookup
+                        check: Callable[..., Target] = check_url) -> Target:
+        """`check`, but given up on when the name lookup outlasts the deadline. The lookup
         cannot be stopped; its thread ends when the resolver gives up (some 10
         to 30 s), and counts against the VM's process limit until then."""
         if remaining <= 0:
@@ -1224,7 +1145,7 @@ class WebTools:
                                 "oversized", 502)
             page = pdf_page(final_url, body)
         else:
-            body = decode_body(response)
+            body = decode_body(response, cut=True)
             raw = body.decode(page_charset(content_type, body), errors="replace")
             page = self._html_page(final_url, content_type, raw)
         with self.lock:
@@ -1439,54 +1360,168 @@ def parse_duckduckgo(markup: str) -> list[dict]:
     ]
 
 
-# --- Signed answers ---------------------------------------------------------
+# --- Signing ----------------------------------------------------------------
 #
-# The launcher makes a random secret for each start, keeps a copy in a file only
-# the user can read, and passes it to this process in the environment. A caller
-# that can read the file sends a fresh random nonce with each request, and the
-# answer carries
-#   X-Sandbox-Signature: hex(HMAC-SHA256(secret,
-#       "tuff-sandbox-v1\n" + nonce + "\n" + hex(SHA256(request body)) + "\n"
-#       + status + "\n" + response body))
+# The launcher makes a random secret each time the sandbox starts and puts it in
+# a file that the VM sees read-only; this process reads it once, before it
+# drops root. Every request carries a fresh random nonce, the time, and
+#   X-Sandbox-Auth: hex(HMAC-SHA256(secret, join("\n", [
+#       "sandseek-sandbox-req-v1", method, path, nonce, time,
+#       hex(SHA256(request body))])))
+# A request without a correct signature is refused, so a program that can
+# reach the port but cannot read the secret gets nothing out of the sandbox.
+# The time must be within a minute of this clock, and a nonce is accepted once
+# only, so a recorded request cannot be sent again.
+#
+# Every answer to a request with a well-formed nonce, errors too, carries
+#   X-Sandbox-Auth: hex(HMAC-SHA256(secret, join("\n", [
+#       "sandseek-sandbox-resp-v1", method, path, nonce, status,
+#       hex(SHA256(answer body))])))
 # A program that merely sits on the port cannot make that, because the secret
-# never crosses the port. Covering the request body and the status stops a
-# genuine answer to one request from being passed off as the answer to another;
-# the nonce stops an old answer from being replayed. A GET has no body, so it
-# uses the hash of nothing.
+# never crosses the port. The method, path and nonce stop a genuine answer to
+# one request from being passed off as the answer to another. A GET has no
+# body, so it uses the hash of nothing.
 #
-# The key is the secret's bytes, without one trailing newline. An answer given
-# before the request body was read (an unparsable Content-Length) is signed over
-# an empty body.
+# The key is the secret file's bytes, without one trailing newline. Test
+# vectors: test-vectors/signing.json.
 
-SECRET_ENV = "SANDSEEK_SANDBOX_SECRET"
-SIGNING_MIN_SECRET_BYTES = 32
-SIGNATURE_PREFIX = "tuff-sandbox-v1"
+REQUEST_LABEL = "sandseek-sandbox-req-v1"
+RESPONSE_LABEL = "sandseek-sandbox-resp-v1"
 NONCE_HEADER = "X-Sandbox-Nonce"
-SIGNATURE_HEADER = "X-Sandbox-Signature"
+TIME_HEADER = "X-Sandbox-Time"
+AUTH_HEADER = "X-Sandbox-Auth"
 NONCE_PATTERN = re.compile(r"[0-9a-fA-F]{64}")
-# The key for every signature, or None when no secret was given. Set once by
-# main() through load_signing_secret().
-SIGNING_SECRET: bytes | None = None
+TIME_PATTERN = re.compile(r"[0-9]{1,12}")
+AUTH_PATTERN = re.compile(r"[0-9a-fA-F]{64}")
+TIME_WINDOW = 60
+MIN_SECRET_BYTES = 32
+MAX_SECRET_BYTES = 4096
+DEFAULT_SECRET_FILE = "/run/sandseek-sandbox/secret"
+NONCE_CAPACITY = 100_000
 
 
-def load_signing_secret(environ=os.environ) -> bytes | None:
-    """Takes the secret out of the environment, so it is not inherited by
-    anything this process starts and is gone from os.environ afterwards.
-    Missing or empty means no signing. A secret that is too short is a mistake
-    in the launcher, not a reason to sign with a weak key: refuse to start."""
-    value = environ.pop(SECRET_ENV, "").encode()
+def request_signature(secret: bytes, method: str, path: str, nonce: str, timestamp: str,
+                      body: bytes) -> str:
+    text = "\n".join((REQUEST_LABEL, method, path, nonce, timestamp,
+                      hashlib.sha256(body).hexdigest()))
+    return hmac.new(secret, text.encode(), hashlib.sha256).hexdigest()
+
+
+def response_signature(secret: bytes, method: str, path: str, nonce: str, status: int,
+                       body: bytes) -> str:
+    text = "\n".join((RESPONSE_LABEL, method, path, nonce, str(status),
+                      hashlib.sha256(body).hexdigest()))
+    return hmac.new(secret, text.encode(), hashlib.sha256).hexdigest()
+
+
+def load_secret(path: str) -> bytes:
+    """The secret in a file, without one trailing newline. It exits when the
+    file is missing, not a regular file, or too short or long, with a message
+    that never holds the secret. Called once, as root, before privileges are
+    dropped; the file is not read again."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as error:
+        sys.exit(f"cannot open the secret file: {error.strerror}; refusing to start")
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            sys.exit("the secret file is not a regular file; refusing to start")
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = -1
+            # Two bytes more than the longest secret: one trailing newline is
+            # stripped, and a second one then still makes it too long.
+            value = handle.read(MAX_SECRET_BYTES + 2)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
     value = value.removesuffix(b"\n")
-    if not value:
-        return None
-    if len(value) < SIGNING_MIN_SECRET_BYTES:
-        sys.exit(f"{SECRET_ENV} is shorter than {SIGNING_MIN_SECRET_BYTES} bytes; refusing to start")
+    if len(value) > MAX_SECRET_BYTES:
+        sys.exit(f"the secret is longer than {MAX_SECRET_BYTES} bytes; refusing to start")
+    if len(value) < MIN_SECRET_BYTES:
+        sys.exit(f"the secret is shorter than {MIN_SECRET_BYTES} bytes; refusing to start")
     return value
 
 
-def response_signature(secret: bytes, nonce: str, request_body: bytes,
-                       status: int, body: bytes) -> str:
-    prefix = f"{SIGNATURE_PREFIX}\n{nonce}\n{hashlib.sha256(request_body).hexdigest()}\n{status}\n"
-    return hmac.new(secret, prefix.encode() + body, hashlib.sha256).hexdigest()
+# --- Blocked addresses ------------------------------------------------------
+
+def load_blocked_addresses(text: str) -> frozenset:
+    """The addresses in `text`, separated by commas or white space, as address
+    objects. An IPv4-mapped IPv6 address counts as the IPv4 address it carries.
+    Raises ValueError for anything that is not a plain IP address (a zone id
+    such as `fe80::1%en0` included) and for an empty or over-long list, so a
+    mistake in the launcher stops the sandbox instead of leaving a hole in its
+    blocklist."""
+    found = set()
+    for part in re.split(r"[,\r\n\t ]+", text):
+        if not part:
+            continue
+        if "%" in part:
+            raise ValueError(f"an address with a zone id is not accepted: {part[:64]!r}")
+        try:
+            ip = ipaddress.ip_address(part)
+        except ValueError:
+            raise ValueError(f"not an IP address: {part[:64]!r}") from None
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        found.add(ip)
+        if len(found) > MAX_BLOCKED_ADDRESSES:
+            raise ValueError(f"more than {MAX_BLOCKED_ADDRESSES} addresses")
+    if not found:
+        raise ValueError("no addresses in the list")
+    return frozenset(found)
+
+
+def load_blocked_file(path: str) -> frozenset:
+    """The Mac's addresses in a file, read like the secret: once, as root,
+    before privileges are dropped. It exits when the file is missing, is not a
+    regular file, is too long or holds anything but addresses."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as error:
+        sys.exit(f"cannot open the Mac's address list: {error.strerror}; refusing to start")
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            sys.exit("the Mac's address list is not a regular file; refusing to start")
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = -1
+            data = handle.read(MAX_BLOCKED_FILE_BYTES + 1)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if len(data) > MAX_BLOCKED_FILE_BYTES:
+        sys.exit(f"the Mac's address list is longer than {MAX_BLOCKED_FILE_BYTES} bytes; "
+                 "refusing to start")
+    try:
+        return load_blocked_addresses(data.decode("ascii"))
+    except ValueError as error:  # a decoding error is a ValueError too
+        sys.exit(f"the Mac's address list: {error}; refusing to start")
+
+
+class NonceStore:
+    """Nonces accepted within the time window. Only requests with a correct
+    signature are stored, so a caller without the secret cannot fill it."""
+
+    def __init__(self, window: int = TIME_WINDOW, capacity: int = NONCE_CAPACITY):
+        self.window = window
+        self.capacity = capacity
+        self.seen: dict[str, int] = {}
+        self.lock = threading.Lock()
+        self.pruned_at = 0.0
+
+    def add(self, nonce: str, stamp: int, now: float) -> bool:
+        """False when the nonce was accepted before and is still remembered."""
+        key = nonce.lower()
+        with self.lock:
+            if now - self.pruned_at >= 1 or len(self.seen) >= self.capacity:
+                self.seen = {k: e for k, e in self.seen.items() if e >= now}
+                self.pruned_at = now
+            if key in self.seen:
+                return False
+            if len(self.seen) >= self.capacity:
+                raise ToolError("too many requests in the last minute", "busy", 503)
+            # A request with this stamp passes the time check until stamp + window.
+            self.seen[key] = stamp + self.window + 1
+            return True
 
 
 # --- HTTP API ---------------------------------------------------------------
@@ -1511,109 +1546,255 @@ class Handler(BaseHTTPRequestHandler):
     # connection is closed. It limits waits on the client's socket only, not
     # the fetch a request runs.
     timeout = REQUEST_TIMEOUT
+    # Seconds allowed for the whole request to arrive (see setup()).
+    read_deadline = READ_DEADLINE
     tools: WebTools = WebTools()
 
+    # Paths that may appear in the log; any other path is logged as "-", since
+    # a caller chooses it.
+    _LOGGED_PATHS = ("/health", "/v1/search", "/v1/fetch")
+
+    def setup(self):
+        super().setup()
+        # One deadline for the whole request line, headers and body together:
+        # Handler.timeout limits each wait, so a client sending a byte every
+        # few seconds would hold its thread (and a slot) for ever.
+        self.rfile = _HeadReader(self.rfile, MAX_HEAD_BYTES)
+        self._read_timer = threading.Timer(self.read_deadline, self._read_expired)
+        self._read_timer.daemon = True
+        self._read_timer.start()
+
+    def _read_expired(self):
+        try:
+            self.connection.shutdown(socket.SHUT_RD)
+        except OSError:
+            pass
+
+    def _request_read(self):
+        timer = getattr(self, "_read_timer", None)
+        if timer is not None:
+            timer.cancel()
+
+    def finish(self):
+        self._request_read()
+        super().finish()
+        self._linger()
+
+    def _linger(self):
+        """Closes without losing the answer. Closing a socket that still has
+        unread request bytes makes macOS (and sometimes Linux) send a reset,
+        which can reach the client before, and wipe out, the answer it has
+        not read yet. So the sending side is shut down first (the client
+        reads the answer and an end of file), then what the client still sends
+        is discarded for at most LINGER_SECONDS or LINGER_BYTES."""
+        connection = self.connection
+        try:
+            connection.shutdown(socket.SHUT_WR)
+            end = time.monotonic() + LINGER_SECONDS
+            left = LINGER_BYTES
+            while left > 0:
+                wait = end - time.monotonic()
+                if wait <= 0:
+                    break
+                connection.settimeout(wait)
+                chunk = connection.recv(min(left, 65536))
+                if not chunk:
+                    break
+                left -= len(chunk)
+        except OSError:
+            pass
+
+    def handle_one_request(self):
+        self._started = time.monotonic()
+        self._size = None
+        self.rfile.start_head()
+        super().handle_one_request()
+
+    def parse_request(self):
+        """The standard parsing, then stricter checks: the request line and
+        headers must fit MAX_HEAD_BYTES and MAX_HEADERS, and the target must
+        be a short, plain ASCII path (not a full URL)."""
+        too_big = self.rfile.over
+        if not too_big and not super().parse_request():
+            return False
+        if not self.rfile.over and not self.rfile.head_ended:
+            # The input ended (or the read deadline fired) inside the headers:
+            # no answer, as for any other stalled head.
+            self.close_connection = True
+            return False
+        keep_open = self.close_connection
+        self.close_connection = True  # Any refusal below closes the connection.
+        if too_big or self.rfile.over:
+            self.send_error(431, "request head too large")
+            return False
+        if len(self.headers) > MAX_HEADERS:
+            self.send_error(431, "too many headers")
+            return False
+        target = self.path
+        if (not target.startswith("/") or len(target) > MAX_TARGET_CHARS
+                or any(not "!" <= char <= "~" for char in target)):
+            self.send_error(400, "bad request target")
+            return False
+        self.close_connection = keep_open
+        return True
+
+    def log_request(self, code="-", size="-"):
+        # Method, path (no query), status, size and duration: never headers,
+        # bodies, URLs or queries.
+        path = self.path.split("?", 1)[0] if hasattr(self, "path") else ""
+        if path not in self._LOGGED_PATHS:
+            path = "-"
+        started = getattr(self, "_started", None)
+        took = "-" if started is None else f"{time.monotonic() - started:.2f}s"
+        size = self._size if getattr(self, "_size", None) is not None else size
+        method = getattr(self, "command", None)
+        if method not in ("GET", "POST", "HEAD", "PUT", "DELETE", "PATCH", "OPTIONS"):
+            method = "-"
+        self.log_message("%s %s %s %s %s", method, path, code, size, took)
+
+    def log_error(self, fmt, *args):
+        # The standard text repeats the request line, which holds the query.
+        self.log_message("request refused")
+
     def log_message(self, fmt, *args):
-        sys.stderr.write("%s %s\n" % (self.command, fmt % args))
+        sys.stderr.write(("%s\n" % (fmt % args))[:200])
+
+    # Set by main(); tests set their own. Without a secret nothing is served.
+    secret: bytes = b""
+    nonces: NonceStore = NonceStore()
+    now: Callable[[], float] = staticmethod(time.time)
 
     # The nonce of the request being answered, or None when its answer is not
-    # signed, and the request's body. Set at the start of every request.
+    # signed, and the request line's method and path.
     _nonce: str | None = None
-    _request_body: bytes = b""
-    # True when the client announced a body and went silent (Handler.timeout);
-    # do_POST then answers 408, signed over the EMPTY body (not the body that
-    # was announced), like any answer given before a whole body was read. The
-    # Swift client accepts that for a 408 only.
-    _body_timed_out: bool = False
-
-    def _read_nonce(self) -> ToolError | None:
-        """Remembers a valid nonce so every answer to this request is signed,
-        the error answers too. Returns the error for a malformed nonce; the
-        caller raises it once the Host check has passed. Does nothing without
-        a secret: that server never signs and ignores the header."""
-        self._nonce = None
-        if SIGNING_SECRET is None:
-            return None
-        values = self.headers.get_all(NONCE_HEADER)
-        if not values:
-            return None
-        if len(values) != 1 or not NONCE_PATTERN.fullmatch(values[0].strip()):
-            return ToolError(f"{NONCE_HEADER} must be 64 hexadecimal characters",
-                             "invalid_request", 400)
-        self._nonce = values[0].strip()
-        return None
-
-    def _read_request_body(self) -> bytes:
-        """Reads the body before any check, so an error answer given before it
-        is parsed is signed over the bytes the caller sent. A Content-Length
-        that is missing, unparsable or too large gives no body here, and
-        do_POST reports it as before. A client that stops sending (Handler.timeout)
-        gives no body either, and the connection is closed after the answer."""
-        self._body_timed_out = False
-        try:
-            length = int(self.headers.get("Content-Length") or 0)
-            return self.rfile.read(length) if 0 < length <= MAX_REQUEST_BYTES else b""
-        except TimeoutError:
-            self._body_timed_out = True
-            self.close_connection = True
-            return b""
-        except (ValueError, OSError):
-            return b""
+    _method: str = ""
+    _path: str = ""
 
     def _send(self, status: int, payload: dict):
         data = json.dumps(payload).encode()
+        self._size = len(data)
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
-        if SIGNING_SECRET is not None and self._nonce is not None:
-            self.send_header(SIGNATURE_HEADER, response_signature(
-                SIGNING_SECRET, self._nonce, self._request_body, status, data))
+        if self._nonce is not None and self.secret:
+            self.send_header(AUTH_HEADER, response_signature(
+                self.secret, self._method, self._path, self._nonce, status, data))
         self.end_headers()
-        self.wfile.write(data)
+        if self._method != "HEAD":
+            self.wfile.write(data)
 
     def _error(self, error: ToolError):
         self._send(error.status, {"error": {"message": error.message, "code": error.code}})
 
-    def do_GET(self):
-        nonce_error = self._read_nonce()
-        self._request_body = b""
-        if not host_allowed(self.headers.get("Host")):
-            return self._error(ToolError("forbidden host", "forbidden_host", 403))
-        if nonce_error:
-            return self._error(nonce_error)
-        if self.path == "/health":
-            # "passages" tells the research loop this sandbox can rank passages.
-            # "pdf" tells it /v1/fetch reads PDFs (pypdf is installed).
-            # "raw" tells a caller that POST /v1/raw exists. "signed" tells it
-            # that answers to a request with a nonce carry a signature.
-            return self._send(200, {"status": "ok", "passages": True, "pdf": PdfReader is not None,
-                                    "raw": True, "signed": SIGNING_SECRET is not None})
-        self._error(ToolError("not found", "not_found", 404))
+    def _read_request_body(self, method: str) -> bytes:
+        """Reads the body before it is checked, so the signature covers the
+        bytes that were sent. A Transfer-Encoding is refused, a POST needs a
+        Content-Length, a Content-Length that cannot be a request's is an error,
+        and a client that stops sending (Handler.timeout) is answered with 408.
+        Every refusal here closes the connection, since unread bytes may be
+        left on it."""
+        if self.headers.get("Transfer-Encoding") is not None:
+            self.close_connection = True
+            raise ToolError("chunked requests are not accepted", "invalid_request", 400)
+        if len(self.headers.get_all("Content-Length") or []) > 1:
+            self.close_connection = True
+            raise ToolError("more than one Content-Length", "invalid_request", 400)
+        raw = self.headers.get("Content-Length")
+        if raw is None:
+            if method == "POST":
+                raise ToolError("Content-Length is required", "invalid_request", 411)
+            return b""
+        digits = raw.strip()
+        if not (digits.isascii() and digits.isdigit()):
+            self.close_connection = True
+            raise ToolError("Content-Length is not a number", "invalid_request", 400)
+        if len(digits.lstrip("0")) > 18 or int(digits) > MAX_REQUEST_BYTES:
+            self.close_connection = True
+            raise ToolError("request body is too large", "invalid_request", 413)
+        length = int(digits)
+        try:
+            data = self.rfile.read(length) if length else b""
+        except (TimeoutError, socket.timeout):
+            data = b""
+        except OSError:
+            self.close_connection = True
+            raise ToolError("the request body could not be read", "invalid_request", 400)
+        if len(data) < length:
+            # The client stopped sending, or left.
+            self.close_connection = True
+            raise ToolError("timed out waiting for the request body", "request_timeout", 408)
+        return data
 
-    def do_POST(self):
-        nonce_error = self._read_nonce()
-        self._request_body = self._read_request_body()
+    def _note_nonce(self) -> None:
+        """Remembers a well-formed nonce so that every answer to this request
+        is signed, error answers too. Signing an error reveals nothing: the
+        answer's status and body are the server's own, only the nonce, method
+        and path come from the caller."""
+        values = self.headers.get_all(NONCE_HEADER) or []
+        if len(values) == 1 and NONCE_PATTERN.fullmatch(values[0].strip()):
+            self._nonce = values[0].strip()
+
+    def _authenticate(self, method: str, body: bytes) -> None:
+        if not self.secret:  # main() always sets one; nothing is served without it
+            raise ToolError("the sandbox has no secret", "internal_error", 500)
+        fail = ToolError("the request is not signed correctly", "unauthorized", 401)
+        stamps = self.headers.get_all(TIME_HEADER) or []
+        auths = self.headers.get_all(AUTH_HEADER) or []
+        if (self._nonce is None or len(stamps) != 1 or len(auths) != 1
+                or not TIME_PATTERN.fullmatch(stamps[0].strip())
+                or not AUTH_PATTERN.fullmatch(auths[0].strip())):
+            raise fail
+        stamp_text = stamps[0].strip()
+        now = self.now()
+        if abs(now - int(stamp_text)) > TIME_WINDOW:
+            raise ToolError("the request's time is too far from the sandbox's clock",
+                            "stale_request", 401)
+        expected = request_signature(self.secret, method, self._path, self._nonce, stamp_text, body)
+        if not hmac.compare_digest(expected, auths[0].strip().lower()):
+            raise fail
+        if not self.nonces.add(self._nonce, int(stamp_text), now):
+            raise ToolError("this request was already received", "replayed_request", 401)
+
+    def _handle(self, method: str):
+        self._nonce = None
+        self._method = method
+        self._path = self.path
+        self._note_nonce()
         try:
             if not host_allowed(self.headers.get("Host")):
+                # The body is not read, so it must not be taken for a request.
+                self.close_connection = True
                 raise ToolError("forbidden host", "forbidden_host", 403)
-            if nonce_error:
-                raise nonce_error
+            try:
+                body = self._read_request_body(method)
+            finally:
+                self._request_read()
+            self._authenticate(method, body)
+            if method == "GET":
+                if self.path != "/health":
+                    raise ToolError("not found", "not_found", 404)
+                # "passages" tells the research loop this sandbox can rank
+                # passages. "api" is the version of this API. "pdf" tells it
+                # /v1/fetch reads PDFs (pypdf is installed).
+                # "blocked_addresses" is how many of the Mac's own addresses
+                # this server refuses; the security check compares it with
+                # the list the launcher wrote.
+                return self._send(200, {"status": "ok", "api": 1, "passages": True,
+                                        "pdf": PdfReader is not None,
+                                        "blocked_addresses": len(BLOCKED_ADDRESSES)})
+            if method != "POST":
+                raise ToolError("method not allowed", "method_not_allowed", 405)
             # A browser cannot send application/json cross-origin without a
             # preflight, which this server never answers.
             if not (self.headers.get("Content-Type") or "").startswith("application/json"):
                 raise ToolError("Content-Type must be application/json", "invalid_request", 415)
-            length = int(self.headers.get("Content-Length") or 0)
-            if not 0 < length <= MAX_REQUEST_BYTES:
+            if not 0 < len(body) <= MAX_REQUEST_BYTES:
                 raise ToolError("request body is missing or too large", "invalid_request", 413)
-            if self._body_timed_out:
-                # The client announced a body and stopped sending (Handler.timeout).
-                raise ToolError("timed out waiting for the request body",
-                                "request_timeout", 408)
             try:
-                request = json.loads(self._request_body)
-            except ValueError:
-                raise ToolError("request body is not JSON", "invalid_request", 400)
+                request = json.loads(body)
+            except (ValueError, RecursionError):
+                raise ToolError("request body is not JSON", "invalid_request", 400) from None
             if not isinstance(request, dict):
                 raise ToolError("request body must be a JSON object", "invalid_request", 400)
             if self.path == "/v1/search":
@@ -1624,19 +1805,127 @@ class Handler(BaseHTTPRequestHandler):
                     request.get("url"), request.get("offset", 0),
                     request.get("max_chars", DEFAULT_SLICE_CHARS),
                     request.get("passages", False), request.get("query", ""))
-            elif self.path == "/v1/raw":
-                result = self.tools.raw(
-                    request.get("url"), request.get("accept", RAW_DEFAULT_ACCEPT),
-                    request.get("max_bytes", MAX_DOWNLOAD_BYTES),
-                    request.get("timeout_seconds", RAW_DEFAULT_TIMEOUT))
             else:
                 raise ToolError("not found", "not_found", 404)
             self._send(200, result)
         except ToolError as error:
             self._error(error)
         except Exception as error:  # Never leak a traceback to the caller.
-            sys.stderr.write(f"internal error: {error!r}\n")
+            sys.stderr.write(f"internal error: {type(error).__name__}\n")
             self._error(ToolError("internal error", "internal_error", 500))
+
+    def do_GET(self):
+        self._handle("GET")
+
+    def do_POST(self):
+        self._handle("POST")
+
+    def do_PUT(self):
+        self._handle("PUT")
+
+    def do_DELETE(self):
+        self._handle("DELETE")
+
+    def do_PATCH(self):
+        self._handle("PATCH")
+
+    def do_HEAD(self):
+        self._handle("HEAD")
+
+    def do_OPTIONS(self):
+        self._handle("OPTIONS")
+
+
+class _HeadReader:
+    """Wraps the request's input stream. While the request line and headers
+    are read it counts the bytes, and past `budget` it reports the end of the
+    headers and sets `over`, so a flood of headers never fills memory. The
+    body is read without the count."""
+
+    def __init__(self, raw, budget: int):
+        self._raw = raw
+        self._limit = budget
+        self._left: int | None = budget
+        self.over = False
+        self.head_ended = False  # The head ended with a blank line.
+
+    def start_head(self) -> None:
+        self._left = self._limit
+        self.over = False
+        self.head_ended = False
+
+    def readline(self, size: int = -1) -> bytes:
+        if self.over:
+            return b""
+        if self._left is None:
+            return self._raw.readline(size)
+        room = self._left + 1
+        line = self._raw.readline(room if size is None or size < 0 else min(size, room))
+        self._left -= len(line)
+        if self._left < 0:
+            self.over = True
+            return b""
+        if line in (b"\r\n", b"\n"):
+            self.head_ended = True
+        return line
+
+    def read(self, size: int = -1) -> bytes:
+        self._left = None  # The head is complete; the body is bounded elsewhere.
+        return self._raw.read(size)
+
+    def __getattr__(self, name):
+        return getattr(self._raw, name)
+
+
+class BoundedServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer that serves at most `max_connections` connections at
+    once. Past that, a new connection is closed without an answer."""
+    daemon_threads = True
+
+    def __init__(self, address, handler, max_connections: int = MAX_CONNECTIONS):
+        super().__init__(address, handler)
+        self._slots = threading.BoundedSemaphore(max_connections)
+
+    def server_bind(self):
+        # HTTPServer.server_bind also asks for the host's fully qualified name
+        # (socket.getfqdn), a reverse DNS lookup that can stall for a minute on
+        # a machine whose resolver is slow, and nothing here uses the name.
+        # Bind as TCPServer does and record the address as it is.
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host
+        self.server_port = port
+
+    def process_request(self, request, client_address):
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+
+def no_memory_dumps() -> None:
+    """No core file and no ptrace or /proc/<pid>/mem read of this process by
+    the same user, since its memory holds the secret and the pages it read.
+    Linux only; where it is not available this does nothing."""
+    try:
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    except (OSError, ValueError):
+        pass
+    try:
+        pr_set_dumpable = 4
+        ctypes.CDLL(None, use_errno=True).prctl(pr_set_dumpable, 0, 0, 0, 0)
+    except (OSError, AttributeError):
+        pass
 
 
 def drop_privileges(uid: int = SANDBOX_UID) -> None:
@@ -1675,10 +1964,18 @@ def stop_on_sigterm(server) -> None:
     signal.signal(signal.SIGTERM, handler)
 
 
-def main():
-    global SIGNING_SECRET
-    SIGNING_SECRET = load_signing_secret()
+def main(secret_file: str = DEFAULT_SECRET_FILE):
+    # Read as root, before privileges are dropped. No secret, no server. Only
+    # tests pass another file; nothing in the environment can move it.
+    no_memory_dumps()
+    Handler.secret = load_secret(secret_file)
+    # The Mac's own addresses, from the file beside the secret, read the same
+    # way and for the same reason; no list, no server.
+    global BLOCKED_ADDRESSES
+    BLOCKED_ADDRESSES = load_blocked_file(
+        os.path.join(os.path.dirname(secret_file), BLOCKED_FILE_NAME))
     drop_privileges()
+    no_memory_dumps()  # Again: changing user can make the process dumpable.
     # 0.0.0.0, not 127.0.0.1: `container run --publish` forwards the Mac's
     # 127.0.0.1:9100 to this VM's network address, not to its loopback, so a
     # loopback-only server would never be reached. The VM's input firewall
@@ -1687,11 +1984,9 @@ def main():
     # side is published on 127.0.0.1 only. Anything that can send from the
     # gateway address (processes on the Mac) can still connect, so the Host
     # check stays.
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
-    server.daemon_threads = True
+    server = BoundedServer(("0.0.0.0", PORT), Handler)
     stop_on_sigterm(server)
-    sys.stderr.write(f"SandSeek sandbox listening on :{PORT}"
-                     f" ({'signing answers' if SIGNING_SECRET is not None else 'not signing'})\n")
+    sys.stderr.write(f"SandSeek sandbox listening on :{PORT}\n")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

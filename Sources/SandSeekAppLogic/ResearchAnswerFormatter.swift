@@ -34,6 +34,12 @@ public enum ResearchAnswerFormatter {
         return linkCitations(in: result, sourceNumbers: sourceNumbers)
     }
 
+    /// The answer as plain text for the clipboard: no formatting marks, no
+    /// links, nothing but the words.
+    public static func plainText(_ answer: String) -> String {
+        String(attributed(answer, sourceNumbers: []).characters)
+    }
+
     /// Bold, italics and code from one line of Markdown, with every link and
     /// image reference removed.
     static func inline(_ line: String) -> AttributedString {

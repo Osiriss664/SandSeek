@@ -1,7 +1,7 @@
 # Installing SandSeek
 
-SandSeek is built from source on your Mac. There is no installer and no
-download of a finished app yet. This page covers what you need, how to build and
+You can download the app from the release page (it is not notarized; see the
+README) or build it from source on your Mac. This page covers what you need, how to build and
 package the app, how to start a model server safely, the first run, where
 things are stored and how to remove everything again.
 
@@ -13,17 +13,25 @@ For what the security design does and does not promise, read
 - A Mac with Apple silicon and **macOS 26** (Apple `container` needs it).
 - **16 GB of memory** is the size the project was tested on. A model server with
   a loaded model uses most of it, so run only one server at a time.
-- **Apple `container`**, from its
-  [releases page](https://github.com/apple/container/releases). After the
-  installer has run, `container system start` starts its background service
-  (SandSeek's scripts do this when it is not running).
+- **Apple `container` 1.5.0 or newer**, installed with Apple's installer from
+  its [releases page](https://github.com/apple/container/releases), which puts
+  it at `/usr/local/bin/container`. SandSeek runs only that file, never one it
+  finds on your PATH, and only after checking that it is Apple's: the file and
+  the folders above it must belong to root and not be writable by you or your
+  group, its code signature must be Apple's, and its version must be 1.5.0 or
+  newer. (A copy that Homebrew or another installer put elsewhere is not used.)
+  SandSeek does not pass proxy variables (`HTTP_PROXY` and the like) to
+  `container`; if image downloads must go through a proxy, set it system-wide,
+  for example in System Settings > Network.
+  After the installer has run, `container system start` starts its background
+  service (SandSeek's scripts do this when it is not running).
 - A **Swift 6.2 toolchain** to build: Xcode 26, or the command line tools that
   come with it. `swift --version` should print 6.2 or newer.
 - A **local model server** that SandSeek can connect to:
   - **TUFF 8.3.1 or newer** (the official release), with a Qwen model for
     research; or
   - **llama.cpp** (`llama-server`), with a model that supports tool calls (the
-    project probed it with Bonsai). llama.cpp is experimental in 0.1.0: no
+    project probed it with Bonsai). llama.cpp is experimental in 0.2.0: no
     streaming, the Thinking switch has no effect on it yet, and no research
     run was measured with it; see [SECURITY.md](SECURITY.md).
   - Ollama and LM Studio are planned (the picker shows them as "later");
@@ -43,7 +51,11 @@ From the folder of your SandSeek checkout:
 swift build -c release
 swift test
 python3 -m unittest Sandbox/test_server.py
+python3 -m unittest discover -s Scripts -p 'test_*.py'
 ```
+
+`Scripts/full_test.sh` runs every check that needs no clicks; `--help` lists
+its options.
 
 The first build fetches nothing from the internet: SandSeek uses only Apple's
 own libraries. `swift build` produces the `sandseek` command in
@@ -200,17 +212,31 @@ note if it could not tell.
 
 ## First run
 
-1. Open `SandSeek.app`. The window has a sidebar (Research, Reports, Settings),
-   a **Model server** card and a **Sandbox** card.
+1. Open `SandSeek.app`. The window has a sidebar (Research, Reports, Settings).
+   The Research screen has the question box on top, then a **Model server**
+   card and a **Web sandbox** card. The arrow by a card's title folds it; the (i)
+   button has the longer explanations. **Start everything** does steps 2 and 3
+   for you (it starts the model server only if you chose a program for it, see
+   above), then runs the security check. **Stop everything** stops the
+   question, the sandbox this app started, and the model server only if
+   SandSeek started it. A sandbox started from Terminal is left running; stop
+   it with `Scripts/research_sandbox.sh stop`.
 2. On the model server card, choose TUFF or llama.cpp, check the address, and
    press **Check**. It should say **Connected** and list the models.
 3. On the sandbox card, press **Start Sandbox**. The first start builds the
    image and takes a few minutes. When it says **Ready**, the app has checked the
-   firewall and the server's privileges from outside the VM.
+   firewall and the server's privileges from outside the VM, and the card shows
+   **Signed** with the time of the last signed health check.
    **Security check** runs the longer self-test (about a minute).
 4. Pick the model, choose **Quick answer** or **Thorough**, type a question and
    press **Research** (Command-Return). Progress and answer appear side by side;
-   **Stop** ends the question.
+   **Stop** ends the question. A saved report opened during a run gets its own
+   window. Sources are cards; **Copy answer** copies the answer as plain text,
+   and a report can be printed (Command-P) or exported with **Export as PDF…**.
+   Under the answer, **Figure check (N)** lists figures, dates or names the
+   cited pages do not back up, and **Pages that could not be read (N)** lists
+   the pages that failed, with the reason; click a list to open it. Both are
+   also in the report window and the saved Markdown, not in Print or the PDF.
 
 From Terminal, with the sandbox started (`Scripts/research_sandbox.sh build`
 once, then `start`) and a server running:
@@ -234,7 +260,9 @@ rounds the model may take (default 8). `sandseek --help` lists all options.
 | A note that SandSeek started a model server (so a later launch can find it) | `~/Library/Application Support/SandSeek/State/model-server-started-by-app.json` |
 | The log of the model server SandSeek started | `~/Library/Application Support/SandSeek/Logs/model-server.log` |
 | The app's settings (server choice, addresses, the chosen server program, model and models folder, presets, last question) | the app's preferences file in `~/Library/Preferences` (its name contains `sandseek`) |
-| The sandbox image and VM | Apple `container`: image `sandseek-sandbox:latest`, VM `sandseek-sandbox` |
+| The sandbox image and VM | Apple `container`: image `sandseek-sandbox:latest`, VM `sandseek-sandbox-<random>` (a new one at each start; `container list | grep sandseek`) |
+| The sandbox's secret, port, VM name, lock and the Mac's blocked addresses | `secret`, `port`, `vm-name`, `lock`, `blocked-addresses` in `~/Library/Application Support/SandSeek/sandbox` (removed by Stop) |
+| A note that the app started the sandbox | `~/Library/Application Support/SandSeek/State/sandbox-started-by-app` |
 | The built app and command | `build/SandSeek.app`, `.build/release/sandseek` in your checkout |
 
 Reports from TUFF's research screen (in `~/Library/Application Support/TUFF/Research
@@ -246,7 +274,10 @@ originals are never changed or removed.
 Fetch the new code, then build and package again. The app rebuilds the sandbox
 image by itself when anything in `Sandbox/` changed; by hand, run
 `Scripts/research_sandbox.sh build`. Quit the app and stop the sandbox first
-(**Stop Sandbox**, or `Scripts/research_sandbox.sh stop`).
+(**Stop everything**, or `Scripts/research_sandbox.sh stop`).
+
+After updating from the first release, the first **Start** rebuilds the sandbox image, which
+takes a few minutes. The old secret file in TUFF's folder is removed.
 
 ## Uninstall
 
@@ -270,7 +301,7 @@ them with a command**, so you can still get them back.
    you want to keep them, copy that folder somewhere else first. Then, in
    Finder, choose Go > Go to Folder, open `~/Library/Application Support` and
    move the `SandSeek` folder to the Trash. It holds the reports, the key
-   file and the model server's log; move that folder only when you no longer need any of them. A llama.cpp
+   file, the model server's log and the sandbox folder; move that folder only when you no longer need any of them. A llama.cpp
    server started with that key file will not start again without it.
 5. In `~/Library/Preferences`, move the preferences file whose name contains
    `sandseek` to the Trash.
@@ -278,13 +309,41 @@ them with a command**, so you can still get them back.
 
 ## Troubleshooting
 
-- **"Apple container is not installed"**: install it from the releases page above.
+- **"Apple container is not installed"**: install it with Apple's installer
+  from the releases page above. SandSeek looks only at
+  `/usr/local/bin/container`.
+- **"... can be changed by you or another user"**: the message names the path
+  that failed.
+  - If it is a **folder** (typically `/usr/local/bin` or `/usr/local`, owned by
+    you or writable by a group after an Intel/Rosetta Homebrew was installed
+    there), Apple's installer does not change it. To let SandSeek trust it, make
+    it belong to root: `sudo chown root:wheel <folder> && sudo chmod 755
+    <folder>` (this affects an Intel Homebrew installed in `/usr/local`).
+  - If it is the **file** `/usr/local/bin/container` itself, reinstall Apple
+    container with Apple's installer.
+
+  `ls -ld /usr /usr/local /usr/local/bin /usr/local/bin/container` shows who
+  owns each.
+- **"... is not signed by Apple"**: the file at `/usr/local/bin/container` is
+  not Apple's release (a build you made yourself is signed ad hoc and is not
+  accepted). Install Apple's package.
+- **"... but SandSeek needs 1.5.0 or newer"**: update Apple container.
 - **The sandbox does not become Ready, or "Not verified"**: stop it and start it
   again. If it stays red, run `Scripts/research_sandbox.sh selftest` and read the
   `FAIL` lines.
+- **"Another SandSeek is using the web sandbox. Close it first, or press Stop in
+  it."**: another copy of the app, or `Scripts/research_sandbox.sh start`, has
+  the sandbox. Stop it there (**Stop Sandbox**, or `Scripts/research_sandbox.sh
+  stop`) and start again. If you cannot find who has it (for example the app
+  crashed), `Scripts/research_sandbox.sh stop` ends it. When the app crashes,
+  or a start is cut off by its time limit, the lock and the VM are not released:
+  a small helper process holds the lock and the VM keeps running until you press
+  **Stop** or the same app starts the sandbox again, which takes over from it
+  and removes the old VM. Only an app that did not start it, or a command line
+  start, sees the message.
 - **The model server card says "Not running"**: start the server (see above) and
-  press **Check**. The address must be on 127.0.0.1 with a port, and not 9100,
-  which is the sandbox's.
+  press **Check**. The address must be on 127.0.0.1 with a port, and not the
+  sandbox's.
 - **llama.cpp: "refused the key"**: the server was started without the key file
   the app made. Start it again with the command on the card.
 - **A question is very slow**: a 16 GB Mac holds one model at a time. Quit other

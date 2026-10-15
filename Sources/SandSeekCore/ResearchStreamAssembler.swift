@@ -210,8 +210,8 @@ public struct ResearchStreamAssembler: Sendable {
     /// status, so the same statuses are derived from the code, and the agent
     /// reacts as it does without streaming: a status of 500 or more is
     /// retried (`model_memory_busy` is 503), and `context_length_exceeded`
-    /// (400) shortens the conversation. In Abschnitt 2b this table belongs
-    /// to the TUFF connector, and llama.cpp gets its own.
+    /// (400) shortens the conversation. This table belongs
+    /// to TUFF; llama.cpp gets plain requests.
     static let tuffStatus: [String: Int] = [
         "model_not_found": 404,
         "queue_full": 429,

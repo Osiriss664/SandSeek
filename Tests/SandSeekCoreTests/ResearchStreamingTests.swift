@@ -1031,7 +1031,8 @@ struct ResearchServerConnectionTests {
             } catch let error as ResearchError {
                 let text = error.description
                 #expect(text.contains("--server-type llamacpp"), "\(text)")
-                #expect(text.contains("2b"), "\(text)")
+                #expect(text.contains("experimental"), "\(text)")
+                #expect(!text.contains("Abschnitt"), "\(text)")
                 #expect(text.contains("non-streaming"), "\(text)")
             } catch {
                 Issue.record("unexpected error \(error)")
@@ -1150,7 +1151,8 @@ struct ResearchStreamingArgumentsTests {
         #expect(usage.contains("--server-type tuff|llamacpp|auto"))
         #expect(usage.contains("--stream on|off"))
         #expect(usage.contains("/tuff/v1/status"))
-        #expect(usage.contains("2b"))
+        #expect(usage.contains("experimental"))
+        #expect(!usage.contains("Abschnitt"))
     }
 
     @Test func aReplayCannotBeCombinedWithTheNewOptions() {

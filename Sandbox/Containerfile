@@ -1,15 +1,20 @@
 # Web tool server for `sandseek`. Built and run with Apple `container`
 # by Scripts/research_sandbox.sh; see docs/SECURITY.md.
 #
-# The base image is pinned by digest (python:3.12-slim) and every Python
-# package by hash, so a rebuild installs the same code. To update, change the
-# digest and regenerate requirements.txt as requirements.in describes.
-# nftables comes from Debian's repositories unpinned (the VM runs the firewall,
-# so the package matters); the build prints the installed versions of nftables
-# and Python so a build log records them. Check the Python patch level there
-# against CVE-2025-6069 (html.parser, quadratic) when the digest is updated; the
-# server also runs its HTML fallback parser in a killed-after-timeout child.
+# Everything the image holds is pinned, so a rebuild installs the same code:
+# - the base image by digest (python:3.12-slim);
+# - Debian packages by a snapshot date on snapshot.debian.org (DEBIAN_SNAPSHOT),
+#   so the nftables that loads the firewall is the same on every build;
+# - every Python package by hash (requirements.txt, generated from
+#   requirements.in as that file describes).
+# To update, change the digest, the snapshot date and requirements.txt together.
+# The build prints the installed versions of nftables and Python so a build log
+# records them. Check the Python patch level there against CVE-2025-6069
+# (html.parser, quadratic) when the digest is updated; the server also runs its
+# HTML fallback parser in a killed-after-timeout child.
 FROM docker.io/library/python:3.12-slim@sha256:dddfd7e07f9d15aeeca61529320492139d21cac7f0070c00609243e51e4e0016
+
+ARG DEBIAN_SNAPSHOT=20261002T000000Z
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -17,14 +22,32 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 COPY requirements.txt /app/requirements.txt
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends nftables \
-    && dpkg-query --show nftables && python --version \
-    && rm -rf /var/lib/apt/lists/* \
-    && pip install --require-hashes --no-deps -r /app/requirements.txt \
-    && useradd --uid 10001 --no-create-home --home-dir /nonexistent \
-       --shell /usr/sbin/nologin sandbox
+# The RUN below points apt at the snapshot (deb822 and one-line formats) and
+# refuses to go on if any source still names the live archive.
+RUN set -eux; \
+    for file in /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list; do \
+      [ -f "$file" ] || continue; \
+      sed -i \
+        -e "s#https\?://deb.debian.org/debian-security#http://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}#g" \
+        -e "s#https\?://deb.debian.org/debian#http://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}#g" \
+        -e "s#https\?://security.debian.org/debian-security#http://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}#g" \
+        "$file"; \
+    done; \
+    if grep -rE 'deb\.debian\.org|security\.debian\.org' /etc/apt; then \
+      echo "an apt source still names the live Debian archive" >&2; exit 1; \
+    fi; \
+    printf '%s\n' 'Acquire::Check-Valid-Until "false";' 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/99snapshot; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends nftables; \
+    dpkg-query --show nftables; python --version; \
+    rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/99snapshot; \
+    pip install --require-hashes --no-deps -r /app/requirements.txt; \
+    useradd --uid 10001 --no-create-home --home-dir /nonexistent \
+       --shell /usr/sbin/nologin sandbox; \
+    mkdir -p /run/sandseek-sandbox
 
+# /run/sandseek-sandbox is where the launcher mounts the folder with the secret
+# file (read-only); server.py reads it once, as root, before it drops privileges.
 COPY server.py firewall.nft entrypoint.sh default_gateway.py /app/
 
 # Starts as root only to load firewall.nft; server.py then switches to user

@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import os
 import SandSeekCore
 
 /// Starts and stops the model server from the card, and remembers which
@@ -217,6 +218,7 @@ public final class ResearchServerLaunchController {
         let mine = attempt
         state = .starting
         logTail = ""
+        ServiceLog.logger.notice("Server start requested: \(type.rawValue, privacy: .public)")
 
         // The files first: nothing is started from a program or key file that
         // is not as it should be.
@@ -248,6 +250,8 @@ public final class ResearchServerLaunchController {
         current = launched
         launchedAt = Date()
         owned = Owned(type: type, port: port, pid: pid, path: resolved, adopted: false)
+        ServiceLog.logger.notice(
+            "Server started: \(type.rawValue, privacy: .public), pid \(pid, privacy: .public)")
         if let identity = launched.identity {
             try? ResearchServerMarker(type: type.rawValue, port: port, pid: pid, identity: identity)
                 .write(to: stateDirectory)
@@ -259,13 +263,15 @@ public final class ResearchServerLaunchController {
         let timeout = kind == .tuff ? timing.tuffReady : timing.llamaReady
         let readyPath = kind == .tuff ? "/tuff/v1/status" : "/health"
         let deadline = ContinuousClock.now + timeout
+        var lastStatus: Int?
         while true {
             guard attempt == mine, state == .starting else { return }
             if let exit = launched.exit {
                 serverEnded(pid: pid, exit: exit)
                 return
             }
-            if await answers(port: port, path: readyPath) {
+            lastStatus = await answerStatus(port: port, path: readyPath)
+            if lastStatus == 200 {
                 // Only counts while our own process still runs: something
                 // else may have answered on the port.
                 guard attempt == mine, state == .starting else { return }
@@ -276,6 +282,9 @@ public final class ResearchServerLaunchController {
                 break
             }
             if ContinuousClock.now >= deadline {
+                let seen = lastStatus.map(String.init) ?? "no answer"
+                ServiceLog.logger.notice(
+                    "Server not ready in time: last answer on \(readyPath, privacy: .public) was \(seen, privacy: .public)")
                 // `.stopping` keeps the exit from being reported as a crash.
                 state = .stopping
                 let stopped = await terminateAndWait(launched)
@@ -359,15 +368,18 @@ public final class ResearchServerLaunchController {
         }
     }
 
-    private func answers(port: Int, path: String) async -> Bool {
+    /// The HTTP status the route answered with; nil when nothing answered.
+    private func answerStatus(port: Int, path: String) async -> Int? {
         guard let url = URL(string: "http://\(ResearchServerLaunchPlan.host):\(port)\(path)") else {
-            return false
+            return nil
         }
         let response = try? await transport.send(method: "GET", url: url, body: nil, timeout: 3)
-        return response?.status == 200
+        return response?.status
     }
 
     private func fail(_ message: String, showLog: Bool = false) {
+        // The message can name files on this Mac, so it stays private in the log.
+        ServiceLog.logger.notice("Server problem: \(message, privacy: .private)")
         logTail = showLog ? ResearchServerLog.tail(at: logURL) : ""
         state = .failed(message)
     }
@@ -380,6 +392,9 @@ public final class ResearchServerLaunchController {
     func serverEnded(pid: Int32, exit: ResearchServerExit) {
         guard let owned, owned.pid == pid else { return }
         let asked = state == .stopping
+        let code: Int32 = exit.code ?? -1
+        ServiceLog.logger.notice(
+            "Server ended: pid \(pid, privacy: .public), code \(code, privacy: .public), by signal \(exit.bySignal, privacy: .public), SandSeek asked \(asked, privacy: .public)")
         let started = owned.adopted ? nil : Date().timeIntervalSince(launchedAt)
         clearOwned()
         guard !asked else { return }
@@ -415,12 +430,16 @@ public final class ResearchServerLaunchController {
     /// server card again.
     public func stop(using server: ResearchServerController? = nil) async {
         guard let launched = current, state != .stopping else { return }
+        let pid = launched.pid
+        ServiceLog.logger.notice("Server stop requested: pid \(pid, privacy: .public)")
         attempt += 1
         state = .stopping
         if await terminateAndWait(launched) {
             clearOwned()
             state = .idle
+            ServiceLog.logger.notice("Server stopped: pid \(pid, privacy: .public)")
         } else {
+            ServiceLog.logger.notice("Server did not stop: pid \(pid, privacy: .public)")
             state = .failed("SandSeek could not stop the server (process \(launched.pid)). "
                 + "Quit it in Activity Monitor.")
         }

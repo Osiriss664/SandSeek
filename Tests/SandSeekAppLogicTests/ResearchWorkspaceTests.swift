@@ -17,6 +17,12 @@ private final class BusyRunServices: ResearchHTTPTransport, @unchecked Sendable 
         }
         return try await inner.send(method: method, url: url, body: body)
     }
+
+    func send(method: String, url: URL, body: Data?, timeout: TimeInterval?,
+              authorization: String?, headers: [String: String]) async throws -> ResearchHTTPResponse {
+        try await inner.send(method: method, url: url, body: body, timeout: timeout,
+                             authorization: authorization, headers: headers)
+    }
 }
 
 @Suite @MainActor struct ResearchWorkspaceTests {
@@ -50,11 +56,11 @@ private final class BusyRunServices: ResearchHTTPTransport, @unchecked Sendable 
         let runServices = FakeResearchServices(
             modelReplies: Array(repeating: FakeResearchServices.answer("An answer."), count: 4))
         let run = ResearchRunController(
-            store: reports, transport: busyRun ? BusyRunServices(runServices) : runServices)
+            store: reports, transport: busyRun ? BusyRunServices(runServices) : runServices, sandboxSecretFile: TestSandboxSecret.file)
         let sandbox = ResearchSandboxController(
-            runner: FakeProcessRunner(), transport: FakeResearchServices(),
+            runner: FakeProcessRunner(), containerTool: .trustedForTests(), transport: FakeResearchServices(),
             defaults: MemorySettings(), environment: [:], resources: try testResources(),
-            stateDirectory: temporaryDirectory())
+            stateDirectory: temporaryDirectory(), secretFile: TestSandboxSecret.file)
         await sandbox.start()
         let launch = launch ?? testLaunchController()
         let workspace = ResearchWorkspace(
@@ -128,14 +134,20 @@ private final class BusyRunServices: ResearchHTTPTransport, @unchecked Sendable 
             defaults: MemorySettings(), keyStore: MemoryKeyStore(key: "test-key"),
             transport: services, tuffStreaming: false)
         let reports = ResearchReportStore(directory: temporaryDirectory())
+        // The quit path runs the tool itself, not through the fake runner. A
+        // path with no tool keeps this test away from a real `container` on
+        // the Mac, whose empty list would end the first quit's ownership. The
+        // file is still called `container`: the fake runner answers by name.
+        let noTool = marks.appendingPathComponent("missing/container").path
         let sandbox = ResearchSandboxController(
-            runner: FakeProcessRunner(), transport: FakeResearchServices(),
-            defaults: MemorySettings(), environment: [:],
-            resources: try testResources(bundle: bundle), stateDirectory: temporaryDirectory())
+            runner: FakeProcessRunner(), containerTool: .trustedForTests(path: noTool),
+            transport: FakeResearchServices(), defaults: MemorySettings(), environment: [:],
+            resources: try testResources(bundle: bundle), stateDirectory: temporaryDirectory(), secretFile: TestSandboxSecret.file)
         await sandbox.start()
+        #expect(sandbox.startedByApp)
         let workspace = ResearchWorkspace(
             sandbox: sandbox, server: server, reports: reports,
-            run: ResearchRunController(store: reports, transport: FakeResearchServices()),
+            run: ResearchRunController(store: reports, transport: FakeResearchServices(), sandboxSecretFile: TestSandboxSecret.file),
             presets: ResearchPresetStore(defaults: MemorySettings()), launch: launch)
 
         // No server of ours: nothing is signalled.
@@ -143,6 +155,11 @@ private final class BusyRunServices: ResearchHTTPTransport, @unchecked Sendable 
         #expect(launcher.servers.isEmpty)
         #expect(!FileManager.default.fileExists(
             atPath: marks.appendingPathComponent("server-term").path))
+        // The sandbox is still the app's: its stop ran, before any TERM.
+        let first = try? String(
+            contentsOf: marks.appendingPathComponent("result"), encoding: .utf8)
+        #expect(first?.trimmingCharacters(in: .whitespacesAndNewlines) == "wrong")
+        #expect(sandbox.startedByApp)
         try? FileManager.default.removeItem(at: marks.appendingPathComponent("result"))
 
         await launch.start(using: server)
@@ -195,9 +212,8 @@ private final class BusyRunServices: ResearchHTTPTransport, @unchecked Sendable 
         let llama = try await setup(llamaCpp: true)
         await llama.workspace.ask("Question", settings: Self.settings)
         await waitUntil { !llama.run.isRunning }
-        let sandboxCalls = llama.runServices.authorizations.filter {
-            $0.path.hasPrefix("/v1/search") || $0.path.hasPrefix("/v1/fetch") || $0.path == "/health"
-        }
+        let sandboxCalls = llama.runServices.sandboxAuthorizations
+        #expect(!sandboxCalls.isEmpty)
         #expect(sandboxCalls.allSatisfy { $0.value == nil })
         let report = try #require(llama.run.report)
         #expect(!report.markdown.contains("test-key"))
@@ -251,7 +267,7 @@ private final class BusyRunServices: ResearchHTTPTransport, @unchecked Sendable 
         let settings = ResearchPreset.quick.runSettings(model: "m")
         let services = FakeResearchServices(modelReplies: [FakeResearchServices.answer("Done.")])
         let run = ResearchRunController(
-            store: ResearchReportStore(directory: temporaryDirectory()), transport: services)
+            store: ResearchReportStore(directory: temporaryDirectory()), transport: services, sandboxSecretFile: TestSandboxSecret.file)
         var quick = settings
         quick.nudges = false
         quick.autoOpenPages = false

@@ -12,11 +12,11 @@ install it, see [INSTALL.md](INSTALL.md).
 ```
 Mac
   model server        127.0.0.1:8080 (TUFF) or :8081 (llama.cpp)
-                      runs the model on the GPU; started by you
+                      runs the model on the GPU; started by you or by SandSeek
   SandSeek            the app, or the `sandseek` command: the loop that asks
                       the model, runs its tool calls and writes the report
       |
-      v  127.0.0.1:9100
+      v  127.0.0.1:<free port, picked at each start>
 Linux VM (Apple container)
   web sandbox         searches, downloads pages, turns them into plain text
 ```
@@ -43,15 +43,21 @@ search.
 for running Linux containers on Apple silicon. Unlike tools that share one VM
 between all containers, it gives each container its own lightweight virtual
 machine, with its own kernel, memory and network address, and nothing of the
-Mac's files unless a folder is mounted. The sandbox mounts none. That fits the
+Mac's files unless a folder is mounted. The sandbox mounts one, read-only, with
+nothing in it but its secret file. That fits the
 one job that handles hostile input: downloading and parsing web pages. The model
 itself cannot run in the VM (it has no GPU), and does not need to.
 
 The VM has a read-only root filesystem, 1 GB of memory, a process limit and a
 firewall of its own, and it is replaced by a fresh one before each question
-after the first. Each start also makes a new random secret, which the sandbox
-uses to sign its answers, so SandSeek can tell the real sandbox from another
-program on the same port (see `docs/SECURITY.md`).
+after the first. Each start also makes a new random secret and puts it in a
+read-only file that the sandbox reads once when it starts; it does not start
+without it, and stopping the sandbox deletes the file. Every request to the
+sandbox is signed with the secret and every answer is signed with it too, a
+repeated request is refused, and SandSeek checks the sandbox's identity again
+before a request that follows a pause. So the sandbox only serves SandSeek, and
+SandSeek can tell the real sandbox from another program on the same port (see
+`docs/SECURITY.md`).
 
 ## What happens when you ask a question
 
@@ -154,7 +160,9 @@ keeps the first answer.
   the pages the same sentence cites do not back up: numbers not on the cited
   pages, numbers on a page but not next to what the sentence names, and names a
   cited page does not have. It is a hint, not proof: a page can state a figure
-  in words or in another unit.
+  in words or in another unit. The app lists them under **Figure check (N)**
+  below the answer, folded until you click it; the saved Markdown has the same
+  list.
 
 **Time limits.** A step with reasoning on that takes longer than the thinking
 limit (3 minutes by default) is cancelled and asked again without reasoning,
@@ -250,7 +258,8 @@ On a Mac with 16 GB, run only one model server with a loaded model at a time.
 
 Every finished question is saved as Markdown and JSON in
 `~/Library/Application Support/SandSeek/Reports`. A report holds the question,
-the answer with numbered sources, the searches, the figure check and, if the
+the answer with numbered sources, the searches, the figure check, the pages that
+could not be read (with the reason) and, if the
 server sent it, the model's thinking. Reports load nothing when opened.
 Reports saved by TUFF's research screen are copied once each into this folder
 (the originals stay).

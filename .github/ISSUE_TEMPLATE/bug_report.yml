@@ -30,7 +30,7 @@ body:
     attributes:
       label: Versions
       description: SandSeek (`sandseek --version`), macOS, Apple container (`container --version`), model server and model.
-      placeholder: "sandseek 0.1.0, macOS 26.1, container 1.5.0, TUFF 8.3.1 with Qwen3.6 35B-A3B"
+      placeholder: "sandseek 0.2.0, macOS 26.1, container 1.5.0, TUFF 8.3.1 with Qwen3.6 35B-A3B"
     validations:
       required: true
   - type: textarea

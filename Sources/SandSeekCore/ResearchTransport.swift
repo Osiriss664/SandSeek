@@ -544,6 +544,14 @@ public enum ResearchError: Error, Equatable, CustomStringConvertible {
     /// The sandbox or the model server answered with a 3xx. SandSeek's client
     /// never follows redirects, and neither service redirects legitimately.
     case redirectRefused(status: Int)
+    /// There is no secret file, so no sandbox was started: `stop` deletes the
+    /// file and `start` writes a fresh one. Nothing is sent without it.
+    case sandboxNotStarted
+    /// The sandbox answered, signed, but is not this version's API.
+    case sandboxWrongVersion
+    /// The sandbox answered, signed, that the request's time is too far from
+    /// its own clock (its code is `stale_request`).
+    case sandboxClockOff
     /// The sandbox's secret file exists but cannot be used (see
     /// `ResearchSandboxSecret`). The message says what is wrong with it, and
     /// never holds the secret.
@@ -580,6 +588,15 @@ public enum ResearchError: Error, Equatable, CustomStringConvertible {
             "something on that port answered with a redirect (HTTP \(status)), which SandSeek "
                 + "refuses. It never follows redirects from the sandbox or the model server, "
                 + "and neither of them redirects, so another program may be using the port."
+        case .sandboxNotStarted:
+            "no sandbox secret: start the sandbox (Scripts/research_sandbox.sh start, or the "
+                + "app's Start button)."
+        case .sandboxClockOff:
+            "the sandbox's clock is more than a minute off from this Mac's, so it refuses every "
+                + "request. Restart the sandbox (Scripts/research_sandbox.sh stop, then start)."
+        case .sandboxWrongVersion:
+            "the web sandbox is a different version from this SandSeek (its health check does not "
+                + "report API 1). Rebuild it (Scripts/research_sandbox.sh build) and start it again."
         case .sandboxSecretUnusable(let message):
             "the sandbox's secret file cannot be used: \(message)"
         case .sandboxNotSigned(let address):

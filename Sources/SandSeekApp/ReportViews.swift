@@ -78,6 +78,33 @@ struct ResearchStepRow: View {
     }
 }
 
+// MARK: - Folding sections
+
+/// A section under the orange cautions that is folded until one click opens it.
+struct ReportFoldSection<Content: View>: View {
+    let title: String
+    private let content: Content
+    @State private var isExpanded = false
+
+    init(title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+
+    var body: some View {
+        DisclosureGroup(isExpanded: $isExpanded) {
+            // A macOS disclosure group centres narrow content; keep it at the
+            // leading edge, under the title.
+            content
+                .padding(.top, 4)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } label: {
+            Text(title).font(.caption).foregroundStyle(.orange)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
 // MARK: - Report
 
 struct ResearchReportView: View {
@@ -102,9 +129,9 @@ struct ResearchReportView: View {
                 } icon: {
                     Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)
                 }
-            } else if report.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            } else if let notice = report.emptyAnswerNotice {
                 Label {
-                    Text("The model stopped without writing an answer. This usually means it used up its token budget while thinking. Try again, or turn thinking off for this mode in Settings.")
+                    Text(notice)
                         .font(.callout)
                         .fixedSize(horizontal: false, vertical: true)
                 } icon: {
@@ -125,52 +152,57 @@ struct ResearchReportView: View {
                     }
                     return .handled
                 })
-            if !report.unknownCitations.isEmpty {
-                Text("The answer cites \(report.unknownCitations.map { "[\($0)]" }.joined(separator: ", ")), which is not a page the research read.")
+            ForEach(report.answerWarnings, id: \.self) { warning in
+                Text(warning)
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
-            if report.unverifiedFigureCount > 0 {
-                Text("\(report.unverifiedFigureCount) \(report.unverifiedFigureCount == 1 ? "point" : "points") (figures, dates or names) could not be matched to the pages they cite. The saved report lists them under Figure check.")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
+            if !report.figureCheckGroups.isEmpty {
+                ReportFoldSection(title: "Figure check (\(report.unverifiedFigureCount))") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(report.figureCheckGroups.enumerated()), id: \.offset) { _, group in
+                            Text(group.intro)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            ForEach(Array(group.lines.enumerated()), id: \.offset) { _, line in
+                                Text("\u{2022} " + line)
+                                    .font(.callout)
+                                    .textSelection(.enabled)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        if report.figureCheckMore > 0 {
+                            Text("\u{2022} and \(report.figureCheckMore) more")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .id("figure-check-\(report.id)")
             }
-            if report.budgetExhausted {
-                Text("The research ran out of steps, so this answer may be incomplete.")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            }
-            if report.stoppedRepeatedSearches {
-                Text("The research stopped early because the model kept repeating searches it had already run, so this answer may be incomplete.")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            }
-            if report.sources.isEmpty
-                && !report.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Text("No web page was read for this answer, so it comes from the model's memory or search previews and has no sources to check.")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            }
-            if report.answerCutOff {
-                Text("The answer stopped at the model's length limit, so its end may be missing.")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            }
-            if report.answerEndsMidSentence {
-                Text("The answer seems to stop mid-sentence and may be incomplete.")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-            }
-            if report.repeatedSourceEntries > 0, !report.sources.isEmpty {
-                Text("The answer's own source list repeats \(report.repeatedSourceEntries) \(report.repeatedSourceEntries == 1 ? "entry" : "entries") it already lists; only the pages under Sources were read.")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
+            if !report.unreadablePages.isEmpty {
+                ReportFoldSection(title: "Pages that could not be read (\(report.unreadablePages.count))") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(Array(report.unreadablePages.enumerated()), id: \.offset) { _, page in
+                            Text("\u{2022} " + page.line)
+                                .font(.callout)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+                .id("unreadable-pages-\(report.id)")
             }
             if !report.sources.isEmpty {
                 Text("Sources").font(.headline)
-                VStack(alignment: .leading, spacing: 6) {
+                // Small cards side by side when there is room.
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 230), spacing: 10, alignment: .top)],
+                    alignment: .leading, spacing: 10
+                ) {
                     ForEach(report.sources) { source in
-                        sourceRow(source).id("research-source-\(source.number)")
+                        sourceCard(source).id("research-source-\(source.number)")
                     }
                 }
             }
@@ -184,8 +216,8 @@ struct ResearchReportView: View {
                             .textSelection(.enabled)
                     }
                 }
-                if report.searchQueries.count == 1 {
-                    Text("Only one search was run, so other sources may have been missed.")
+                if let notice = report.singleSearchNotice {
+                    Text(notice)
                         .font(.caption)
                         .foregroundStyle(.orange)
                 }
@@ -194,12 +226,25 @@ struct ResearchReportView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             HStack(spacing: 10) {
+                Button("Copy answer") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(
+                        ResearchAnswerFormatter.plainText(report.answer), forType: .string)
+                    note = "Copied."
+                }
+                .disabled(report.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .help("Copies the answer as plain text.")
                 Button("Copy as Markdown") {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(report.markdown, forType: .string)
                     note = "Copied."
                 }
                 Button("Save As…", action: saveAs)
+                Button("Export as PDF…") {
+                    if let message = ReportPrinting.exportPDF(report) { note = message }
+                }
+                .help("Writes the question, the answer and the numbered sources to a PDF.")
+                Button("Print…") { ReportPrinting.printReport(report) }
                 Button("Show in Finder") {
                     NSWorkspace.shared.activateFileViewerSelecting([markdownURL])
                 }
@@ -227,6 +272,8 @@ struct ResearchReportView: View {
             Text(source.webURL?.absoluteString ?? source.url)
         }
         .onChange(of: report.id) { note = nil }
+        // The Print command in the File menu (⌘P) prints the report on screen.
+        .focusedSceneValue(\.shownReport, report)
     }
 
     private var footer: String {
@@ -236,29 +283,41 @@ struct ResearchReportView: View {
             + "). Check the sources before you rely on it."
     }
 
-    private func sourceRow(_ source: SavedResearchReport.Source) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Text("\(source.number)")
-                .font(.callout.monospacedDigit().weight(.semibold))
-                .foregroundStyle(AppTheme.accent)
-                .frame(minWidth: 18, alignment: .trailing)
-            VStack(alignment: .leading, spacing: 2) {
+    /// One source as a small card: its number, the page's title, the site and
+    /// the button that asks before opening it. Nothing from the page is loaded.
+    private func sourceCard(_ source: SavedResearchReport.Source) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("\(source.number)")
+                    .font(.caption.monospacedDigit().weight(.bold))
+                    .foregroundStyle(.white)
+                    .frame(minWidth: 20, minHeight: 20)
+                    .background(AppTheme.accent, in: Circle())
+                    .accessibilityLabel("Source \(source.number)")
                 Text(source.title.isEmpty ? source.host : source.title)
                     .font(.callout.weight(.medium))
+                    .lineLimit(2)
+                    .truncationMode(.tail)
+                    .help(source.title.isEmpty ? source.host : source.title)
                     .textSelection(.enabled)
-                Text(source.host)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
             }
-            Spacer(minLength: 8)
-            Button("Open…") { sourceToOpen = source }
+            Text(source.host)
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .help(ResearchText.url(source.url))
+            Button("Open\u{2026}") { sourceToOpen = source }
+                .controlSize(.small)
                 .disabled(source.webURL == nil)
         }
-        .padding(8)
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             highlighted == source.number
                 ? AppTheme.accent.opacity(0.14) : Color.secondary.opacity(0.06),
-            in: RoundedRectangle(cornerRadius: 8))
+            in: RoundedRectangle(cornerRadius: 10))
     }
 
     private func show(_ number: Int) {
@@ -284,5 +343,30 @@ struct ResearchReportView: View {
         } catch {
             note = "Could not save: \(error.localizedDescription)"
         }
+    }
+}
+
+/// The report a window shows, so the File > Print command can reach it.
+struct ShownReportKey: FocusedValueKey {
+    typealias Value = SavedResearchReport
+}
+
+extension FocusedValues {
+    var shownReport: SavedResearchReport? {
+        get { self[ShownReportKey.self] }
+        set { self[ShownReportKey.self] = newValue }
+    }
+}
+
+/// File > Print…, for whichever report window or screen has focus.
+struct PrintReportCommand: View {
+    @FocusedValue(\.shownReport) private var report
+
+    var body: some View {
+        Button("Print…") {
+            if let report { ReportPrinting.printReport(report) }
+        }
+        .keyboardShortcut("p")
+        .disabled(report == nil)
     }
 }

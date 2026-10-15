@@ -1,5 +1,6 @@
 #!/bin/sh
-# Loads the VM's firewall (outbound and inbound), then starts the server, which drops root
+# Loads the VM's firewall (outbound and inbound), adds the Mac's own addresses
+# to it, then starts the server, which drops root
 # and every capability before it serves anything. Refuses to start without
 # the firewall.
 set -eu
@@ -28,6 +29,55 @@ if ! nft -D "gateway=$gateway" -f /app/firewall.nft; then
   exit 1
 fi
 echo "firewall: inbound port 9100 accepted from the default gateway $gateway only" >&2
+# The Mac's own interface addresses, one per line, from the file the launcher
+# writes into the secret folder. The private ranges in the firewall do not
+# cover a public IPv4 or global IPv6 address of the Mac, so each one goes into
+# the set of its family (blocked4 or blocked6, see firewall.nft), and
+# server.py refuses them again. The file is read strictly: a missing file or
+# anything in it that is not an IP address stops the start, since a hole in
+# this list would be silent. The addresses are not secret.
+blocked_file=/run/sandseek-sandbox/blocked-addresses
+if [ ! -f "$blocked_file" ] || [ -L "$blocked_file" ]; then
+  echo "the list of the Mac's addresses ($blocked_file) is missing; the launcher script and this image do not match; refusing to start" >&2
+  exit 1
+fi
+rules="$(python3 - "$blocked_file" <<'PY'
+import ipaddress, re, sys
+with open(sys.argv[1], "rb") as handle:
+    data = handle.read(65537)
+if len(data) > 65536:
+    sys.exit("the list is longer than 65536 bytes")
+found = set()
+for part in re.split(r"[,\r\n\t ]+", data.decode("ascii")):
+    if not part:
+        continue
+    if "%" in part:
+        sys.exit(f"an address with a zone id is not accepted: {part[:64]!r}")
+    ip = ipaddress.ip_address(part)
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    found.add(ip)
+if not found or len(found) > 256:
+    sys.exit(f"{len(found)} addresses; one to 256 are expected")
+for ip in sorted(found, key=lambda a: (a.version, a.packed)):
+    print(ip.version, ip)
+PY
+)" || { echo "the list of the Mac's addresses cannot be read; refusing to start" >&2; exit 1; }
+if [ -z "$rules" ]; then
+  echo "the list of the Mac's addresses is empty; refusing to start" >&2
+  exit 1
+fi
+# The here-document, not a pipe, keeps a failing nft inside this shell, so
+# set -e stops the start.
+blocked_count=0
+while read -r family address; do
+  [ -n "$address" ] || continue
+  nft add element inet sandseek_sandbox "blocked$family" "{ $address }"
+  blocked_count=$((blocked_count + 1))
+done <<RULES
+$rules
+RULES
+echo "firewall: $blocked_count of the Mac's own addresses refused" >&2
 # The VM's DNS servers. By default that is the Mac, which forwards to the
 # same DNS the rest of the Mac uses; the firewall refuses the Mac, so its
 # address gets an exception for DNS (port 53) only. Public resolvers set

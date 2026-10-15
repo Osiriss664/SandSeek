@@ -64,8 +64,7 @@ if [[ "$output" != "$build_directory" && "$output" != "$build_directory"/* ]]; t
 fi
 app="$output/SandSeek.app"
 
-for needed in "$root/Scripts/research_sandbox.sh" "$root/Scripts/verify_sandbox_signature.py" \
-        "$root/Sandbox/Containerfile"; do
+for needed in "$root/Scripts/research_sandbox.sh" "$root/Sandbox/Containerfile" "$root/Packaging/AppIcon.icns"; do
     if [[ ! -f "$needed" ]]; then
         echo "Missing $needed; run this script from a complete SandSeek checkout." >&2
         exit 1
@@ -91,14 +90,12 @@ fi
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/sandbox/Scripts" "$app/Contents/Resources/sandbox/Sandbox"
 cp "$executable" "$app/Contents/MacOS/SandSeek"
+# The Dock and Finder icon (drawn by Scripts/make_app_icon.py from the logo).
+cp "$root/Packaging/AppIcon.icns" "$app/Contents/Resources/AppIcon.icns"
 
 # The same layout as a checkout: the script finds its build context at ../Sandbox.
 cp "$root/Scripts/research_sandbox.sh" "$app/Contents/Resources/sandbox/Scripts/research_sandbox.sh"
 chmod 755 "$app/Contents/Resources/sandbox/Scripts/research_sandbox.sh"
-# selftest checks a signature with this script (it runs it with python3, from
-# the script's own folder), so it must sit next to research_sandbox.sh.
-cp "$root/Scripts/verify_sandbox_signature.py" "$app/Contents/Resources/sandbox/Scripts/verify_sandbox_signature.py"
-chmod 644 "$app/Contents/Resources/sandbox/Scripts/verify_sandbox_signature.py"
 rsync -a --exclude '__pycache__' --exclude '*.pyc' --exclude '.DS_Store' \
     "$root/Sandbox/" "$app/Contents/Resources/sandbox/Sandbox/"
 
@@ -111,6 +108,8 @@ cat > "$app/Contents/Info.plist" <<PLIST
     <string>en</string>
     <key>CFBundleExecutable</key>
     <string>SandSeek</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
     <string>$bundle_id</string>
     <key>CFBundleInfoDictionaryVersion</key>

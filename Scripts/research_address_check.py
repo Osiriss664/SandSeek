@@ -2,8 +2,9 @@
 """Asks the running sandbox to open addresses it must refuse, and checks that it does.
 
 This is the address half of the sandbox's protection, tried from outside and
-without a model. It sends `open_page` requests (the sandbox's POST /v1/fetch)
-straight to the sandbox on 127.0.0.1:9100 and expects every one of these to be
+without a model. It sends `open_page` requests (the sandbox's POST /v1/fetch),
+signed with the sandbox's secret file, straight to the sandbox on
+127.0.0.1 (on the port `start` recorded) and expects every one of these to be
 refused:
 
   private       loopback, private, link-local, shared, multicast and reserved
@@ -17,7 +18,8 @@ refused:
                 reads 0177.0.0.1 as 177.0.0.1, glibc as 127.0.0.1)
   names         localhost and the container gateway name
   dns           host names that resolve to private addresses (localtest.me,
-                *.nip.io and *.sslip.io); these need DNS, so a network that
+                *.nip.io and *.sslip.io; --1.sslip.io, which is ::1 and is
+                only noted when a resolver cannot resolve it); these need DNS, so a network that
                 blocks outside DNS or filters answers with private addresses
                 (DNS rebinding protection) makes them "inconclusive"
   shape         other schemes, user names in the address, ports other than
@@ -46,16 +48,24 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import hmac
 import http.client
 import json
 import os
 import re
 import sys
+import time
 import unicodedata
 import urllib.parse
 from dataclasses import dataclass
 
-DEFAULT_SANDBOX = "http://127.0.0.1:9100"
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import verify_sandbox_signature as signing  # noqa: E402
+
+# Without --sandbox the port is found as for verify_sandbox_signature.py: the
+# environment, else the file `port` beside the secret.
+DEFAULT_SECRET_FILE = os.path.join(os.path.expanduser("~"), "Library", "Application Support",
+                                   "SandSeek", "sandbox", "secret")
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 CONTROL_URL = "https://example.com/"
 
@@ -75,6 +85,11 @@ class Case:
     # "resolves": a name that resolves to a private address. The sandbox must
     #   answer blocked_address. A name that does not resolve here proves
     #   nothing about the address check ("inconclusive").
+    # "covered": like "resolves", but for a name whose address another case
+    #   already checks (--1.sslip.io is ::1, see http://[::1]/). Resolvers
+    #   that cannot resolve it (macOS rejects such names) only get a note,
+    #   which does not make the run inconclusive. Anything other than a
+    #   refusal still fails.
     # "shape": refused because of the form of the address.
     kind: str
 
@@ -168,6 +183,8 @@ CASES: list[Case] = (
         "http://169.254.169.254.nip.io/",
         "http://127-0-0-1.sslip.io/",
         "http://192-168-64-1.sslip.io/",
+    ])
+    + _cases("dns", "covered", [
         "http://--1.sslip.io/",
     ])
     + _cases("shape", "shape", [
@@ -201,7 +218,7 @@ GROUPS = ["private", "numeric", "names", "dns", "shape"]
 def classify(case: Case, status: int, payload: object) -> tuple[str, str]:
     """(verdict, detail) for one answer of the sandbox.
 
-    verdict is "refused", "inconclusive" or "FAIL". detail says what the
+    verdict is "refused", "note", "inconclusive" or "FAIL". detail says what the
     sandbox answered."""
     code = ""
     if isinstance(payload, dict):
@@ -212,9 +229,11 @@ def classify(case: Case, status: int, payload: object) -> tuple[str, str]:
         return "FAIL", "HTTP 200: the sandbox fetched it"
     if not code:
         return "FAIL", f"HTTP {status} without an error code (not a refusal)"
-    if case.kind == "resolves":
+    if case.kind in ("resolves", "covered"):
         if code == "blocked_address":
             return "refused", code
+        if code == "dns_error" and case.kind == "covered":
+            return "note", "dns_error: the name did not resolve here; its address is checked by another case"
         if code == "dns_error":
             return "inconclusive", "dns_error: the name did not resolve here, so the address check was not tried"
         return "FAIL", f"{code} (HTTP {status}): not refused for its private address"
@@ -235,35 +254,53 @@ def is_loopback(url: str) -> bool:
         return False
 
 
-def post_fetch(sandbox: str, url: str, timeout: float) -> tuple[int, object]:
-    """POST /v1/fetch with {"url": url}; (HTTP status, decoded JSON or the raw text)."""
+class UnsignedAnswer(OSError):
+    """The answer did not carry the signature only the real sandbox can make."""
+
+
+def signed_call(sandbox: str, secret: bytes, method: str, path: str, body: bytes,
+                timeout: float) -> tuple[int, bytes]:
+    """One signed request; (HTTP status, answer body). The sandbox refuses a
+    request that is not signed, and an answer that is not signed correctly
+    for this request is not trusted: it raises UnsignedAnswer."""
     parts = urllib.parse.urlsplit(sandbox)
     connection = http.client.HTTPConnection(parts.hostname, parts.port or 80, timeout=timeout)
+    nonce = os.urandom(32).hex()
+    stamp = str(int(time.time()))
+    headers = {"Host": f"127.0.0.1:{parts.port or 80}",
+               "X-Sandbox-Nonce": nonce, "X-Sandbox-Time": stamp,
+               "X-Sandbox-Auth": signing.request_auth(secret, method, path, nonce, stamp, body)}
+    if method == "POST":
+        headers["Content-Type"] = "application/json"
     try:
-        body = json.dumps({"url": url}).encode()
-        connection.request("POST", "/v1/fetch", body=body, headers={
-            "Content-Type": "application/json", "Host": f"127.0.0.1:{parts.port or 80}"})
+        connection.request(method, path, body=body or None, headers=headers)
         response = connection.getresponse()
         data = response.read()
+        status, auth = response.status, response.getheader("X-Sandbox-Auth")
     finally:
         connection.close()
+    expected = signing.response_auth(secret, method, path, nonce, status, data)
+    if auth is None or not hmac.compare_digest(auth.strip().lower(), expected):
+        raise UnsignedAnswer("the answer is not signed with the sandbox's secret")
+    return status, data
+
+
+def post_fetch(sandbox: str, secret: bytes, url: str, timeout: float) -> tuple[int, object]:
+    """POST /v1/fetch with {"url": url}; (HTTP status, decoded JSON or the raw text)."""
+    status, data = signed_call(sandbox, secret, "POST", "/v1/fetch",
+                               json.dumps({"url": url}).encode(), timeout)
     try:
-        return response.status, json.loads(data)
+        return status, json.loads(data)
     except ValueError:
-        return response.status, data.decode("utf-8", "replace")[:200]
+        return status, data.decode("utf-8", "replace")[:200]
 
 
-def sandbox_answers(sandbox: str) -> bool:
-    parts = urllib.parse.urlsplit(sandbox)
-    connection = http.client.HTTPConnection(parts.hostname, parts.port or 80, timeout=5)
+def sandbox_answers(sandbox: str, secret: bytes) -> bool:
     try:
-        connection.request("GET", "/health", headers={"Host": f"127.0.0.1:{parts.port or 80}"})
-        response = connection.getresponse()
-        return response.status == 200 and b'"ok"' in response.read()
+        status, data = signed_call(sandbox, secret, "GET", "/health", b"", 5)
+        return status == 200 and b'"ok"' in data
     except (OSError, http.client.HTTPException):
         return False
-    finally:
-        connection.close()
 
 
 def printable(text: str) -> str:
@@ -297,8 +334,13 @@ class Report:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--sandbox", default=DEFAULT_SANDBOX,
-                        help=f"the sandbox (default {DEFAULT_SANDBOX}); loopback only")
+    parser.add_argument("--sandbox",
+                        help="the sandbox, such as http://127.0.0.1:49152 (default: the port "
+                             "SANDSEEK_SANDBOX_PORT names, else the one `start` recorded); "
+                             "loopback only")
+    parser.add_argument("--secret-file", default=DEFAULT_SECRET_FILE, metavar="FILE",
+                        help="the sandbox's secret, written by `research_sandbox.sh start` "
+                             "(default: SandSeek/sandbox/secret in Application Support)")
     parser.add_argument("--only", choices=GROUPS, action="append",
                         help="run only this group (repeatable)")
     parser.add_argument("--no-control", action="store_true",
@@ -318,13 +360,27 @@ def main() -> int:
             print(f"{case.group:<8}{printable(case.url)}")
         print(f"{len(selected)} addresses")
         return 0
-    if not is_loopback(args.sandbox):
-        parser.error("--sandbox must be a loopback address, such as http://127.0.0.1:9100")
+    if args.sandbox and not is_loopback(args.sandbox):
+        parser.error("--sandbox must be a loopback address, such as http://127.0.0.1:49152")
     if args.output and os.path.exists(args.output):
         parser.error(f"{args.output} already exists; choose a new --output file")
-    if not sandbox_answers(args.sandbox):
-        print(f"error: the sandbox does not answer at {args.sandbox}; "
-              "start it with Scripts/research_sandbox.sh start", file=sys.stderr)
+    try:
+        secret = signing.read_secret(args.secret_file)
+    except signing.SecretFileError as error:
+        print(f"error: {error}; start the sandbox with Scripts/research_sandbox.sh start",
+              file=sys.stderr)
+        return 2
+    if not args.sandbox:
+        port = signing.sandbox_port(args.secret_file)
+        if port is None:
+            print("error: no sandbox port is recorded; start the sandbox with "
+                  "Scripts/research_sandbox.sh start, or pass --sandbox", file=sys.stderr)
+            return 2
+        args.sandbox = f"http://127.0.0.1:{port}"
+    if not sandbox_answers(args.sandbox, secret):
+        print(f"error: the sandbox does not answer at {args.sandbox}, or its answer is not "
+              "signed with the current secret; start it with Scripts/research_sandbox.sh start",
+              file=sys.stderr)
         return 2
 
     report = Report()
@@ -336,10 +392,10 @@ def main() -> int:
     report.emit(f"Addresses: {len(selected)} ({', '.join(sorted({c.group for c in selected}))})")
     report.emit()
 
-    counts = {"refused": 0, "inconclusive": 0, "FAIL": 0}
+    counts = {"refused": 0, "note": 0, "inconclusive": 0, "FAIL": 0}
     for case in selected:
         try:
-            status, payload = post_fetch(args.sandbox, case.url, args.timeout)
+            status, payload = post_fetch(args.sandbox, secret, case.url, args.timeout)
         except (OSError, http.client.HTTPException) as error:
             report.emit(f"FAIL  {case.group:<8}{printable(case.url)}")
             report.emit(f"        no answer from the sandbox: {error}")
@@ -347,14 +403,14 @@ def main() -> int:
             continue
         verdict, detail = classify(case, status, payload)
         counts[verdict] += 1
-        mark = {"refused": "ok", "inconclusive": "warn", "FAIL": "FAIL"}[verdict]
+        mark = {"refused": "ok", "note": "note", "inconclusive": "warn", "FAIL": "FAIL"}[verdict]
         report.emit(f"{mark:<6}{case.group:<8}{printable(case.url)}  ->  {detail}")
 
     control_ok: bool | None = None
     if not args.no_control:
         report.emit()
         try:
-            status, payload = post_fetch(args.sandbox, CONTROL_URL, args.timeout)
+            status, payload = post_fetch(args.sandbox, secret, CONTROL_URL, args.timeout)
             control_ok = status == 200 and isinstance(payload, dict) and bool(payload.get("text"))
         except (OSError, http.client.HTTPException):
             control_ok = False
@@ -369,7 +425,8 @@ def main() -> int:
     if args.label:
         report.emit("Label: " + printable(args.label.strip()[:200]))
     report.emit(f"{counts['refused']} refused, {counts['inconclusive']} inconclusive, "
-                f"{counts['FAIL']} NOT refused (of {len(selected)} addresses)")
+                f"{counts['FAIL']} NOT refused (of {len(selected)} addresses)"
+                + (f", {counts['note']} noted" if counts["note"] else ""))
     if counts["FAIL"]:
         status_code = 1
         report.emit("RESULT: FAIL. The sandbox accepted an address it should refuse.")

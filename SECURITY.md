@@ -26,7 +26,8 @@ Only the latest release gets security fixes.
 
 | Version | Supported |
 | --- | --- |
-| 0.1.x | yes |
+| 0.2.x | yes |
+| 0.1.x | no |
 
 ## What counts
 

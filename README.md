@@ -12,13 +12,14 @@ exactly two tools, `web_search` and `open_page`: no shell, no file access, no
 network tool. `open_page` reads web pages and text PDFs (up to 5 MB and 50
 pages, no OCR), parsed inside the VM.
 
-Status: 0.1.0, the first release. SandSeek began in a fork of TUFF. The command-line tool,
+Status: 0.2.0. SandSeek began in a fork of TUFF. The command-line tool,
 the core library and the Mac app (a window with the same research loop) are one
 Swift package. Built, tested and tried by hand on a Mac with macOS 27, TUFF
-8.3.1 and Qwen3.6 35B (11 October 2026); Start server was tried with TUFF 8.3.11
-and llama.cpp.
+9.3.0 and Qwen3.6 35B (15 October 2026), including the safety test
+([docs/SAFETY_TEST.md](docs/SAFETY_TEST.md)); Start server was tried with TUFF
+8.3.11 and llama.cpp for 0.1.0.
 
-![The SandSeek app: model server card with Start server, the web sandbox card and the question box](docs/assets/sandseek-app.png)
+![The SandSeek window: the question box with model and mode, Stop everything, the folded Model server and Web sandbox cards showing Connected, Ready and Signed, then an answer with its folded Figure check and Pages that could not be read lists, the sources and the searches](docs/assets/sandseek-app.png)
 
 ## How it works, in one minute
 
@@ -38,17 +39,17 @@ addresses go to the internet. More in [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.m
 ## Quick start
 
 1. Install [Apple `container`](https://github.com/apple/container) and a local
-   model server. SandSeek 0.1.0 works with two:
+   model server. SandSeek 0.2.0 works with two:
    - **TUFF** 8.3.1 or newer (tested with Qwen3.6 35B).
-   - **llama.cpp** (`llama-server`), experimental in 0.1.0.
+   - **llama.cpp** (`llama-server`), experimental in 0.2.0.
 
    Ollama and LM Studio are planned; other servers are not supported yet.
 2. Get the app, in one of two ways:
-   - **Download:** `SandSeek-0.1.0.zip` from the release page, unzip it and
+   - **Download:** `SandSeek-0.2.0.zip` from the release page, unzip it and
      move SandSeek to Applications. It is not notarized: on first launch
      choose System Settings → Privacy & Security → Open Anyway.
    - **Build it yourself:** with Xcode 26 or its command line tools (Swift
-     6.2 or newer; 0.1.0 was built on macOS 27):
+     6.2 or newer; 0.2.0 was built on macOS 27):
 
          git clone https://github.com/Osiriss664/SandSeek.git
          cd SandSeek
@@ -56,10 +57,13 @@ addresses go to the internet. More in [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.m
 
      The app is then `build/SandSeek.app`; move it to Applications. An app
      you built yourself opens without "Open Anyway".
-3. Open SandSeek and choose your server on the model server card. Either
+3. Open SandSeek and choose your server on the **Model server** card. Either
    start the server yourself and press **Check**, or choose its program once
    and press **Start server** (TUFF and llama.cpp). Then press **Start
-   Sandbox** and ask your first question.
+   Sandbox** on the **Web sandbox** card; the first start builds the sandbox
+   image and takes a few minutes. Or press **Start everything**, which does
+   both and runs the security check. Type your question in the box on top and
+   press **Research**. **Stop everything** stops it all again.
 
 Step by step: [docs/INSTALL.md](docs/INSTALL.md).
 
@@ -90,11 +94,12 @@ above all test reports.
 ## Requirements
 
 - Apple silicon, macOS 26 (needed by Apple `container`)
-- [Apple `container`](https://github.com/apple/container)
+- [Apple `container`](https://github.com/apple/container) 1.5.0 or newer, installed with
+  Apple's installer (SandSeek runs only `/usr/local/bin/container`)
 - A local model server on 127.0.0.1: TUFF 8.3.1 or newer, or llama.cpp
   (experimental, see below). Streaming is on by
   default for TUFF, so that Stop and the time limits make it stop generating.
-  llama.cpp (`llama-server`) is experimental in 0.1.0: it works through
+  llama.cpp (`llama-server`) is experimental in 0.2.0: it works through
   `--server-type llamacpp` with plain requests (no streaming), the app's
   Thinking switch has no effect on it yet, and it was probed but not measured
   with a research run. The app connects to a
@@ -113,21 +118,31 @@ above all test reports.
     open build/SandSeek.app
 
 The script builds `SandSeekApp` in release mode, assembles `SandSeek.app`
-(bundle id `io.github.osiriss664.sandseek`, version 0.1.0, macOS 26 or newer),
+(bundle id `io.github.osiriss664.sandseek`, the version `sandseek --version` prints, macOS 26 or newer),
 copies the sandbox files into `Contents/Resources/sandbox` and signs the bundle
 ad hoc. There is no Sparkle update and no notarization yet. `swift run
 SandSeekApp` also opens the window, but a bare executable has no sandbox
 files inside it (see below).
 
-The window has a sidebar (Research, Reports, Settings, the last few reports),
-a card for the model server, a card for the sandbox with a Security check, a
-question field with a model picker and a Quick answer / Thorough switch, and
-progress and answer side by side. Stop is visible while a question runs.
+The window has a sidebar (Research, Reports, Settings, the last few reports).
+The Research screen starts with the question field, a model picker and a Quick
+answer / Thorough switch. Below it are a card for the model server and a card
+for the sandbox with a Security check; click the arrow by a card's title to
+fold it. Both fold on their own once everything is ready, and a card opens
+again when it stops being ready. While something is not ready, **Start
+everything** starts the model server (if you chose a program for it), then the
+sandbox, then runs the security check. Progress and answer come below, side by
+side. Stop is visible while a question runs. A saved report opened while a
+question runs gets a window of its own. Sources are small cards, **Copy
+answer** copies the answer as plain text, and a report can be printed or
+exported with **Export as PDF…**. When the sandbox is verified, its card shows
+"Signed · checked HH:MM". **Stop everything** stops the question, the sandbox
+and a model server SandSeek started.
 
 - **Model server.** Pick TUFF (127.0.0.1:8080) or llama.cpp (127.0.0.1:8081);
   Ollama and LM Studio are listed as "later". The address can be edited but
-  must be on this Mac's loopback interface, with a port (not the sandbox's
-  9100). A ready server is asked only its status route every ten seconds
+  must be on this Mac's loopback interface, with a port (not the sandbox's,
+  which each start picks and records). A ready server is asked only its status route every ten seconds
   (TUFF `/tuff/v1/status`, llama.cpp `/health`); the model list (`/v1/models`)
   is fetched on Check, when the status changes, and from the reload button
   beside the model picker. The type, address and Check are locked while a
@@ -154,8 +169,9 @@ progress and answer side by side. Stop is visible while a question runs.
   The image is rebuilt when a hash of the `Sandbox/` files changes.
   `SANDSEEK_SOURCE_DIR=/path/to/checkout` uses a checkout's files instead, but
   only in debug builds or when the app has no files of its own (`swift run`);
-  a release app ignores it. The script always gets
-  `SANDSEEK_SANDBOX_PORT=9100`, whatever the environment says. The files are
+  a release app ignores it. The script never gets `SANDSEEK_SANDBOX_PORT`,
+  whatever the environment says: each start picks a free port and the app
+  reads it back from the sandbox folder. The files are
   put into the bundle by `Scripts/package_app.sh` and not declared as SwiftPM
   resources, because the sandbox script needs them as a plain folder laid out
   like a checkout (it builds the image from `../Sandbox`).
@@ -173,9 +189,9 @@ progress and answer side by side. Stop is visible while a question runs.
   auto-open, nudges and rewrite on, and thinking left to the server (no
   setting is sent, like the `sandseek` command; Settings can turn it on or
   off). Settings edits the numbers within the ranges the command accepts, and
-  stores only what differs from the defaults. The Thorough values are not
-  tested yet; they are measured in step 2c (the mock-up said 10 pages; 6 is
-  what the top-up that opens search results can reach).
+  stores only what differs from the defaults. The Thorough values are a
+  first guess and will be adjusted after measuring (6 pages is what the loop's
+  top-up can reach).
 - **Safety rules** (shown in Settings, not editable): two tools only, a
   firewall in the VM, no root in the sandbox, a check before every question,
   and links open only after you confirm the full address.
@@ -188,15 +204,23 @@ The app does this itself. By hand:
     Scripts/research_sandbox.sh start
     Scripts/research_sandbox.sh selftest
 
-`build` is needed once. `start` publishes the sandbox on 127.0.0.1:9100.
+`build` is needed once. `start` publishes the sandbox on a free port of
+127.0.0.1 and records it (and the VM's name) beside the secret; `sandseek` and
+the other scripts find it there. Only one SandSeek can run the sandbox at a
+time: a second `start` says so and changes nothing. VMs and files left by a
+run that did not end normally are removed by the next `start`.
 `selftest` is optional and checks the VM's isolation.
 
 ## Run
 
     .build/release/sandseek --server http://127.0.0.1:8080 "your question"
 
-`sandseek --help` lists all options. Tests: `swift test`, and for the sandbox
-server `python3 -m unittest Sandbox/test_server.py`.
+`sandseek --help` lists all options. Tests: `swift test`, for the sandbox
+server `python3 -m unittest Sandbox/test_server.py`, and for the scripts
+`python3 -m unittest discover -s Scripts -p 'test_*.py'`.
+`Scripts/full_test.sh` runs every check that needs no clicks (build, tests,
+packaging, sandbox, self-test, one question); `--help` lists its options,
+`--safety` adds the safety test ([docs/SAFETY_TEST.md](docs/SAFETY_TEST.md)).
 
 Security checks (see [docs/SECURITY.md](docs/SECURITY.md)):
 
@@ -232,17 +256,18 @@ To record real streams from a running server for test fixtures, use
   LM Studio come later.
 - Thorough preset values are a first guess; they will be adjusted after
   measuring.
-- The pre-question check does not yet verify mounts or that port 9100 is
-  published by `sandseek-sandbox`.
+- The pre-question check does not yet verify mounts or that the recorded port
+  is published by the VM recorded in `vm-name`.
 - Model names in the picker are the ids the server lists; there is no table of
   display names.
 - The Quick answer / Thorough switch is labelled in English like the rest of
   the window.
-- No app icon, no Sparkle updates, no notarization.
+- No Sparkle updates and no notarization yet.
 
 ## Security in short
 
-- The VM has a read-only root filesystem, no Mac folders, a firewall that
+- The VM has a read-only root filesystem, no Mac folders (only a read-only
+  folder with its secret), a firewall that
   refuses the Mac, the local network and cloud metadata addresses, and a
   server running as an unprivileged user with no Linux capabilities.
 - Fetches are limited to public addresses on ports 80 and 443; every DNS
@@ -250,6 +275,10 @@ To record real streams from a running server for test fixtures, use
 - Page text reaches the model wrapped in markers it is told to treat as
   information only; terminal escape codes and invisible Unicode are removed.
 - Both services stay on loopback; the sandbox refuses foreign `Host` headers.
+  Every request to the sandbox is signed with a secret kept in a file only
+  your Mac user can read (so any program running as you can read it, and root
+  inside the VM can read the mounted file), a repeated request is refused, and the sandbox does not start without
+  its secret.
 - Prompt-injection test pages are in `Sandbox/fixtures/injection`
   (`Scripts/research_injection_check.py`). A pass is evidence, not proof.
 - TUFF 8.3.1 and llama.cpp have no `Host` check; llama.cpp is used only with

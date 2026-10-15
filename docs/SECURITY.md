@@ -47,14 +47,15 @@ model server, and the trustworthiness of the answer you read.
 
 **Who is trusted:** you, your own programs on the Mac (any program on the Mac
 can call the loopback services, as with any local server), the macOS and
-Apple `container` software, and the model weights you chose.
+Apple `container` software (see below for how SandSeek makes sure the
+`container` it runs is Apple's), and the model weights you chose.
 
 **Boundaries and what sits on each:**
 
 | Boundary | What crosses it | What holds it |
 | --- | --- | --- |
 | Web → sandbox VM | page bytes | read-only VM, firewall (outbound and inbound), no root, extractor, fallback parser and PDF reader in time-limited child processes, address checks, one deadline per request |
-| Sandbox VM → Mac | cleaned page text and search results over 127.0.0.1:9100 | the VM cannot call the Mac (except DNS); the Mac calls the VM; text is cleaned again on the Mac |
+| Sandbox VM → Mac | cleaned page text and search results over 127.0.0.1 (a free port each start) | the VM cannot call the Mac (except DNS); the Mac calls the VM; text is cleaned again on the Mac |
 | Text → model | tool results | fenced as untrusted; the model has nothing dangerous to call |
 | Model → tools | `web_search`, `open_page` | only these two exist; unknown tool names are refused by the loop; addresses must have been shown to the model |
 | Model → you | the answer and the report | plain text only, no images loaded, no links that act, source addresses opened only after you confirm them |
@@ -110,59 +111,73 @@ These hold as long as the design is intact and the VM boundary holds.
   address that carries your question or other text to a server of its choice.
 - **The VM is isolated.** It has its own Linux kernel, a read-only root
   filesystem with a scratch `/tmp`, 1 GB of memory, 2 CPUs, at most 512
-  processes and no Mac folders. The web server runs as an unprivileged user
+  processes and no Mac folders except one read-only folder that holds the
+  sandbox's secret (see "Every request is signed" below). The web server runs as an unprivileged user
   (10001) with no Linux capabilities and cannot regain any; it refuses to start
   otherwise. The app starts a fresh VM before each question after the first
   (not for a sandbox you started by hand), so a page cache or a taken-over
   parser does not carry from one question to the next.
 - **A firewall inside the VM** drops outbound traffic unless it goes to the
   public internet or to DNS on the Mac. The Mac itself, your local network,
-  carrier-grade NAT, link-local and cloud metadata addresses are refused. The
+  carrier-grade NAT, link-local and cloud metadata addresses are refused. So
+  is every address of the Mac's own network interfaces, including a public IPv4
+  or global IPv6 address, which no range rule covers (see "The Mac's own
+  addresses" below). The
   firewall is loaded before the server starts, and the sandbox refuses to
-  start without it. Inbound, the VM accepts new connections on port 9100 only,
-  and only from its default gateway (plus replies and loopback). The entrypoint
+  start without it. Inbound, the VM accepts new connections on port 9100 only
+  (its own port; the Mac side is a different, free port, see "One SandSeek at a
+  time" below), and only from its default gateway (plus replies and loopback). The entrypoint
   reads the gateway from `/proc/net/route`, checks that it is a plain IPv4
   address, puts it into the rule and prints it in the sandbox log; without a
   usable gateway the sandbox refuses to start instead of opening the port to
   everyone. Over IPv6 nothing but loopback is accepted inbound. The server
   listens on 0.0.0.0 because the published port reaches the VM's network
   address, not its loopback, and the Mac side is published on 127.0.0.1 only.
-  A client that connects and goes silent is dropped after 30 seconds (a body
-  that stops short gets a 408, signed over the empty body, since the server
-  never had the whole one; the same limit applies to writing the answer, so
-  a reader slower than about 240 KB/s would be cut off on the largest
-  `/v1/raw` answers). IPv6 neighbour discovery
-  is dropped inbound as well; IPv6 was already unusable because the output
-  chain does not allow link-local traffic.
+  A whole request must arrive within 10 seconds (a body that stops short gets
+  a signed 408); a connection that goes silent is dropped after 30 seconds
+  (the same limit applies to writing the answer). IPv6 neighbour discovery
+  is dropped inbound as well. Outbound, the firewall accepts global IPv6
+  (2000::/3) except the refused ranges and the Mac's own addresses, but it has
+  no rule for link-local traffic, so IPv6 normally does not work from the VM.
+  If the VM does have a global IPv6 address, a host on your network with a
+  global address is reachable (see below); the safety probe says whether the VM
+  has one.
 - **The sandbox fetches public addresses only.** It resolves each name, refuses
   the request if any answer is not public (loopback, private, link-local,
   shared, multicast, reserved, and IPv6 forms that carry an IPv4 address such
   as NAT64, 6to4 and Teredo), connects to the address it checked, and checks
-  every redirect again. Only http on port 80 and https on port 443; at most
+  every redirect again, and refuses a redirect from https to http and an
+  answer with more than one `Location` header. Only http on port 80 and https on port 443; at most
   5 MB; 45 seconds per hop (name lookup excepted, see the whole-request
   limit) and 90 seconds for a whole request with its redirects, name lookups,
   connections and TLS handshakes (a second or two more at most); only HTML and plain text. Runs of blanks in a
   plain-text page are collapsed, and a page is split into passages line by
   line, so a page made of millions of spaces costs one pass, not hours.
-- **`POST /v1/raw` returns the site's bytes, not cleaned text.** It is for a
-  program that reads pages itself, such as TUFF's page reader when that option
-  is turned on; SandSeek's own research loop never calls it. It makes the same
-  address checks as the text endpoint (public addresses only, checked after
-  every DNS answer and every redirect, connection pinned to the checked
-  address, ports 80 and 443). Invisible-character stripping and text
-  extraction deliberately do **not** apply to it, and a compressed body is not
-  unpacked, so the caller must parse and clean what it gets. Other differences:
-  GET only, no redirect from https to http, a body over the caller's limit is
-  an error and never a shortened body (so is a body that ends before its
-  Content-Length), no `Accept-Encoding` is sent, no cookies and no page cache,
-  and a success whose final address is over 2048 characters, whose content
-  type is over 256 or whose content encoding is over 64 is refused as
-  `fetch_failed`.
-  One time limit, `timeout_seconds` (at most 60), covers the whole request
-  including its redirects; a read can take about 1 second longer than that, so
-  a client should wait `timeout_seconds` + 5 seconds for the answer. The Host
-  and `application/json` checks and the request size limit are the same as
-  for the other endpoints.
+- **The Mac's own addresses are refused, public ones too.** The firewall's
+  ranges do not cover a public IPv4 or global IPv6 address of the Mac itself (a
+  Mac that is not behind a home router), and a page could point a name at it.
+  At each start `Scripts/research_sandbox.sh` reads the addresses of all the
+  Mac's network interfaces with `/sbin/ifconfig` (IPv4 and IPv6, loopback and
+  link-local included, zone ids such as `%en0` removed, each once), checks every
+  one strictly (a plain IPv4 address or a plain IPv6 address; anything else is
+  left out and reported), and writes them, one per line, to the file
+  `blocked-addresses` in the folder that holds the secret. That folder is
+  mounted read-only into the VM, so the list is in no environment variable and
+  no command line; the addresses are not secret. The VM's entrypoint reads the
+  file, checks each address again with Python's `ipaddress`, and puts it into
+  the nft set `blocked4` or `blocked6`, which the output chain rejects before it
+  accepts anything public; `server.py` reads the same file (as root, once) and
+  refuses the same addresses, for a literal address, a name that resolves to
+  one, and every redirect. A missing, empty, over-long or unreadable list stops
+  the start. The script adds one public address that is no Mac's (a.root-servers.net, 198.41.0.4,
+  which SandSeek never uses) so the security check can show that the list works,
+  not only the private ranges. The VM's DNS exception to the Mac is inserted
+  above these rules, and replies on connections the Mac opened to the
+  published port are allowed before them. The list is taken when the sandbox
+  starts, so an address the Mac gets later (a rotated temporary IPv6 address,
+  for example) is blocked only after a restart. The security check reads the
+  Mac's addresses again and reports any that are not in the blocked sets. The
+  bridge address the Mac gets while the VM runs is private and already refused.
 - **The sandbox API is not for web pages.** It refuses a `Host` header that is
   not a loopback name (which stops DNS rebinding from your browser) and
   accepts only `application/json` POSTs (which a page cannot send across
@@ -172,9 +187,62 @@ These hold as long as the design is intact and the VM boundary holds.
   client refuses a page address from the sandbox that is not http or https,
   search results with such an address are dropped, and the report's list of
   sources prints one as text, never as a link. The
+  address a page ended up at, after the sandbox followed its redirects, passes
+  the same checks on the Mac as the address that was asked for before it can be
+  a source: http or https, no user name or password, and not a local or private
+  network host (loopback, private, link-local, carrier-grade NAT and multicast
+  ranges, `localhost`, `*.local`, single-label names and odd number spellings).
+  A page whose final address fails is no source, with a plain message, and the
+  **Open…** button is off for such a source. Page titles and addresses are
+  cleaned of control, invisible and bidirectional-text characters
+  (U+202A to U+202E, U+2066 to U+2069, U+200E, U+200F and the like) when they
+  arrive, again in the saved report, and again when the report is printed or
+  written as Markdown; a title is cut to one line of 300 characters. The
   app shows web text as plain text, never loads images, and opens a source in
   your browser only after you confirm its full address.
-- **The app checks before every question.** It reads the firewall rules and the
+- **One SandSeek at a time.** The sandbox has one owner. `start` first takes a
+  lock, the file `lock` in `~/Library/Application Support/SandSeek/sandbox`, and
+  keeps it for as long as the sandbox runs: the app, the `sandseek` command's
+  scripts and a second copy of the app share it. A second `start` fails with
+  "Another SandSeek is using the web sandbox. Close it first, or press Stop in
+  it." and touches nothing of the first one's. The lock is an operating system lock (`flock`),
+  held by a small `perl` process (Apple's `/usr/bin/perl`) that `start` leaves
+  running, because the script ends as soon as the VM is up and macOS has no
+  `flock` command; the file holds that process's pid and start time. The
+  system drops the lock when that process ends, however it ends; a lock file
+  that names a dead process is simply taken over. The process does not end when
+  the app crashes or the script is killed by the app's time limit: it and the
+  VM then keep running until a Stop or the next start. If the process is alive
+  but its VM is gone (older than five minutes and not in `container list`), the
+  next start ends it and takes over. `stop` ends it too, except a holder under
+  five seconds old whose VM is not recorded yet (a start in progress, which
+  `stop` cannot tell from a running sandbox because it does not take the
+  lock). Whose sandbox is whose is decided by that process: after its own start
+  the app reads the holder's pid from the lock file and keeps it in its marker
+  file. Its Stop, Stop everything, restart before a question and quitting act
+  only while the lock is still held by that pid (or by nobody); a restart or a
+  start passes the pid in `SANDSEEK_SANDBOX_REPLACE`, and the script ends a
+  holder only if its pid is exactly that one (and its command line is the
+  script's holder). So a second copy of the app that finds the first copy's
+  sandbox cannot replace or stop it. The command line does not pass the
+  setting, and `research_sandbox.sh stop` run by hand stops whichever sandbox
+  runs. Each start picks a free port on 127.0.0.1 (bind to port 0, read it
+  back, let go; a start that finds the port taken tries again, up to three
+  times), publishes only that port, and records it in the file `port` beside
+  the secret, with the VM's name in `vm-name`, both mode 0600. The app, the
+  command and the scripts read them as strictly as the secret (a plain file
+  of yours, nothing but the value, a port from 1024 to 65535). Inside the VM
+  the server and the firewall keep port 9100. `SANDSEEK_SANDBOX_PORT` still
+  fixes the port, for tests (command line and scripts only; the app ignores it). Each VM is called `sandseek-sandbox-` and eight
+  random hex digits. Under the lock, a start removes every VM with that name
+  form (and the plain `sandseek-sandbox` of 0.1.0) and the secret, port, name
+  and address files that a run that did not end normally left; nothing is
+  removed before the lock is held, so a live owner's VM is never touched. A
+  VM someone started by hand under another name is left alone. `stop` removes
+  exactly the VM the start recorded.
+- **The app checks before every question.** It reads the firewall rules (the
+  outbound chain, the Mac's blocked sets and the inbound chain: policy drop,
+  and port 9100 accepted from one IPv4 address only) and the
   server's user and capabilities from outside the VM, and questions stay off
   until that passes. This is a configuration check, not intrusion detection:
   an attacker with root inside the VM could change what it sees.
@@ -187,47 +255,118 @@ These hold as long as the design is intact and the VM boundary holds.
   completion-handler tasks without asking the delegate): a 3xx answer is an
   error, so a program that took over the port cannot send SandSeek, a POST
   body or the llama.cpp key elsewhere.
-- **Answers are signed, so the sandbox can be told from a program squatting on
-  its port.** Each `Scripts/research_sandbox.sh start` (the app starts the
-  sandbox through the same script) makes 32 random bytes, writes them as 64
-  hex characters to `~/Library/Application Support/TUFF/web-sandbox.secret`
-  (file mode 0600, written to a temporary file and renamed before the
-  sandbox starts; the folder is made with mode 0700 when it is missing, and an
-  existing one, such as TUFF's own, is never changed, but the script refuses to
-  use a folder that is not yours or that group or others can write to) and
-  hands them to the container as the variable
-  `SANDSEEK_SANDBOX_SECRET`, by name only, so the value is in no command line
-  and other users cannot see it in `ps`. The sandbox removes the variable from its
-  environment at start. The container's configuration keeps the variable, so
-  it is visible to `container exec` processes and to `container inspect` (same
-  Mac user only); the launcher strips it from the exec probes it runs
-  (`env -u SANDSEEK_SANDBOX_SECRET`). While the file exists, SandSeek sends a
-  fresh random nonce (`X-Sandbox-Nonce`) with every request and uses an answer only if its
-  `X-Sandbox-Signature` is `hex(HMAC-SHA256(secret, "tuff-sandbox-v1\n" +
-  nonce + "\n" + hex(SHA256(request body)) + "\n" + status + "\n" + answer))`,
-  compared in constant time before anything in the answer is read (an answer
+- **Every request is signed, and so is every answer.** Each
+  `Scripts/research_sandbox.sh start` (the app starts the sandbox through the
+  same script) makes 32 random bytes and writes them as 64 hex characters to
+  the file `secret` in `~/Library/Application Support/SandSeek/sandbox` (file
+  mode 0600, written to a temporary file and renamed before the sandbox starts;
+  the folder is made with mode 0700, and the script refuses to use a folder
+  that is not yours, is a symbolic link or can be written by group or others,
+  or whose path has a comma or a line break in it). That folder is mounted
+  **read-only** into the VM, and the sandbox reads the file once, as root,
+  before it gives up root. The secret is in no environment variable and no
+  command line, so it does not show in `ps` or `container inspect`, and is in
+  no process's environment. Root in the VM (`container exec`) can read the
+  mounted file for as long as the VM runs; that is how the self-test signs its
+  requests. The sandbox does not start without it: no secret, no
+  server. `stop` deletes the file, so a missing file means "not running", and
+  `start` also removes the file the first version (0.1.0) left in TUFF's folder
+  (only that one file, and only if it is a plain file of yours).
+  Every request, GET and POST alike, carries a fresh random nonce
+  (`X-Sandbox-Nonce`), the time in seconds (`X-Sandbox-Time`) and
+  `X-Sandbox-Auth`, which is `hex(HMAC-SHA256(secret, join("\n",
+  ["sandseek-sandbox-req-v1", method, path, nonce, time, hex(SHA256(request
+  body))])))`. The sandbox compares it in constant time and refuses the
+  request with 401 `unauthorized` when it is missing or wrong, with 401
+  `stale_request` when the time is more than 60 seconds from its own clock, and
+  with 401 `replayed_request` when it has seen the nonce before. Nonces are
+  kept for the length of the time window, are only stored for requests that
+  were signed correctly (so a caller without the secret cannot fill the store)
+  and are capped at 100,000, after which new requests get 503 `busy`. The Host
+  check comes first, and every other method (PUT, DELETE, PATCH, HEAD, OPTIONS)
+  has its signature checked too before it is answered 405.
+  Every answer to a request with a well-formed nonce, errors included, carries
+  `X-Sandbox-Auth` too: `hex(HMAC-SHA256(secret, join("\n",
+  ["sandseek-sandbox-resp-v1", method, path, nonce, status, hex(SHA256(answer
+  body))])))`. SandSeek uses an answer only if that is right for the request it
+  sent, whatever the status, before anything in the answer is read (an answer
   is read up to 16 MiB, so a program on the port cannot make SandSeek buffer
-  an endless one). The secret
-  never crosses the port, so a program that answers there cannot make a valid
-  signature, an old answer does not fit a new nonce, and a genuine answer to
-  one request does not fit another. Without a valid signature the check fails
-  with "the answer on 127.0.0.1:9100 is not signed by the SandSeek sandbox;
-  another program may be using the port". SandSeek reads the file at every
-  request, and refuses a file that is a symbolic link, not a regular file, not
-  yours, readable or writable by group or others, or shorter than 32 bytes.
-  `stop` leaves the file, so a squatter is still told apart while the sandbox
-  is not running. The script will not start under `bash -x`, whose trace would
-  print the secret, and it stops the container again if `/health` does not
-  report `"signed": true` after the start.
+  an endless one). A 401, 403 or 404 from a program that is not the sandbox is
+  therefore "not signed", not a tool failure. The secret never crosses the
+  port, so a program that answers there cannot make a valid signature, an old
+  answer does not fit a new nonce, and a genuine answer to one request does not
+  fit another method, path or request. Without a valid signature the check
+  fails with "the answer on 127.0.0.1:<port> is not signed by the SandSeek
+  sandbox; another program may be using the port". Fixed examples that the
+  sandbox's tests and the Swift tests both reproduce are in
+  `Sandbox/test-vectors/signing.json`.
+  SandSeek reads the secret file for every request, and refuses a file that is
+  a symbolic link, not a regular file, not yours, readable or writable by group
+  or others, or shorter than 32 bytes. With no file it sends nothing and says
+  to start the sandbox: there is no unsigned mode. Before a search or a page
+  read that comes more than 5 seconds after the last signed health check
+  (`/health` must answer `status` `ok` and `api` 1), SandSeek makes a signed
+  health check first, so a sandbox that was replaced by another program during
+  a pause (a model turn can take minutes) is noticed before the request, and
+  its text, goes anywhere. The script cannot sign (it has no tool for that on
+  the Mac), so its `start` and `status` accept an unsigned `GET /health`
+  answered 401 `unauthorized` as "up and refusing strangers"; the real
+  signature is checked by SandSeek. The self-test signs from inside the VM,
+  where root can read the secret. The script will not start under `bash -x`,
+  whose trace would print the secret as it is written.
   What this does not cover: a program running as you can read the file, which
-  is the honest limit (it could also read your reports and settings). A
-  sandbox started some other way, with no secret, is refused while the file
-  exists; delete the file to use it. With no file at all (a sandbox from
-  before this change, or one never started by the script) SandSeek behaves as
-  it did, unsigned, because SandSeek is the launcher and a missing file only
-  means no secret was made. Inside the VM the server listens on 0.0.0.0,
-  because the published port has to reach it; who can connect is set by the
-  inbound rule above (the gateway only).
+  is the honest limit (it could also read your reports and settings).
+  Inside the VM the server listens on 0.0.0.0, because the published port has
+  to reach it; who can connect is set by the inbound rule above (the gateway
+  only).
+  The server is also hard to jam. A whole request (line, headers and body)
+  must arrive within 10 seconds, or a body that stops short gets a signed 408
+  and anything slower is dropped; at most 32 connections are served at once and
+  the next is closed at once; the request line and headers together may not
+  exceed 16 KiB or 50 headers, a second `Content-Length` or any
+  `Transfer-Encoding` is refused, and the target must be a short plain path.
+  Log lines hold only the method, one of the three known paths, the status, the
+  size and the time taken: no address, query, header or page text. A page that
+  was sent compressed and would unpack past the size limit is refused
+  (`oversized`), not cut. The server turns off core files and memory reads of
+  itself (`RLIMIT_CORE` 0, `PR_SET_DUMPABLE` 0) because its memory holds the
+  secret and the pages it read.
+
+## The `container` program
+
+SandSeek starts and stops the VM by running Apple's `container` tool, so that
+program has full control of the sandbox. It is therefore not looked up through
+`PATH`, where a program in a folder you can write to could stand in for it.
+
+- The app and `Scripts/research_sandbox.sh` run only
+  `/usr/local/bin/container`, where Apple's installer puts it.
+- Before the first use in a session (the script: on every start, stop, build and
+  self-test) they check that the file, and every folder above it, belongs to
+  root and cannot be written by its group or by others, both as the path is
+  given and with symbolic links followed; that its code signature is valid
+  under `codesign --verify --strict` and chains to Apple's certificate
+  authority with Apple's team (`UPBK2H6LZM`, the signer of the `container`
+  release), so a signature you or anyone else made is refused; and that
+  `container --version` is 1.5.0 or newer. If a check fails, nothing is run and
+  the sandbox card (or the script) says which one in plain words. The app
+  checks again if the file at that path is replaced during a session.
+- `container`, `codesign` and the sandbox script run with a fixed environment
+  of their own, not the app's or your shell's: `PATH` is `/usr/bin:/bin:/usr/sbin:/sbin`,
+  the language is fixed, and only `HOME`, `USER`, `LOGNAME`, `TMPDIR` and the
+  settings the script reads (`SANDSEEK_DNS`, `SEARXNG_URL` and the port) are
+  passed on. Nothing set by a launcher or a shell (`DYLD_*`, `BASH_ENV`, proxy
+  variables, tokens) reaches them. Proxy settings for image downloads are
+  among the things this leaves out.
+- Every command has a time limit. The app ends one that hangs with `SIGTERM`
+  and, three seconds later, `SIGKILL`, and keeps only the last 1 MiB of what a
+  command prints. Every call to the sandbox also has its own limit (10 seconds
+  for the health check, 100 for a search, 140 for a page, so that each outlasts
+  the sandbox's own limits).
+
+What this does not do: the check and the first command are separate steps, so
+a program that could replace `/usr/local/bin/container` in between could still
+win, but that takes root, and root can do far more than that. The script cannot
+time-limit `container` itself; the app's limit on the script covers that.
 
 ## What it does not guarantee
 
@@ -245,19 +384,23 @@ These hold as long as the design is intact and the VM boundary holds.
   To restrict domains, put an egress proxy in front of the VM; SandSeek does
   not.
 - **The firewall refuses ranges, not devices.** A device with a public IPv6
-  address (router, printer, NAS, the Mac) is inside the allowed range.
+  address (router, printer, NAS) is inside the allowed range. The Mac's own
+  addresses are the exception: they are refused one by one (see above), as of
+  the start of the sandbox.
 - **Code inside the VM can leak through DNS.** DNS goes to the Mac by default
   (see below), so a taken-over parser could encode small amounts of data into
   lookups.
 - **A kernel or virtualisation flaw could let code escape the VM,** or let code
   in the VM remove the firewall. That is the risk of any VM. The Python
-  packages and the base image are pinned by hash and digest, but `nftables`
-  comes from Debian's current packages when the image is built.
-- **Any program on your Mac can call the sandbox** on 127.0.0.1:9100 and have
-  public pages fetched through it. That is the same trust boundary as any local
-  server. Browser pages cannot (Host check, JSON only). Signing proves the
-  sandbox's answers to SandSeek; it does not authenticate callers of the
-  sandbox.
+  packages and the base image are pinned by hash and digest, and `nftables`
+  comes from a fixed Debian snapshot date (snapshot.debian.org), so a rebuild
+  installs the same version.
+- **Any program running as you can call the sandbox** on its 127.0.0.1 port and
+  have public pages fetched through it. It needs the secret file for that,
+  which only your Mac user can read, so another Mac user, a browser page (Host
+  check, JSON only) or a program that cannot read your files cannot. A program
+  running as you can read the secret, which is the same trust boundary as for
+  your reports and settings.
 - **Anything that can send from the VM's gateway address can still reach port
   9100 of the VM directly.** The inbound firewall accepts new connections to
   that port from the default gateway only (replies to the VM's own outbound
@@ -276,15 +419,16 @@ These hold as long as the design is intact and the VM boundary holds.
   Mac so far. If `start` says the server is listening but did not answer, a
   connection from another source was dropped before the server saw it, so
   `/proc/net/tcp` shows nothing. To check, add a temporary counter in the VM
-  (`container exec sandseek-sandbox nft insert rule inet sandseek_sandbox
+  (`container exec $(cat "$HOME/Library/Application Support/SandSeek/sandbox/vm-name") nft insert rule inet sandseek_sandbox
   input tcp dport 9100 ip saddr != GATEWAY counter`, with the gateway from the
   log), repeat the request and run `nft list chain inet sandseek_sandbox
   input`: packets counted there came from another address. The rule goes away
   with the VM.
   `selftest` reads the loaded rule and checks that it names the gateway; it
   does not send packets from other addresses. The app's own firewall check
-  (`firewallProblem`) looks at the output chain only, not the input chain;
-  that is a later follow-up.
+  (`firewallProblem`) reads the input chain too: the policy must be drop, and
+  the only rules are loopback, replies and one rule that accepts port 9100 from
+  one plain IPv4 address.
 - **The search path through SearXNG** (`SEARXNG_URL`, the operator's own
   service) follows no redirect and uses no proxy from the environment, but it
   is the one request that skips the public-address check; the firewall's single
@@ -314,11 +458,12 @@ These hold as long as the design is intact and the VM boundary holds.
   other, as hidden text in HTML is, so the injection defenses are what protect
   against it. The title is the document's own title if it has one (cleaned and
   capped at 300 characters like an HTML title), else the last part of the
-  address. `/v1/raw` does not parse PDFs. **Residual risk:** a bug in `pypdf`
+  address. **Residual risk:** a bug in `pypdf`
   or in the Python it runs on could be exploited by a crafted PDF. The child
   has the server's privileges (no root, no capabilities, the VM's firewall),
   so the damage is limited to that child and the VM (the signing secret is
-  taken out of the environment at start, so the child does not inherit it).
+  read from its file before privileges are dropped and is in no environment
+  variable, so the child does not inherit it as one).
   `pypdf` is pinned by hash in `Sandbox/requirements.txt`; update it when a
   security fix is released.
 - **The text parsers can still be slow.** The extractor and the fallback HTML
@@ -363,7 +508,8 @@ does not control.
 
   It lists this Mac's own non-loopback addresses and tries a plain TCP connect
   to each one on the server's port. The command also tries the sandbox's port
-  (9100); the app's Check tries the model server's port only. No data is sent.
+  (the one the last start recorded, else 9100); the app's Check tries the model
+  server's port only. No data is sent.
   Each address comes out as *accepted* (something listens), *refused* (the Mac's
   own network stack answers at once that nothing listens) or *not known* (a
   timeout or any other failure, for example macOS Local Network privacy or a
@@ -460,8 +606,9 @@ does and does not do:
 - **Only TUFF with Qwen has been measured against the injection pages** so far.
   llama.cpp with Bonsai: not measured yet. Until it is, llama.cpp counts as only
   partly tested.
-- **No signature, no notarization.** The packaged app is signed ad hoc and
-  runs on the Mac that built it.
+- **Ad hoc signature, no notarization.** The app is signed ad hoc and not
+  notarized: a copy downloaded from the release page needs Open Anyway (System
+  Settings → Privacy & Security) on first launch.
 - **The self-test and address check run from outside.** They try the sandbox as
   a client would and look inside the VM through `container exec`; they cannot
   prove that no bug exists.
@@ -473,9 +620,10 @@ Durations are estimates from earlier runs on a 16 GB MacBook Air.
 
 | Test | What it checks | How to run | Expect | Time |
 | --- | --- | --- | --- | --- |
-| Sandbox self-test | the sandbox refuses the Mac, loopback, private ranges, metadata addresses, odd ports and schemes; the firewall is loaded and drops inbound connections except to port 9100 from the VM's gateway (rule text only); the server runs as user 10001 with no capabilities; raw connections from inside the VM to the Mac, the router addresses and the metadata address fail; every TCP port on the Mac is tried (only DNS may answer); a foreign `Host` and a browser-style POST are refused; a fresh nonce to `/health` gets a valid signature; a public page loads | `Scripts/research_sandbox.sh selftest` (also the app's **Security check**) | `all sandbox checks passed` | about 1 min |
+| Sandbox self-test | the sandbox refuses the Mac, loopback, private ranges, metadata addresses, odd ports and schemes, and every address on the Mac's list (also the public test address, which only the list can explain); the firewall is loaded and drops inbound connections except to port 9100 from the VM's gateway (rule text only); every address of the list is in the firewall's blocked sets, the output chain rejects them, `/health` reports how many the server refuses, and a connection to the public test address from inside the VM is refused by the firewall; the server runs as user 10001 with no capabilities; raw connections from inside the VM to the Mac, the router addresses and the metadata address fail; every TCP port on the Mac is tried (only DNS may answer); a foreign `Host`, an unsigned request, a browser-style POST (signed, so it is the content type that is refused), a repeated request and a signed `PUT` (405, after the signature check) are refused; the secret folder is mounted read-only in the VM; a signed `/health` request gets a signed answer; a public page loads | `Scripts/research_sandbox.sh selftest` (also the app's **Security check**) | `all sandbox checks passed` | about 1 min |
+| Safety test | an unattended probe of the running sandbox from the Mac and from inside the VM (firewall shape, reachability, privileges, hostile requests), a fake sandbox on the port, a lock-holder crash, a second starter and a stop; the clicks stay manual | `Scripts/full_test.sh --safety`, or `Scripts/safety_probe.sh` and `Scripts/safety_lifecycle.sh` | `Result: N pass, 0 fail`; see [SAFETY_TEST.md](SAFETY_TEST.md) | 6 to 12 min |
 | Address check | 98 addresses (private, loopback, link-local, IPv6 forms, numeric spellings, `localhost`, names that resolve to private addresses, bad schemes and ports) are refused, sent straight to the sandbox with no model; a public page still loads | `python3 Scripts/research_address_check.py` | `RESULT: pass`, exit 0 | 1 to 3 min |
-| Sandbox unit tests | the address policy, fetching, redirects, extraction, cleaning, the HTTP API, and the address check's list against the real policy; no network | `python3 -m unittest Sandbox/test_server.py` | `OK` | seconds |
+| Sandbox unit tests | the address policy, fetching, redirects, extraction, cleaning, the HTTP API, and the address check's list against the real policy; no network | `cd Sandbox && python3 -m unittest test_server` | `OK` | seconds |
 | Swift tests | the research loop with fake services, the command, the app logic, streaming, the exposure check | `swift test` | all pass | minutes |
 | Exposure check | the model server and the sandbox do not accept connections on this Mac's network addresses | `.build/release/sandseek --check-exposure --server http://127.0.0.1:8080` | exit 0 (every address refused) | seconds |
 | Injection check, original set | 5 pages with 16 planted attacks (print a canary, send the question to an outside address, read the Mac or the cloud metadata address, fake end of tool result, look-alike markers) | see below | `5/5 runs resisted the injections` | 6 to 15 min per repeat with Qwen; longer with slower models |
@@ -593,12 +741,15 @@ came from.
 ### Unit tests and other tools
 
 ```sh
-python3 -m unittest Sandbox/test_server.py
+cd Sandbox && python3 -m unittest test_server
+python3 -m unittest discover -s Scripts -p 'test_*.py'
 swift test
 ```
 
 The first tests the sandbox policy and needs no network; the second tests the
-loop, the command and the app logic.
+launcher script's checks of the `container` program (it never calls a bare
+`container`, refuses a file others can write to, reads versions, keeps a fixed
+environment); the third tests the loop, the command and the app logic.
 
 `--save-pages <file.json>` and `--replay-figures <file.json>` on the command
 help to measure the figure check on real runs. `Scripts/research_question_set.py`
@@ -611,7 +762,6 @@ you can reinstall, or in a throwaway container.
 
 If you find a way past any of this (a fetch of a private address, a path from a
 page to your files, a prompt injection that makes the model do something
-beyond searching and reading), please open an issue in the repository. If you
-would rather not make it public yet: while the repository is private, tell the
-person who gave you access; once it is public, use GitHub's private
-vulnerability reporting if it is switched on there.
+beyond searching and reading), please report it privately as described in
+[SECURITY.md](../SECURITY.md) (GitHub's Security tab, Report a vulnerability),
+not in a public issue.

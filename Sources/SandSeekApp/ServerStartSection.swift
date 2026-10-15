@@ -13,6 +13,8 @@ struct ServerStartSection: View {
     /// True while a question runs or is being prepared: the server stays as it
     /// is, so the question does not lose it.
     let questionBusy: Bool
+    /// True while "Stop everything" runs: Start server and Stop server wait.
+    let stoppingEverything: Bool
 
     private var type: ResearchServerType { server.serverType }
     private var blocker: String? { launch.startBlocker(for: server) }
@@ -50,13 +52,6 @@ struct ServerStartSection: View {
                 }
                 controls
                 status
-                if type == .tuff {
-                    Text("TUFF does not check which web page a request comes from. Quit the "
-                        + "server when you are not using it.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
             }
         }
     }
@@ -64,15 +59,18 @@ struct ServerStartSection: View {
     private var controls: some View {
         HStack(spacing: 10) {
             Button("Start server") { Task { await launch.start(using: server) } }
-                .disabled(questionBusy || launch.state.isBusy || blocker != nil)
+                .disabled(questionBusy || stoppingEverything || launch.state.isBusy || blocker != nil)
                 .help("Starts the program above on 127.0.0.1. SandSeek stops it again when you quit.")
             if let owned = launch.owned {
                 Button("Stop server") { Task { await launch.stop(using: server) } }
-                    .disabled(questionBusy || launch.state == .stopping)
+                    .disabled(questionBusy || stoppingEverything || launch.state == .stopping)
                 Text("SandSeek started \(owned.type.displayName) on 127.0.0.1:\(owned.port) "
                     + "(\(owned.path))")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .help(owned.path)
                     .textSelection(.enabled)
             }
         }
@@ -137,6 +135,7 @@ struct ServerStartSection: View {
                 .foregroundStyle(path == nil ? Color.secondary : Color.primary)
                 .lineLimit(2)
                 .truncationMode(.middle)
+                .help(path ?? placeholder)
                 .textSelection(.enabled)
             Spacer(minLength: 4)
             Button(button, action: action)

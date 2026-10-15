@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Records the raw server-sent events of one streamed chat completion.
 
-For making real test fixtures on the Mac (Abschnitt 2a): a normal answer, a
+For making real test fixtures on the Mac: a normal answer, a
 tool call, and a context error, from a model server that is running on
 loopback. It POSTs a JSON request file with "stream": true and writes the
 bytes of the reply exactly as they arrive, comment lines (": ping") and the

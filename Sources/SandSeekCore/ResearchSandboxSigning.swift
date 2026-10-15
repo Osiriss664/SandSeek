@@ -10,31 +10,41 @@ import Glibc
 import Musl
 #endif
 
-// Signed answers from the sandbox.
+// Signed requests and signed answers.
 //
 // `Scripts/research_sandbox.sh start` makes a random secret, keeps it in a file
-// only the user can read, and gives it to the sandbox. With the file in place,
-// every request to the sandbox carries a fresh random nonce, and the answer
-// must carry
+// only the user can read, and mounts the folder with that file read-only into
+// the sandbox, which reads it once when it starts. Every request to the
+// sandbox carries a fresh random nonce, the time in seconds, and
 //
-//   X-Sandbox-Signature: hex(HMAC-SHA256(secret,
-//       "tuff-sandbox-v1\n" + nonce + "\n" + hex(SHA256(request body)) + "\n"
-//       + HTTP status + "\n" + response body))
+//   X-Sandbox-Auth: hex(HMAC-SHA256(secret, join("\n", [
+//       "sandseek-sandbox-req-v1", method, path, nonce, time,
+//       hex(SHA256(request body))])))
+//
+// and the sandbox refuses a request that is not signed correctly, that is
+// more than a minute old, or whose nonce it has seen. Every answer must carry
+//
+//   X-Sandbox-Auth: hex(HMAC-SHA256(secret, join("\n", [
+//       "sandseek-sandbox-resp-v1", method, path, nonce, status,
+//       hex(SHA256(answer body))])))
 //
 // A program that only sits on the sandbox's port cannot make that, because the
 // secret never crosses the port, and an old answer does not fit a new nonce.
-// The check comes before the answer is read for anything else.
+// The check comes before the answer is read for anything else, and covers
+// every status, so a 401 or 404 from a program that is not the sandbox is "not
+// signed", not a tool failure. `Sandbox/test-vectors/signing.json` holds fixed
+// examples that this code and the sandbox both reproduce.
 //
-// Without the file nothing changes: SandSeek is the sandbox's launcher, so a
-// missing file means the sandbox was not started with a secret. A file that
-// exists but is not fit to use is an error, never a reason to go unsigned.
+// There is no unsigned mode. A missing secret file means the sandbox was not
+// started (`stop` deletes it): the request is not sent. A file that exists but
+// is not fit to use is an error too.
 
 /// The secret the sandbox's launcher writes, and how it is read.
 public enum ResearchSandboxSecret {
     /// Where the launcher writes the secret, from the home folder. The same
     /// path is `secret_file` in `Scripts/research_sandbox.sh`: change both
     /// together.
-    public static let relativePath = "Library/Application Support/TUFF/web-sandbox.secret"
+    public static let relativePath = "Library/Application Support/SandSeek/sandbox/secret"
 
     public static var defaultFileURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -53,7 +63,8 @@ public enum ResearchSandboxSecret {
     /// new one at every start. The key is the file's bytes without one
     /// trailing newline.
     ///
-    /// Returns nil when there is no such file. Throws
+    /// Returns nil when there is no such file (the sandbox is not running;
+    /// `required(at:)` turns that into an error). Throws
     /// `ResearchError.sandboxSecretUnusable` when there is one that is not
     /// fit to use: a symbolic link (it is not followed), not a regular file,
     /// not owned by the current user, readable or writable by group or others,
@@ -114,6 +125,13 @@ public enum ResearchSandboxSecret {
         return data
     }
 
+    /// The secret in `file`, or `ResearchError.sandboxNotStarted` when there is
+    /// no such file. This is what a request needs: there is no unsigned mode.
+    public static func required(at file: URL) throws -> Data {
+        guard let secret = try contents(of: file) else { throw ResearchError.sandboxNotStarted }
+        return secret
+    }
+
     private static func unusable(_ message: String) -> ResearchError {
         .sandboxSecretUnusable(message)
     }
@@ -127,53 +145,116 @@ public enum ResearchSandboxSecret {
     }
 }
 
-/// One request's nonce and key: what to send, and how to check the answer.
+/// One request's key, nonce and time: what to send, and how to check the
+/// answer to it.
 struct ResearchSandboxSigning: Sendable {
+    static let requestLabel = "sandseek-sandbox-req-v1"
+    static let responseLabel = "sandseek-sandbox-resp-v1"
     static let nonceHeader = "X-Sandbox-Nonce"
-    /// The name in lower case, as `ResearchHTTPResponse.headers` has it.
-    static let signatureHeader = "x-sandbox-signature"
-    static let signaturePrefix = "tuff-sandbox-v1"
+    static let timeHeader = "X-Sandbox-Time"
+    static let authHeader = "X-Sandbox-Auth"
+    /// The answer's header name in lower case, as `ResearchHTTPResponse.headers`
+    /// has it.
+    static let answerAuthHeader = "x-sandbox-auth"
 
     let key: Data
+    /// The request's method and path as sent (`GET`, `/health`): both are signed.
+    let method: String
+    let path: String
     let nonce: String
+    /// Unix time in seconds, as sent in `X-Sandbox-Time`.
+    let time: String
 
-    var requestHeaders: [String: String] { [Self.nonceHeader: nonce] }
-
-    /// Reads the secret for one request. Nil when there is no secret file
-    /// (and when `secretFile` is nil): that request is not signed.
-    static func begin(secretFile: URL?, makeNonce: () -> String) throws -> ResearchSandboxSigning? {
-        guard let secretFile, let key = try ResearchSandboxSecret.contents(of: secretFile) else {
-            return nil
-        }
+    /// Reads the secret for one request. Throws `ResearchError.sandboxNotStarted`
+    /// when there is no secret file, and fails closed where this platform
+    /// cannot sign (CryptoKit is missing).
+    static func begin(secretFile: URL, method: String, path: String, now: Date,
+                      makeNonce: () -> String) throws -> ResearchSandboxSigning {
+        let key = try ResearchSandboxSecret.required(at: secretFile)
         #if canImport(CryptoKit)
-        return ResearchSandboxSigning(key: key, nonce: makeNonce())
+        return ResearchSandboxSigning(
+            key: key, method: method, path: path, nonce: makeNonce(),
+            time: String(Int(now.timeIntervalSince1970)))
         #else
         throw ResearchError.sandboxSecretUnusable(
-            "this platform cannot check the sandbox's signature; delete the file or use a Mac")
+            "this platform cannot sign requests to the sandbox; use a Mac")
         #endif
     }
 
-    /// Whether the answer is signed with this key for this nonce and request.
-    /// A missing header, one that is not exactly 64 hex characters, and a wrong
-    /// value are all false. The comparison takes the same time wherever the
-    /// two values differ.
-    func isValid(_ response: ResearchHTTPResponse, requestBody: Data) -> Bool {
-        guard let header = response.headers[Self.signatureHeader],
-              let received = Self.decodeHex(header) else { return false }
-        return isValid(signature: received, requestBody: requestBody,
-                       status: response.status, responseBody: response.body)
+    /// The three headers of the request, for `body`.
+    func requestHeaders(body: Data) -> [String: String] {
+        [Self.nonceHeader: nonce,
+         Self.timeHeader: time,
+         Self.authHeader: Self.requestAuth(key: key, method: method, path: path, nonce: nonce,
+                                           time: time, body: body)]
     }
 
-    func isValid(signature: Data, requestBody: Data, status: Int, responseBody: Data) -> Bool {
+    /// Whether the answer is signed with this key for this request. A missing
+    /// header, one that is not exactly 64 hex characters, and a wrong value are
+    /// all false. The comparison takes the same time wherever the two values
+    /// differ.
+    func isValid(_ response: ResearchHTTPResponse) -> Bool {
+        guard let header = response.headers[Self.answerAuthHeader],
+              let received = Self.decodeHex(header) else { return false }
+        return isValid(signature: received, status: response.status, responseBody: response.body)
+    }
+
+    func isValid(signature: Data, status: Int, responseBody: Data) -> Bool {
         #if canImport(CryptoKit)
-        var message = Data((Self.signaturePrefix + "\n" + nonce + "\n").utf8)
-        message.append(Data(Self.hex(SHA256.hash(data: requestBody)).utf8))
-        message.append(Data(("\n" + String(status) + "\n").utf8))
-        message.append(responseBody)
+        let message = Self.responseMessage(method: method, path: path, nonce: nonce,
+                                           status: status, body: responseBody)
         return HMAC<SHA256>.isValidAuthenticationCode(
             signature, authenticating: message, using: SymmetricKey(data: key))
         #else
         return false
+        #endif
+    }
+
+    /// The text the request's HMAC is made over.
+    static func requestMessage(method: String, path: String, nonce: String, time: String,
+                               body: Data) -> Data {
+        joined([requestLabel, method, path, nonce, time, sha256Hex(body)])
+    }
+
+    /// The text the answer's HMAC is made over.
+    static func responseMessage(method: String, path: String, nonce: String, status: Int,
+                                body: Data) -> Data {
+        joined([responseLabel, method, path, nonce, String(status), sha256Hex(body)])
+    }
+
+    private static func joined(_ fields: [String]) -> Data {
+        Data(fields.joined(separator: "\n").utf8)
+    }
+
+    /// `X-Sandbox-Auth` of a request: lower-case hex of the HMAC-SHA256.
+    static func requestAuth(key: Data, method: String, path: String, nonce: String,
+                            time: String, body: Data) -> String {
+        authCode(key: key, message: requestMessage(
+            method: method, path: path, nonce: nonce, time: time, body: body))
+    }
+
+    /// The `X-Sandbox-Auth` an answer to that request must carry.
+    static func responseAuth(key: Data, method: String, path: String, nonce: String,
+                             status: Int, body: Data) -> String {
+        authCode(key: key, message: responseMessage(
+            method: method, path: path, nonce: nonce, status: status, body: body))
+    }
+
+    /// Where CryptoKit is missing nothing can be signed; this is never sent,
+    /// since `begin` throws first, and an answer is never valid.
+    private static func authCode(key: Data, message: Data) -> String {
+        #if canImport(CryptoKit)
+        return hex(HMAC<SHA256>.authenticationCode(for: message, using: SymmetricKey(data: key)))
+        #else
+        return ""
+        #endif
+    }
+
+    static func sha256Hex(_ data: Data) -> String {
+        #if canImport(CryptoKit)
+        return hex(SHA256.hash(data: data))
+        #else
+        return ""
         #endif
     }
 

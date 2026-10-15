@@ -179,15 +179,15 @@ public final class ResearchRunController {
     /// and it is known whether anything was saved.
     private var stoppedStep: Int?
 
-    /// The sandbox's secret file (`ResearchSandboxSecret.defaultFileURL` in the
-    /// app); nil, the default, sends no nonce, as the tests need.
-    private let sandboxSecretFile: URL?
+    /// The sandbox's secret file. Every request to the sandbox is signed with
+    /// it, so the tests give each run a file of their own.
+    private let sandboxSecretFile: URL
 
     public init(store: ResearchReportStore,
                 transport: (any ResearchHTTPTransport)? = nil,
                 now: @escaping @Sendable () -> Date = { Date() },
                 wake: any ResearchWakeAssertion = ProcessInfoWakeAssertion(),
-                sandboxSecretFile: URL? = nil) {
+                sandboxSecretFile: URL = ResearchSandboxSecret.defaultFileURL) {
         self.store = store
         self.transport = transport
         self.now = now
