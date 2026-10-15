@@ -473,10 +473,12 @@ def pinned_transport(method: str, target: Target, headers: dict[str, str],
         connection.close()
 
 
-def decode_body(response: Response, limit: int | None = None) -> bytes:
-    """The body, unpacked when the site sent it gzip or deflate anyway (the
-    sandbox never asks for compression). A body that unpacks to more than
-    `limit` bytes is refused (`oversized`), never cut."""
+def decode_body(response: Response, limit: int | None = None, cut: bool = False) -> bytes:
+    """The body, unpacked when the site sent it gzip or deflate (the sandbox
+    asks for gzip, and some sites send either unasked). A body that unpacks
+    to more than `limit` bytes is refused (`oversized`), or with `cut` cut
+    at `limit` and marked `truncated`, as an identity body is. Never more
+    than limit+1 bytes are unpacked."""
     limit = MAX_DOWNLOAD_BYTES if limit is None else limit
     encoding = response.headers.get("content-encoding", "identity").lower()
     if encoding in ("", "identity"):
@@ -492,7 +494,10 @@ def decode_body(response: Response, limit: int | None = None) -> bytes:
     except (zlib.error, gzip.BadGzipFile):
         raise ToolError("response body could not be decompressed", "unsupported_content", 502)
     if len(data) > limit:
-        raise ToolError(f"the body is larger than {limit} bytes", "oversized", 502)
+        if not cut:
+            raise ToolError(f"the body is larger than {limit} bytes", "oversized", 502)
+        response.truncated = True
+        return data[:limit]
     return data
 
 
@@ -1095,7 +1100,7 @@ class WebTools:
                                 "oversized", 502)
             page = pdf_page(final_url, body)
         else:
-            body = decode_body(response)
+            body = decode_body(response, cut=True)
             raw = body.decode(page_charset(content_type, body), errors="replace")
             page = self._html_page(final_url, content_type, raw)
         with self.lock:
@@ -1487,6 +1492,11 @@ class Handler(BaseHTTPRequestHandler):
         too_big = self.rfile.over
         if not too_big and not super().parse_request():
             return False
+        if not self.rfile.over and not self.rfile.head_ended:
+            # The input ended (or the read deadline fired) inside the headers:
+            # no answer, as for any other stalled head.
+            self.close_connection = True
+            return False
         keep_open = self.close_connection
         self.close_connection = True  # Any refusal below closes the connection.
         if too_big or self.rfile.over:
@@ -1512,7 +1522,9 @@ class Handler(BaseHTTPRequestHandler):
         started = getattr(self, "_started", None)
         took = "-" if started is None else f"{time.monotonic() - started:.2f}s"
         size = self._size if getattr(self, "_size", None) is not None else size
-        method = (getattr(self, "command", None) or "-")[:8]
+        method = getattr(self, "command", None)
+        if method not in ("GET", "POST", "HEAD", "PUT", "DELETE", "PATCH", "OPTIONS"):
+            method = "-"
         self.log_message("%s %s %s %s %s", method, path, code, size, took)
 
     def log_error(self, fmt, *args):
@@ -1706,12 +1718,16 @@ class _HeadReader:
         self._limit = budget
         self._left: int | None = budget
         self.over = False
+        self.head_ended = False  # The head ended with a blank line.
 
     def start_head(self) -> None:
         self._left = self._limit
         self.over = False
+        self.head_ended = False
 
     def readline(self, size: int = -1) -> bytes:
+        if self.over:
+            return b""
         if self._left is None:
             return self._raw.readline(size)
         room = self._left + 1
@@ -1720,6 +1736,8 @@ class _HeadReader:
         if self._left < 0:
             self.over = True
             return b""
+        if line in (b"\r\n", b"\n"):
+            self.head_ended = True
         return line
 
     def read(self, size: int = -1) -> bytes:

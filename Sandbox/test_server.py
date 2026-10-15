@@ -2356,6 +2356,17 @@ class SilentClientTests(LiveServer):
 class ReadDeadlineTests(LiveServer):
     read_deadline = 1.0
 
+    def test_a_deadline_inside_the_headers_gets_no_answer(self):
+        with socket.create_connection(("127.0.0.1", self.port), timeout=10) as client:
+            client.sendall(b"GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nX-A: b\r\n")
+            data = b""
+            while True:
+                chunk = client.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+        self.assertEqual(data, b"")
+
     def test_a_sender_that_drips_the_body_gets_a_signed_408_by_the_deadline(self):
         # A byte every 0.3 seconds never trips the per-wait timeout (30 s), so
         # only the deadline for the whole request can end this.
@@ -2545,6 +2556,14 @@ class LogLineTests(LiveServer):
         self.assertRegex(lines[1], r"^GET /health 404 \d+ \d+\.\d\ds$")
         self.assertRegex(lines[2], r"^GET - 404 \d+ \d+\.\d\ds$")
 
+    def test_an_escape_sequence_in_the_method_is_not_logged(self):
+        with mock.patch.object(sys, "stderr", io.StringIO()) as log:
+            with socket.create_connection(("127.0.0.1", self.port), timeout=5) as client:
+                client.sendall(b"\x1b[31mGET / HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+                client.recv(1024)
+            time.sleep(0.2)
+        self.assertNotIn("\x1b", log.getvalue())
+
     def test_a_refused_request_line_is_not_echoed(self):
         with mock.patch.object(sys, "stderr", io.StringIO()) as log:
             with socket.create_connection(("127.0.0.1", self.port), timeout=5) as client:
@@ -2583,16 +2602,61 @@ class CompressedSizeTests(unittest.TestCase):
                 self.assertEqual(len(server.decode_body(self.compressed(1000, encoding), limit=1000)),
                                  1000)
 
-    def test_a_small_compressed_bomb_is_refused_by_a_page_fetch(self):
+    def test_a_cut_body_is_marked_truncated_and_stays_bounded(self):
+        response = self.compressed(5000)
+        self.assertEqual(len(server.decode_body(response, limit=1000, cut=True)), 1000)
+        self.assertTrue(response.truncated)
+
+    def test_a_small_compressed_bomb_is_cut_by_a_page_fetch(self):
         bomb = gzip.compress(b"a" * (server.MAX_DOWNLOAD_BYTES + 1000))
         self.assertLess(len(bomb), 100_000)
         tools = WebTools(resolver=resolver({"example.com": ["93.184.216.34"]}),
                          transport=FakeTransport({"https://example.com/z": Response(
                              200, {"content-type": "text/html", "content-encoding": "gzip"}, bomb)}),
                          searxng_url="")
-        with self.assertRaises(ToolError) as caught:
-            tools.fetch("https://example.com/z")
+        self.assertEqual(tools.fetch("https://example.com/z")["url"], "https://example.com/z")
+
+    def test_big_gzip_html_is_cut_and_read(self):
+        html = b"<html><title>T</title><body><p>" + b"word " * 3000 + b"</p></body></html>"
+        tools = WebTools(resolver=resolver({"example.com": ["93.184.216.34"]}),
+                         transport=FakeTransport({"https://example.com/z": Response(
+                             200, {"content-type": "text/html", "content-encoding": "gzip"},
+                             gzip.compress(html))}),
+                         searxng_url="")
+        with mock.patch.object(server, "MAX_DOWNLOAD_BYTES", 2000):
+            result = tools.fetch("https://example.com/z")
+        self.assertIn("word", result["text"])
+        self.assertLess(len(result["text"]), 2100)
+
+    def test_big_gzip_search_results_are_refused(self):
+        route = Response(200, {"content-type": "text/html", "content-encoding": "gzip"},
+                         gzip.compress(b"a" * 5000))
+        tools = WebTools(resolver=resolver({"html.duckduckgo.com": ["93.184.216.34"]}),
+                         transport=FakeTransport({"https://html.duckduckgo.com/html/": route}),
+                         searxng_url="")
+        with mock.patch.object(server, "MAX_DOWNLOAD_BYTES", 2000):
+            with self.assertRaises(ToolError) as caught:
+                tools._duckduckgo("q")
         self.assertEqual(caught.exception.code, "oversized")
+
+
+class HeadReaderTests(unittest.TestCase):
+    def test_a_negative_size_never_reaches_raw_once_over(self):
+        raw = mock.Mock()
+        raw.readline.return_value = b"x" * 10
+        reader = server._HeadReader(raw, 5)
+        self.assertEqual(reader.readline(-1), b"")
+        self.assertTrue(reader.over)
+        raw.readline.reset_mock()
+        self.assertEqual(reader.readline(-1), b"")
+        raw.readline.assert_not_called()
+
+    def test_it_records_the_blank_line(self):
+        reader = server._HeadReader(io.BytesIO(b"GET / HTTP/1.1\r\nA: b\r\n\r\n"), 100)
+        for _ in range(3):
+            self.assertFalse(reader.head_ended)
+            reader.readline()
+        self.assertTrue(reader.head_ended)
 
 
 class MemoryDumpTests(unittest.TestCase):
