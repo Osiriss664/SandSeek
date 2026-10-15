@@ -23,6 +23,8 @@ private func sandboxFolder() throws -> URL {
 @discardableResult
 private func write(_ text: String, to name: String, in folder: URL, mode: Int = 0o600) throws -> URL {
     let file = folder.appendingPathComponent(name)
+    // A new file each time: a mode set before may not allow writing.
+    try? FileManager.default.removeItem(at: file)
     try Data(text.utf8).write(to: file)
     try FileManager.default.setAttributes([.posixPermissions: mode], ofItemAtPath: file.path)
     return file
