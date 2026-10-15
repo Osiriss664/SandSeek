@@ -13,9 +13,9 @@ public struct ResearchServedModel: Equatable, Identifiable, Hashable, Sendable {
     }
 }
 
-/// The kinds of model server the picker shows. TUFF and llama.cpp have a
-/// connector; Ollama and LM Studio are listed so that people see they are
-/// planned, but they cannot be chosen yet.
+/// The kinds of model server the picker shows. TUFF, llama.cpp and Ollama
+/// have a connector (Ollama's is experimental); LM Studio is listed so that
+/// people see it is planned, but it cannot be chosen yet.
 public enum ResearchServerType: String, CaseIterable, Identifiable, Sendable {
     case tuff
     case llamacpp
@@ -29,11 +29,17 @@ public enum ResearchServerType: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .tuff: .tuff
         case .llamacpp: .llamacpp
-        case .ollama, .lmstudio: nil
+        case .ollama: .ollama
+        case .lmstudio: nil
         }
     }
 
     public var isAvailable: Bool { kind != nil }
+
+    /// Whether "Start server" can start a server of this type. Ollama is
+    /// started by the person (`ollama serve`); SandSeek never starts or
+    /// stops it.
+    public var canStart: Bool { self == .tuff || self == .llamacpp }
 
     public var displayName: String {
         switch self {
@@ -54,7 +60,8 @@ public enum ResearchServerType: String, CaseIterable, Identifiable, Sendable {
         switch self {
         case .tuff: "http://127.0.0.1:8080"
         case .llamacpp: "http://127.0.0.1:8081"
-        case .ollama, .lmstudio: nil
+        case .ollama: "http://127.0.0.1:11434"
+        case .lmstudio: nil
         }
     }
 }
@@ -412,7 +419,11 @@ public final class ResearchServerController {
             "Choose llama-server and a model below and click Start server, or start llama.cpp "
                 + "with the command below. Replace <model.gguf> with your model "
                 + "file and <name> with the name you want in the model list."
-        case .ollama, .lmstudio:
+        case .ollama:
+            "Start Ollama yourself: run `ollama serve` (it listens on 127.0.0.1:11434) and "
+                + "install a model that can call tools with `ollama pull <name>`. "
+                + "SandSeek does not start or stop Ollama. Ollama support is experimental."
+        case .lmstudio:
             "\(serverType.displayName) support comes later."
         }
     }
@@ -459,7 +470,7 @@ public final class ResearchServerController {
         exposure = .checking
         let report = await probe(port)
         guard mine == exposureGeneration else { return }
-        if let warning = report.warning {
+        if let warning = report.warning(for: serverType.kind) {
             exposure = .reachable(warning)
         } else if let note = report.unknownNote {
             exposure = .unclear(note)
@@ -550,8 +561,11 @@ public final class ResearchServerController {
         switch outcome {
         case .ready(let listed, let version, let contextTokens):
             models = listed
+            // Ollama is always streamed: it stops generating when the client
+            // hangs up, which is what makes Stop work.
             connection = ResearchServerConnection(
-                kind: kind, version: version, streaming: kind == .tuff && tuffStreaming,
+                kind: kind, version: version,
+                streaming: (kind == .tuff && tuffStreaming) || kind == .ollama,
                 contextTokens: contextTokens)
             offReason = nil
             state = .ready
@@ -585,7 +599,8 @@ public final class ResearchServerController {
     }
 
     /// The cheap look: TUFF's status route, llama.cpp's `/health` (which
-    /// llama-server answers without a key, 503 while it loads its model).
+    /// llama-server answers without a key, 503 while it loads its model),
+    /// Ollama's `/api/version`.
     nonisolated static func quickLook(kind: ResearchServerKind,
                                       url: URL,
                                       transport: any ResearchHTTPTransport) async -> QuickLook {
@@ -594,6 +609,13 @@ public final class ResearchServerController {
             switch await ResearchServerConnection.probe(
                 serverURL: url, transport: transport, timeout: requestTimeout) {
             case .tuff: return .alive
+            case .unreachable(let reason): return .gone(reason)
+            case .other: return .changed
+            }
+        case .ollama:
+            switch await ResearchServerConnection.probeOllama(
+                serverURL: url, transport: transport, timeout: requestTimeout) {
+            case .ollama: return .alive
             case .unreachable(let reason): return .gone(reason)
             case .other: return .changed
             }
@@ -679,6 +701,9 @@ public final class ResearchServerController {
                                     url: URL,
                                     authorization: String?,
                                     transport: any ResearchHTTPTransport) async -> Outcome {
+        if kind == .ollama {
+            return await inspectOllama(url: url, transport: transport)
+        }
         let probe = await ResearchServerConnection.probe(
             serverURL: url, transport: transport, timeout: requestTimeout)
         var version: String?
@@ -689,9 +714,14 @@ public final class ResearchServerController {
         case (_, .other(let status)) where (300..<400).contains(status):
             return .problem("A server answers at \(url.absoluteString), but \(redirectNote(status))")
         case (.tuff, .other(let status)):
+            if case .ollama = await ResearchServerConnection.probeOllama(
+                serverURL: url, transport: transport, timeout: requestTimeout) {
+                return .problem("An Ollama server answers at \(url.absoluteString), not TUFF. "
+                    + "Choose Ollama, or give TUFF another port.")
+            }
             return .problem("A server answers at \(url.absoluteString), but not as TUFF "
                 + "(HTTP \(status) from /tuff/v1/status). TUFF older than 8.3.1 has no status "
-                + "route. If it is llama.cpp, choose llama.cpp.")
+                + "route. If it is llama.cpp or Ollama, choose that.")
         case (.llamacpp, .tuff):
             return .problem("A TUFF server answers at \(url.absoluteString), not llama.cpp. "
                 + "Choose TUFF, or give llama.cpp another port.")
@@ -711,8 +741,8 @@ public final class ResearchServerController {
                     + redirectNote(status))
             case .notLlamaCpp(let detail):
                 return .problem("A server answers at \(url.absoluteString), but it does not "
-                    + "look like llama.cpp (\(detail)). If it is TUFF, choose TUFF. Ollama and "
-                    + "LM Studio are not supported yet.")
+                    + "look like llama.cpp (\(detail)). If it is TUFF or Ollama, choose that. "
+                    + "LM Studio is not supported yet.")
             case .off(let reason):
                 return .off(reason)
             }
@@ -754,5 +784,101 @@ public final class ResearchServerController {
         let listed = list.data.map(\.id).filter { seen.insert($0).inserted }
             .map { ResearchServedModel(id: $0) }
         return .ready(models: listed, version: version, contextTokens: contextTokens)
+    }
+
+    /// Asks an Ollama server who it is and which models it has. `/api/version`
+    /// says it is Ollama (and which version); `/api/tags` lists the models
+    /// installed on this Mac. Only a model SandSeek can use is listed:
+    /// - a cloud model (Ollama gives it a `remote_host`, or its name ends in
+    ///   `:cloud` or `-cloud`) is left out, because its requests go to
+    ///   ollama.com and the question would leave this Mac;
+    /// - a model whose `capabilities` do not include `tools` is left out,
+    ///   because the research needs a model that can call tools. A model with
+    ///   no `capabilities` field at all (an older Ollama) is kept.
+    nonisolated static func inspectOllama(url: URL,
+                                          transport: any ResearchHTTPTransport) async -> Outcome {
+        let version: String
+        switch await ResearchServerConnection.probeOllama(
+            serverURL: url, transport: transport, timeout: requestTimeout) {
+        case .unreachable(let reason):
+            return .off(reason)
+        case .other(let status) where (300..<400).contains(status):
+            return .problem("A server answers at \(url.absoluteString), but \(redirectNote(status))")
+        case .other(let status):
+            if case .tuff = await ResearchServerConnection.probe(
+                serverURL: url, transport: transport, timeout: requestTimeout) {
+                return .problem("A TUFF server answers at \(url.absoluteString), not Ollama. "
+                    + "Choose TUFF, or give Ollama another port.")
+            }
+            return .problem("A server answers at \(url.absoluteString), but not as Ollama "
+                + "(HTTP \(status) from /api/version). If it is TUFF or llama.cpp, choose that.")
+        case .ollama(let found):
+            version = found
+        }
+        guard let tagsURL = endpoint(url, "/api/tags") else {
+            return .problem("The server address cannot be extended to /api/tags.")
+        }
+        let response: ResearchHTTPResponse
+        do {
+            response = try await transport.send(
+                method: "GET", url: tagsURL, body: nil, timeout: requestTimeout)
+        } catch {
+            return .off(describe(error))
+        }
+        switch response.status {
+        case 200:
+            break
+        case 300..<400:
+            return .problem("A server answers at \(url.absoluteString), but "
+                + redirectNote(response.status))
+        default:
+            return .problem("Ollama answered /api/tags with HTTP \(response.status).")
+        }
+        guard let tags = try? ResearchJSON.decode(response.body),
+              let entries = tags["models"]?.arrayValue else {
+            return .problem("Ollama's /api/tags answer is not a list of models.")
+        }
+        var seen = Set<String>()
+        var usable: [ResearchServedModel] = []
+        var cloudCount = 0
+        var withoutToolsCount = 0
+        for entry in entries {
+            guard let name = entry["name"]?.stringValue ?? entry["model"]?.stringValue,
+                  !name.isEmpty else { continue }
+            let host = entry["remote_host"]?.stringValue ?? ""
+            if !host.isEmpty || ResearchOllama.isCloudModelName(name) {
+                cloudCount += 1
+                continue
+            }
+            if let capabilities = entry["capabilities"]?.arrayValue,
+               !capabilities.contains(where: { $0.stringValue == "tools" }) {
+                withoutToolsCount += 1
+                continue
+            }
+            if seen.insert(name).inserted { usable.append(ResearchServedModel(id: name)) }
+        }
+        guard !usable.isEmpty else {
+            return .problem(noUsableOllamaModelMessage(
+                installed: entries.count, cloud: cloudCount, withoutTools: withoutToolsCount))
+        }
+        return .ready(models: usable, version: version, contextTokens: nil)
+    }
+
+    /// Why Ollama has no model to offer.
+    nonisolated static func noUsableOllamaModelMessage(installed: Int, cloud: Int,
+                                                       withoutTools: Int) -> String {
+        if installed == 0 {
+            return "Ollama is running but has no model installed. Install one that can call "
+                + "tools with `ollama pull <name>`."
+        }
+        var reasons: [String] = []
+        if cloud > 0 {
+            reasons.append("cloud models are not used, because the question would leave this Mac")
+        }
+        if withoutTools > 0 {
+            reasons.append("no installed model can call tools, which the research needs")
+        }
+        return "Ollama has no model SandSeek can use: " + reasons.joined(separator: "; ")
+            + ". Install a model with tool support using `ollama pull <name>`."
     }
 }

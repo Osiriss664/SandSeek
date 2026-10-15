@@ -29,6 +29,10 @@ public struct ResearchRunSettings: Equatable, Sendable {
     public var stepTimeoutMinutes: Int
     /// Minutes a step with reasoning on may take, as `--thinking-limit`.
     public var thinkingMinutes: Int
+    /// The context window of an Ollama run (`num_ctx`), as
+    /// `--context-tokens`; nil picks 32,768, or the model's trained maximum
+    /// when that is smaller. Not used for the other servers.
+    public var ollamaContextTokens: Int?
 
     public init(model: String,
                 showThinking: Bool = true,
@@ -45,7 +49,8 @@ public struct ResearchRunSettings: Equatable, Sendable {
                 nudges: Bool = true,
                 reviseUnreadCitations: Bool = true,
                 stepTimeoutMinutes: Int = ResearchOptions.defaultStepTimeoutMinutes,
-                thinkingMinutes: Int = ResearchOptions.defaultThinkingMinutes) {
+                thinkingMinutes: Int = ResearchOptions.defaultThinkingMinutes,
+                ollamaContextTokens: Int? = nil) {
         self.model = model
         self.showThinking = showThinking
         self.maxSteps = maxSteps
@@ -62,6 +67,8 @@ public struct ResearchRunSettings: Equatable, Sendable {
         self.reviseUnreadCitations = reviseUnreadCitations
         self.stepTimeoutMinutes = stepTimeoutMinutes
         self.thinkingMinutes = thinkingMinutes
+        self.ollamaContextTokens = ollamaContextTokens?.clamped(
+            to: ResearchOllama.contextTokensRange)
     }
 
     /// Reasoning as sent to the server: Show thinking turns it on unless it
@@ -222,28 +229,15 @@ public final class ResearchRunController {
         startedAt = started
         phase = .running
 
-        let options = Self.runOptions(settings: settings, connection: connection)
         // The step timeout is for the model; sandbox calls keep the default,
         // far above the sandbox's own limits.
         let transport = self.transport
             ?? URLSessionResearchTransport(timeout: settings.stepTimeout)
         let sandboxTransport = self.transport ?? URLSessionResearchTransport()
         let (events, continuation) = AsyncStream<ResearchEvent>.makeStream()
-        let agent = ResearchAgent(
-            chat: ResearchChatClient(
-                serverURL: serverURL,
-                model: settings.model,
-                maxTokens: settings.maxTokens,
-                enableThinking: settings.enableThinking,
-                streaming: connection.streaming,
-                authorization: authorization,
-                transport: transport),
-            sandbox: ResearchSandboxClient(
-                baseURL: sandboxURL, transport: sandboxTransport, secretFile: sandboxSecretFile),
-            options: options,
-            onEvent: { continuation.yield($0) })
+        let sandboxSecretFile = self.sandboxSecretFile
 
-        let maxSteps = options.maxSteps
+        let maxSteps = settings.options.maxSteps
         let listener = Task { [weak self] in
             for await event in events {
                 self?.record(event, runID: id, started: started, maxSteps: maxSteps)
@@ -256,6 +250,29 @@ public final class ResearchRunController {
         task = Task { [weak self] in
             let outcome: Result<ResearchReport, any Error>
             do {
+                // For Ollama the model is checked (installed, local, can call
+                // tools) and the context window chosen first; any other
+                // connection comes back unchanged, with no request.
+                let prepared = try await ResearchOllama.prepare(
+                    connection, model: settings.model,
+                    requestedContextTokens: settings.ollamaContextTokens,
+                    serverURL: serverURL, transport: transport)
+                let agent = ResearchAgent(
+                    chat: ResearchChatClient(
+                        serverURL: serverURL,
+                        model: settings.model,
+                        maxTokens: settings.maxTokens,
+                        enableThinking: settings.enableThinking,
+                        streaming: prepared.streaming,
+                        authorization: authorization,
+                        kind: prepared.kind,
+                        contextTokens: prepared.contextTokens,
+                        transport: transport),
+                    sandbox: ResearchSandboxClient(
+                        baseURL: sandboxURL, transport: sandboxTransport,
+                        secretFile: sandboxSecretFile),
+                    options: Self.runOptions(settings: settings, connection: prepared),
+                    onEvent: { continuation.yield($0) })
                 outcome = .success(try await agent.run(question: question))
             } catch {
                 outcome = .failure(error)
@@ -269,8 +286,9 @@ public final class ResearchRunController {
     }
 
     /// The loop options of a run: the settings', and the context window the
-    /// server gave outside its model list (llama.cpp's `/props`), which the
-    /// loop uses unless the settings fix a prompt budget.
+    /// server gave outside its model list (llama.cpp's `/props`) or the run
+    /// asks for (Ollama's `num_ctx`), which the loop uses unless the settings
+    /// fix a prompt budget.
     static func runOptions(settings: ResearchRunSettings,
                            connection: ResearchServerConnection) -> ResearchOptions {
         var options = settings.options

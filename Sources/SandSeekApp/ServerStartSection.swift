@@ -20,7 +20,17 @@ struct ServerStartSection: View {
     private var blocker: String? { launch.startBlocker(for: server) }
 
     var body: some View {
-        if type.isAvailable {
+        if type == .ollama {
+            // Ollama is started by the person; there is nothing to start here.
+            VStack(alignment: .leading, spacing: 8) {
+                Divider()
+                Text("Ollama is started by you").font(.subheadline.weight(.semibold))
+                Text("Start Ollama yourself: ollama serve. SandSeek does not start or stop Ollama.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } else if type.canStart {
             VStack(alignment: .leading, spacing: 8) {
                 Divider()
                 Text("Start it from SandSeek").font(.subheadline.weight(.semibold))

@@ -109,7 +109,7 @@ public final class ResearchServerLaunchController {
         self.timing = timing
         self.identityOf = identityOf
         self.checkProgram = checkProgram
-        for type in ResearchServerType.allCases where type.isAvailable {
+        for type in ResearchServerType.allCases where type.canStart {
             programs[type] = Self.saved(defaults, Self.programKey(type))
             models[type] = Self.saved(defaults, Self.modelKey(type))
         }
@@ -147,7 +147,7 @@ public final class ResearchServerLaunchController {
     /// (TUFF). An empty `pick` forgets the models folder; TUFFServer then uses
     /// the folder of the installed TUFF.
     public func chooseModel(_ pick: String, for type: ResearchServerType) {
-        guard type.isAvailable else { return }
+        guard type.canStart else { return }
         if pick.isEmpty, type == .tuff {
             models[type] = nil
             defaults.save("", forKey: Self.modelKey(type))
@@ -186,7 +186,7 @@ public final class ResearchServerLaunchController {
                 + "(16 GB: one model at a time)."
         }
         let type = server.serverType
-        guard type.isAvailable else { return "\(type.displayName) support comes later." }
+        guard type.canStart else { return Self.cannotStartMessage(type) }
         guard let url = server.serverURL, let port = url.port else {
             return server.addressProblem ?? "The server address needs a port."
         }
@@ -346,8 +346,16 @@ public final class ResearchServerLaunchController {
             return try .llamacpp(
                 server: program, model: model, port: port, keyFile: server.keyFilePath ?? "")
         case .ollama, .lmstudio:
-            throw ResearchLaunchProblem("\(type.displayName) support comes later.")
+            throw ResearchLaunchProblem(Self.cannotStartMessage(type))
         }
+    }
+
+    /// Why Start is not offered for a type: Ollama is started by the person,
+    /// and the others have no connector yet.
+    static func cannotStartMessage(_ type: ResearchServerType) -> String {
+        type == .ollama
+            ? "SandSeek does not start Ollama. Run `ollama serve` yourself."
+            : "\(type.displayName) support comes later."
     }
 
     /// Nil when nothing answers on the port and the connection was refused;
@@ -511,7 +519,7 @@ public final class ResearchServerLaunchController {
         guard owned == nil, let marker = ResearchServerMarker.load(from: stateDirectory) else {
             return
         }
-        guard let type = ResearchServerType(rawValue: marker.type), type.isAvailable,
+        guard let type = ResearchServerType(rawValue: marker.type), type.canStart,
               identityOf(marker.pid) == marker.identity else {
             ResearchServerMarker.remove(from: stateDirectory)
             return

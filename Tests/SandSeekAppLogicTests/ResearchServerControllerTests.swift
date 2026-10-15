@@ -65,11 +65,12 @@ private final class FixedPropsServices: ResearchHTTPTransport, @unchecked Sendab
     @Test func theTypesHaveTheirDefaultAddresses() {
         #expect(ResearchServerType.tuff.defaultAddress == "http://127.0.0.1:8080")
         #expect(ResearchServerType.llamacpp.defaultAddress == "http://127.0.0.1:8081")
-        #expect(ResearchServerType.ollama.defaultAddress == nil)
+        #expect(ResearchServerType.ollama.defaultAddress == "http://127.0.0.1:11434")
         #expect(ResearchServerType.lmstudio.defaultAddress == nil)
         #expect(ResearchServerType.tuff.kind == .tuff)
         #expect(ResearchServerType.llamacpp.kind == .llamacpp)
-        #expect(ResearchServerType.ollama.kind == nil)
+        #expect(ResearchServerType.ollama.kind == .ollama)
+        #expect(ResearchServerType.lmstudio.kind == nil)
 
         let server = controller()
         #expect(server.serverType == .tuff)
@@ -80,17 +81,31 @@ private final class FixedPropsServices: ResearchHTTPTransport, @unchecked Sendab
         #expect(server.addressText == "http://127.0.0.1:8081")
     }
 
-    @Test func ollamaAndLMStudioAreShownButCannotBeChosen() {
+    @Test func lmStudioIsShownButCannotBeChosen() {
         #expect(ResearchServerType.allCases.map(\.displayName)
             == ["TUFF", "llama.cpp", "Ollama", "LM Studio"])
-        #expect(ResearchServerType.allCases.filter { !$0.isAvailable } == [.ollama, .lmstudio])
-        #expect(ResearchServerType.ollama.pickerLabel == "Ollama (later)")
+        #expect(ResearchServerType.allCases.filter { !$0.isAvailable } == [.lmstudio])
         #expect(ResearchServerType.lmstudio.pickerLabel == "LM Studio (later)")
         #expect(ResearchServerType.tuff.pickerLabel == "TUFF")
         let server = controller()
-        server.select(.ollama)
         server.select(.lmstudio)
         #expect(server.serverType == .tuff)
+    }
+
+    @Test func ollamaCanBeChosenButSandSeekNeverStartsIt() {
+        #expect(ResearchServerType.ollama.isAvailable)
+        #expect(ResearchServerType.ollama.pickerLabel == "Ollama")
+        #expect(ResearchServerType.allCases.filter(\.canStart) == [.tuff, .llamacpp])
+        let server = controller()
+        server.select(.ollama)
+        #expect(server.serverType == .ollama)
+        #expect(server.addressText == "http://127.0.0.1:11434")
+        #expect(server.authorization == nil)
+        #expect(server.startCommand == nil)
+        #expect(server.needsPromptBudget == false)
+        #expect(server.startHint.contains("ollama serve"))
+        #expect(server.startHint.contains("does not start or stop Ollama"))
+        #expect(server.startHint.contains("experimental"))
     }
 
     @Test func theChoiceAndEachTypesAddressAreRemembered() {
@@ -114,8 +129,11 @@ private final class FixedPropsServices: ResearchHTTPTransport, @unchecked Sendab
 
     @Test func aStoredTypeThatComesLaterFallsBackToTuff() {
         let settings = MemorySettings()
-        settings.save("ollama", forKey: ResearchServerController.typeKey)
+        settings.save("lmstudio", forKey: ResearchServerController.typeKey)
         #expect(controller(settings: settings).serverType == .tuff)
+        // Ollama is a type that can be chosen, and is remembered.
+        settings.save("ollama", forKey: ResearchServerController.typeKey)
+        #expect(controller(settings: settings).serverType == .ollama)
         settings.save("nonsense", forKey: ResearchServerController.typeKey)
         #expect(controller(settings: settings).serverType == .tuff)
     }
