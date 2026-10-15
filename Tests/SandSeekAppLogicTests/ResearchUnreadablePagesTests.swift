@@ -150,6 +150,20 @@ import Testing
         #expect(report.markdown.contains("- and 5 more"))
     }
 
+    @Test func reasonIsPlainAndDoesNotRepeatTheAddress() {
+        let steps = [
+            step(0, .reading, "https://www.britannica.com/place/Canberra"),
+            step(1, .failed, "https://www.britannica.com/place/Canberra answered HTTP 403"),
+            step(2, .reading, "https://www.nca.gov.au/x"),
+            step(3, .failed, "request to [www.nca.gov.au](https://www.nca.gov.au) failed: The read operation timed out"),
+        ]
+        let pages = saved(steps: steps).unreadablePages
+        #expect(pages.map(\.reason) == [
+            "answered HTTP 403",
+            "request to www.nca.gov.au failed: The read operation timed out",
+        ])
+    }
+
     @Test func refusedAddressesAreNotLinks() {
         let steps = [
             step(0, .reading, "http://192.168.1.1/admin"),

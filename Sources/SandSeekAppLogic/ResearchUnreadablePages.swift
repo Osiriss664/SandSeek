@@ -65,7 +65,7 @@ extension SavedResearchReport {
             if readLater { continue }
             // One line per address: a page that failed more than once keeps
             // its last reason.
-            let page = UnreadablePage(address: address, reason: reason)
+            let page = UnreadablePage(address: address, reason: plainReason(reason, for: address))
             if let earlier = result.firstIndex(where: { $0.address == address }) {
                 result[earlier] = page
             } else {
@@ -74,6 +74,23 @@ extension SavedResearchReport {
         }
         return result
     }
+
+    /// The reason as plain words: a Markdown link keeps only its text, and the
+    /// page's own address at the start is dropped, since the line shows it
+    /// already ("https://… answered HTTP 403" becomes "answered HTTP 403").
+    static func plainReason(_ reason: String, for address: String) -> String {
+        let range = NSRange(reason.startIndex..., in: reason)
+        var text = markdownLinkInReason.stringByReplacingMatches(
+            in: reason, range: range, withTemplate: "$1")
+        if text.hasPrefix(address + " ") {
+            text = String(text.dropFirst(address.count + 1))
+        }
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty ? reason : trimmed
+    }
+
+    private static let markdownLinkInReason = try! NSRegularExpression(
+        pattern: #"\[([^\]\n]*)\]\([^)\s]*\)"#)
 
     /// The "Pages that could not be read" section of the Markdown report, or
     /// nothing when every page was read. Only an address that passes the Mac's
