@@ -33,6 +33,21 @@ def helpers():
     return TEXT[start:end]
 
 
+def address_helpers():
+    """The script's functions for the Mac's own addresses (valid_ipv4 to
+    write_blocked_addresses)."""
+    start = TEXT.index("# --- The Mac's own addresses")
+    end = TEXT.index("# Apple's `container`, where")
+    return TEXT[start:end]
+
+
+def addresses(snippet, stdin=""):
+    # `set -f` as in the script, which splits words without file name expansion.
+    return subprocess.run(
+        ["bash", "-c", "set -euo pipefail\nset -f\nnl=$'\\n'\n" + address_helpers() + snippet],
+        input=stdin, capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"}, timeout=30)
+
+
 def bash(snippet, env=None):
     return subprocess.run(
         ["bash", "-c", "set -euo pipefail\n" + helpers() + snippet],
@@ -165,6 +180,149 @@ class ContainerCheckTests(unittest.TestCase):
                      "bash", output],
                     capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"})
                 self.assertEqual(done.returncode == 0, supported, done.stderr)
+
+
+# What macOS prints for the Mac's interfaces (documentation addresses).
+IFCONFIG = """\
+lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384
+\toptions=1203<RXCSUM,TXCSUM,TXSTATUS,SW_TIMESTAMP>
+\tinet 127.0.0.1 netmask 0xff000000
+\tinet6 ::1 prefixlen 128
+\tinet6 fe80::1%lo0 prefixlen 64 scopeid 0x1
+\tnd6 options=201<PERFORMNUD,DAD>
+gif0: flags=8010<POINTOPOINT,MULTICAST> mtu 1280
+stf0: flags=0<> mtu 1280
+en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+\tether aa:bb:cc:dd:ee:ff
+\tinet6 fe80::1c2b:3d4e:5f60:7182%en0 prefixlen 64 secured scopeid 0xc
+\tinet 203.0.113.9 netmask 0xffffff00 broadcast 203.0.113.255
+\tinet6 2001:DB8:1234:5678:AAAA:bbbb:cccc:dddd prefixlen 64 autoconf secured
+\tinet6 2001:db8:1234:5678:aaaa:bbbb:cccc:dddd prefixlen 64 autoconf temporary
+\tnd6 options=201<PERFORMNUD,DAD>
+\tmedia: autoselect
+\tstatus: active
+bridge100: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+\tinet 192.168.64.1 netmask 0xffffff00 broadcast 192.168.64.255
+utun0: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1380
+\tinet6 fe80::abcd:1234:5678:9abc%utun0 prefixlen 64 scopeid 0x10
+\tinet 10.8.0.2 --> 10.8.0.1 netmask 0xffffff00
+"""
+
+
+class MacAddressTests(unittest.TestCase):
+    def check(self, function, text):
+        """Whether the script's `function` accepts `text` (passed as an argument)."""
+        return subprocess.run(
+            ["bash", "-c", "set -euo pipefail\nset -f\n" + address_helpers() + function + ' "$1"',
+             "bash", text],
+            capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"}).returncode == 0
+
+    def test_ipv4_must_be_a_plain_dotted_quad(self):
+        for text in ("0.0.0.0", "10.0.0.1", "127.0.0.1", "198.41.0.4", "255.255.255.255", "8.8.8.8"):
+            with self.subTest(text=text):
+                self.assertTrue(self.check("valid_ipv4", text))
+        for text in ("", "1.2.3", "1.2.3.4.5", "01.2.3.4", "1.2.3.04", "1.2.3.256", "1.2.3.-1",
+                     " 1.2.3.4", "1.2.3.4 ", "1.2.3.4/24", "1.2.3.4;", "::1", "0x7f.0.0.1",
+                     "1.2.3.\u0664", "1..3.4", ".1.2.3.4", "1.2.3.4\n", "a.b.c.d", "1.2.3.1000",
+                     "1.2.3.4,5.6.7.8"):
+            with self.subTest(text=text):
+                self.assertFalse(self.check("valid_ipv4", text))
+
+    def check_ipv6(self, text):
+        return self.check("valid_ipv6", text)
+
+    def test_ipv6_must_be_plain_hexadecimal_with_at_most_one_double_colon(self):
+        for text in ("::1", "::", "fe80::1", "fe80::1c2b:3d4e:5f60:7182", "2001:db8::7",
+                     "2001:DB8:1234:5678:AAAA:bbbb:cccc:dddd", "1:2:3:4:5:6:7:8", "1:2:3:4:5:6:7::",
+                     "::2:3:4:5:6:7:8", "1::8", "2606:2800:220:1:248:1893:25c8:1946"):
+            with self.subTest(text=text):
+                self.assertTrue(self.check_ipv6(text))
+        for text in ("", ":", ":::", "1", "1:2", "fe80::1%en0", "fe80::1%", "::ffff:1.2.3.4",
+                     "[::1]", "1:2:3:4:5:6:7", "1:2:3:4:5:6:7:8:9", "1::2::3", ":1:2:3:4:5:6:7",
+                     "1:2:3:4:5:6:7:", "1:::2", "12345::1", "g::1", "::1 ", " ::1", "::1;", "::1/64",
+                     "1:2:3:4:5:6:7:8::", "::1:2:3:4:5:6:7:8", "1:2:3:4:5:6:7:8:", ":1::2", "1::2:",
+                     "\u0661::1", "0x1::1", "1.2.3.4"):
+            with self.subTest(text=text):
+                self.assertFalse(self.check_ipv6(text))
+
+    def test_ifconfig_output_gives_every_address_once_without_zone_ids(self):
+        done = addresses("collect_mac_addresses", IFCONFIG)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stderr, "")
+        # Loopback and link-local addresses are included; the repeated
+        # temporary IPv6 address is the same address in lower case.
+        self.assertEqual(done.stdout.split(), [
+            "127.0.0.1", "::1", "fe80::1", "fe80::1c2b:3d4e:5f60:7182", "203.0.113.9",
+            "2001:db8:1234:5678:aaaa:bbbb:cccc:dddd", "192.168.64.1",
+            "fe80::abcd:1234:5678:9abc", "10.8.0.2"])
+
+    def test_only_inet_lines_count(self):
+        text = ("\tether 1.2.3.4\n\tnetmask 5.6.7.8\n\tbroadcast 9.9.9.9\n"
+                "\tinet 192.0.2.1 netmask 0xff broadcast 9.9.9.9\n inet6 2001:db8::1 prefixlen 64\n"
+                "\tinet\n\tinet6\ninet 192.0.2.2\n")
+        done = addresses("collect_mac_addresses", text)
+        self.assertEqual(done.stdout.split(), ["192.0.2.1", "2001:db8::1", "192.0.2.2"])
+        self.assertEqual(done.stderr, "")
+
+    def test_anything_that_does_not_pass_is_left_out_and_reported(self):
+        text = ("\tinet 1.2.3\n\tinet 01.2.3.4\n\tinet 8.8.8.8;touch\n"
+                "\tinet6 ::ffff:1.2.3.4\n\tinet6 $(id)\n\tinet 192.0.2.1\n")
+        done = addresses("collect_mac_addresses", text)
+        self.assertEqual(done.returncode, 0)
+        self.assertEqual(done.stdout.split(), ["192.0.2.1"])
+        self.assertEqual(done.stderr.count("ignoring an interface address that is not valid"), 5)
+
+    def test_a_long_bad_address_is_cut_in_the_message(self):
+        done = addresses("collect_mac_addresses", "\tinet " + "9" * 500 + "\n")
+        self.assertEqual(done.stdout, "")
+        self.assertLess(len(done.stderr), 200)
+
+    def test_the_list_is_the_macs_addresses_plus_the_test_address(self):
+        with tempfile.TemporaryDirectory() as folder:
+            program = (
+                f'secret_folder="{folder}"; blocked_file="{folder}/blocked-addresses"\n'
+                'test_address=198.41.0.4\n'
+                'ifconfig_bin="$FAKE"\n'
+                "write_blocked_addresses\ncat \"$blocked_file\"\nls -a \"$secret_folder\"\n")
+            fake = os.path.join(folder, "fake-ifconfig")
+            with open(fake, "w") as handle:
+                handle.write("#!/bin/sh\ncat <<'EOF'\n" + IFCONFIG + "EOF\n")
+            os.chmod(fake, 0o755)
+            done = subprocess.run(
+                ["bash", "-c", "set -euo pipefail\nset -f\nnl=$'\\n'\n" + address_helpers() + program],
+                capture_output=True, text=True, env={"PATH": "/usr/bin:/bin", "FAKE": fake})
+            self.assertEqual(done.returncode, 0, done.stderr)
+            lines = done.stdout.split("\n")
+            self.assertEqual(lines[:10], [
+                "127.0.0.1", "::1", "fe80::1", "fe80::1c2b:3d4e:5f60:7182", "203.0.113.9",
+                "2001:db8:1234:5678:aaaa:bbbb:cccc:dddd", "192.168.64.1",
+                "fe80::abcd:1234:5678:9abc", "10.8.0.2", "198.41.0.4"])
+            self.assertEqual(os.stat(os.path.join(folder, "blocked-addresses")).st_mode & 0o777, 0o600)
+            # No temporary file is left behind.
+            self.assertEqual(sorted(n for n in os.listdir(folder) if n.startswith(".")), [])
+
+    def test_the_test_address_is_not_added_twice(self):
+        with tempfile.TemporaryDirectory() as folder:
+            fake = os.path.join(folder, "fake-ifconfig")
+            with open(fake, "w") as handle:
+                handle.write("#!/bin/sh\necho '\tinet 198.41.0.4 netmask 0xff'\n")
+            os.chmod(fake, 0o755)
+            program = (f'secret_folder="{folder}"; blocked_file="{folder}/b"; test_address=198.41.0.4\n'
+                       f'ifconfig_bin="{fake}"\nwrite_blocked_addresses\ncat "$blocked_file"\n')
+            done = subprocess.run(
+                ["bash", "-c", "set -euo pipefail\nset -f\nnl=$'\\n'\n" + address_helpers() + program],
+                capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"})
+            self.assertEqual(done.stdout, "198.41.0.4\n")
+
+    def test_the_script_uses_the_system_ifconfig_and_hands_the_list_over_by_file(self):
+        self.assertIn("ifconfig_bin=/sbin/ifconfig\n", TEXT)
+        self.assertIn('blocked_file="$secret_folder/blocked-addresses"', TEXT)
+        code = "\n".join(code_lines())
+        # Never through PATH, never in an option or an environment variable.
+        self.assertNotRegex(code, r"(^|[;|(]\s*)ifconfig\s")
+        self.assertNotIn("BLOCKED_ADDRESSES", code)
+        run_options = code[code.index("run_options=("):code.index("for server in $dns_servers")]
+        self.assertNotIn("blocked", run_options)
 
 
 class FixedEnvironmentTests(unittest.TestCase):

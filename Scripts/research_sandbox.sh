@@ -10,7 +10,8 @@
 #
 # The sandbox is the only part of `sandseek` with internet access. It runs
 # in its own Linux VM with a read-only root and no Mac folders mounted. A
-# firewall inside the VM lets it reach public internet addresses, plus DNS on
+# firewall inside the VM lets it reach public internet addresses, but not the
+# Mac's own addresses (private or public, collected at start), plus DNS on
 # the Mac when the Mac is its name server, and accepts new inbound connections
 # on port 9100 only, from the VM's default gateway (the address the published
 # port connects from; anything that can send from that address, such as
@@ -24,7 +25,8 @@
 # to the sandbox must be signed with the secret, and every answer is signed
 # with it too, so SandSeek can tell the sandbox from another program on the
 # port. The secret is in no environment variable and no command line. `stop`
-# deletes the file: no secret means the sandbox is not running.
+# deletes the file: no secret means the sandbox is not running. The Mac's own
+# addresses go into the same folder as a second file, `blocked-addresses`.
 #
 # The only `container` this script runs is Apple's, at /usr/local/bin/container,
 # and only after `require_container` has checked it (see below). It never
@@ -82,6 +84,17 @@ context="$script_directory/../Sandbox"
 secret_folder="$HOME/Library/Application Support/SandSeek/sandbox"
 secret_file="$secret_folder/secret"
 vm_secret_folder="/run/sandseek-sandbox"
+# The Mac's own interface addresses, one per line, written at each start. The
+# VM's entrypoint puts them into its firewall and the server refuses them (see
+# Sandbox/entrypoint.sh and Sandbox/server.py); the file name must match
+# BLOCKED_FILE_NAME in server.py. They are not secret.
+blocked_file="$secret_folder/blocked-addresses"
+# Where `ifconfig` is on macOS. Never found through PATH.
+ifconfig_bin=/sbin/ifconfig
+# One public address that is no Mac's own, added to the list only so the
+# security check can tell the list from the private ranges (a.root-servers.net;
+# SandSeek never talks to it).
+test_address=198.41.0.4
 # SandSeek 0.1.0 wrote its secret here, in TUFF's folder; it is not TUFF's.
 old_secret_file="$HOME/Library/Application Support/TUFF/web-sandbox.secret"
 
@@ -107,6 +120,105 @@ check_dns() {
       exit 2
     fi
   done
+}
+
+# --- The Mac's own addresses -----------------------------------------------
+# Every address goes into an nft rule in the VM, so each one is checked
+# strictly here (and again in entrypoint.sh and server.py); what does not pass
+# is left out and reported.
+
+# Succeeds for a plain dotted IPv4 address: four groups of 0 to 255, no leading
+# zeros, nothing else.
+valid_ipv4() {
+  local text="$1" part
+  [[ "$text" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
+  local IFS=.
+  for part in $text; do
+    [[ "$part" == 0 || "$part" != 0* ]] || return 1
+    (( 10#$part <= 255 )) || return 1
+  done
+}
+
+# Succeeds for an IPv6 address in the plain hexadecimal form (groups of one to
+# four digits, at most one "::"): no zone id, no dotted tail, no brackets.
+valid_ipv6() {
+  local text="$1" flat group count=0 compressed=0
+  [[ "$text" =~ ^[0-9a-fA-F:]{2,39}$ && "$text" == *:*:* && "$text" != *:::* ]] || return 1
+  if [[ "$text" == *::* ]]; then
+    compressed=1
+    flat="${text#*::}"
+    [[ "$flat" != *::* ]] || return 1
+    [[ "$text" != :* || "$text" == ::* ]] || return 1
+    [[ "$text" != *: || "$text" == *:: ]] || return 1
+    flat="${text/::/:}"
+    flat="${flat#:}"
+    flat="${flat%:}"
+  else
+    [[ "$text" != :* && "$text" != *: ]] || return 1
+    flat="$text"
+  fi
+  local IFS=:
+  for group in $flat; do
+    [[ "$group" =~ ^[0-9a-fA-F]{1,4}$ ]] || return 1
+    count=$((count + 1))
+  done
+  if (( compressed )); then (( count <= 7 )); else (( count == 8 )); fi
+}
+
+# Reads `ifconfig` output on standard input and prints the address of every
+# "inet" and "inet6" line, once each, lowercase, without a zone id
+# (`fe80::1%lo0`), one per line. Loopback and link-local addresses are
+# included. An address that does not pass the checks above is reported on
+# standard error and left out.
+collect_mac_addresses() {
+  LC_ALL=C awk 'NF >= 2 && ($1 == "inet" || $1 == "inet6") { sub(/%.*/, "", $2); print $2 }' |
+  {
+    local address seen=" "
+    while read -r address; do
+      address="$(printf '%s' "$address" | LC_ALL=C tr 'A-F' 'a-f')"
+      if ! valid_ipv4 "$address" && ! valid_ipv6 "$address"; then
+        printf 'ignoring an interface address that is not valid: %q\n' "${address:0:64}" >&2
+        continue
+      fi
+      [[ "$seen" != *" $address "* ]] || continue
+      seen+="$address "
+      printf '%s\n' "$address"
+    done
+  }
+}
+
+# Writes the Mac's addresses and $test_address to $blocked_file, in the secret
+# folder (made by write_secret, which must run first). Like the secret, the
+# file is written to a temporary file and renamed. Fails, with a message, when
+# `ifconfig` fails or gives no usable address, or gives more than the 256 the
+# server accepts.
+write_blocked_addresses() {
+  local output listing count temporary
+  if ! output="$("$ifconfig_bin" 2>/dev/null)"; then
+    echo "could not read the Mac's network addresses with $ifconfig_bin; not starting the sandbox" >&2
+    return 1
+  fi
+  listing="$(collect_mac_addresses <<<"$output")" || return 1
+  if [[ -z "$listing" ]]; then
+    echo "found no usable network address of the Mac; not starting the sandbox" >&2
+    return 1
+  fi
+  if [[ "$nl$listing$nl" != *"$nl$test_address$nl"* ]]; then
+    listing+="$nl$test_address"
+  fi
+  count="$(printf '%s\n' "$listing" | wc -l | tr -d ' ')"
+  if (( count > 256 )); then
+    echo "the Mac has $count network addresses; at most 256 are handed to the sandbox" >&2
+    return 1
+  fi
+  temporary="$(umask 077 && mktemp -- "$secret_folder/.blocked.XXXXXX")" || return 1
+  if ! { printf '%s\n' "$listing" >"$temporary" \
+         && chmod 600 "$temporary" \
+         && mv -f -- "$temporary" "$blocked_file"; }; then
+    rm -f -- "$temporary"
+    echo "could not write $blocked_file" >&2
+    return 1
+  fi
 }
 
 # Apple's `container`, where Apple's installer puts it. Never found through
@@ -274,9 +386,10 @@ write_secret() {
   fi
 }
 
-# Removes the secret and, when nothing else is in it, its folder.
+# Removes the secret and the list of the Mac's addresses and, when nothing else
+# is in it, their folder.
 remove_secret() {
-  rm -f -- "$secret_file"
+  rm -f -- "$secret_file" "$blocked_file"
   rmdir -- "$secret_folder" 2>/dev/null || true
 }
 
@@ -441,6 +554,7 @@ case "${1:-}" in
     }
     trap cleanup_failed_start EXIT
     write_secret || exit 1
+    write_blocked_addresses || exit 1
     remove_old_secret
     "$container_bin" run "${run_options[@]}" "$image" >/dev/null
     # The entrypoint refuses to start when it finds no default gateway (see
@@ -515,7 +629,7 @@ case "${1:-}" in
       done
       debug_command+=" $image"
       echo "the sandbox container exited and was removed (it runs with --rm)." >&2
-      echo "The log above usually says why. Its secret was deleted with it, so to run it once in the foreground without --rm, first write a test secret to $secret_file (64 hex characters, chmod 600), then run: $debug_command" >&2
+      echo "The log above usually says why. Its secret was deleted with it, so to run it once in the foreground without --rm, first write a test secret to $secret_file (64 hex characters, chmod 600) and the Mac's addresses to $blocked_file (one per line, at least one), then run: $debug_command" >&2
     else
       if (( list_failed )); then
         echo "the sandbox answered on 127.0.0.1:$port, but \`container list\` failed, so it could not be confirmed as this sandbox; it was stopped and its secret deleted. Try again" >&2
@@ -572,6 +686,24 @@ case "${1:-}" in
     # The same helper the entrypoint uses for the inbound rule.
     gateway="$("$container_bin" exec "$name" python3 /app/default_gateway.py)" \
       || { echo "  FAIL  could not read the VM's default gateway (rebuild the image?)" >&2; exit 1; }
+    # The Mac's addresses the sandbox was started with (see write_blocked_addresses),
+    # and the ones it has now. The Mac can gain addresses after the start (the
+    # bridge to the VM exists only while it runs); those are private, so the
+    # private ranges refuse them, and they are tested below like the others.
+    given=()
+    if [[ -f "$blocked_file" ]]; then
+      while IFS= read -r line; do
+        if [[ -n "$line" ]]; then given+=("$line"); fi
+      done <"$blocked_file"
+    fi
+    if (( ${#given[@]} == 0 )); then
+      echo "  FAIL  the list of the Mac's addresses ($blocked_file) is missing or empty; start the sandbox again" >&2
+      exit 1
+    fi
+    current=()
+    while IFS= read -r line; do
+      if [[ -n "$line" ]]; then current+=("$line"); fi
+    done < <("$ifconfig_bin" 2>/dev/null | collect_mac_addresses 2>/dev/null || true)
     blocked_urls=(
       "http://$gateway/"
       "http://$gateway:8080/v1/models"
@@ -589,6 +721,20 @@ case "${1:-}" in
       "file:///etc/passwd"
       "ftp://example.com/"
     )
+    for address in "${given[@]}" ${current[@]+"${current[@]}"}; do
+      if [[ "$address" == *:* ]]; then
+        blocked_urls+=("http://[$address]/")
+      else
+        blocked_urls+=("http://$address/")
+      fi
+    done
+    # A public address, so only the Mac's list can be why it is refused.
+    reply="$(signed_call POST /v1/fetch "{\"url\": \"http://$test_address/\"}" || true)"
+    if [[ "$(call_code "$reply")" == blocked_address && "$(call_status "$reply")" == *" signed" ]]; then
+      pass "http://$test_address/, a public address on the Mac's list, is refused by the server"
+    else
+      fail "http://$test_address/, a public address on the Mac's list, was not refused: ${reply:0:200}"
+    fi
     for url in "${blocked_urls[@]}"; do
       reply="$(signed_call POST /v1/fetch "{\"url\": \"$url\"}" || true)"
       code="$(call_code "$reply")"
@@ -620,6 +766,43 @@ case "${1:-}" in
       pass "the firewall drops new inbound connections except to port 9100 from the gateway $gateway"
     else
       fail "the firewall's input chain is missing or not as expected: ${input_rules:0:200}"
+    fi
+    # The Mac's own addresses are elements of the sets blocked4 and blocked6
+    # (see firewall.nft); `nft get element` reads them back whatever way nft
+    # spells an address. The output chain must refuse both sets.
+    missing=""
+    for address in "${given[@]}"; do
+      if [[ "$address" == *:* ]]; then set_name=blocked6; else set_name=blocked4; fi
+      "$container_bin" exec "$name" nft get element inet sandseek_sandbox "$set_name" "{ $address }" \
+        >/dev/null 2>&1 || missing+=" $address"
+    done
+    if [[ -z "$missing" ]]; then
+      pass "every one of the Mac's addresses it was given is in the firewall's blocked sets"
+    else
+      fail "not in the firewall's blocked sets:$missing"
+    fi
+    output_rules="$("$container_bin" exec "$name" nft -nn list chain inet sandseek_sandbox output 2>/dev/null || true)"
+    if grep -q 'daddr @blocked4.*reject' <<<"$output_rules" && grep -q 'daddr @blocked6.*reject' <<<"$output_rules"; then
+      pass "the output chain rejects both sets of the Mac's addresses"
+    else
+      fail "the output chain does not reject the blocked sets: ${output_rules:0:200}"
+    fi
+    # Only the firewall makes this fail at once with a refusal (a connection
+    # reset): without the rule the address is simply unanswered.
+    refusal="$("$container_bin" exec --user 10001:10001 "$name" python3 -c "
+import socket, sys
+try:
+    socket.create_connection((sys.argv[1], 80), timeout=4).close()
+    print('connected')
+except ConnectionRefusedError:
+    print('refused')
+except OSError as error:
+    print('other', type(error).__name__)
+" "$test_address" 2>/dev/null || true)"
+    if [[ "$refusal" == refused ]]; then
+      pass "a connection to $test_address, a public address on the Mac's list, is refused by the firewall"
+    else
+      fail "a connection to $test_address: ${refusal:-no answer} (a refusal was expected)"
     fi
     privileges="$("$container_bin" exec "$name" python3 -c '
 import glob
@@ -724,6 +907,11 @@ with ThreadPoolExecutor(64) as pool:
       pass "a signed /health request is answered with a signed answer"
     else
       fail "a signed /health request was not answered with a signed answer: ${reply:0:200}"
+    fi
+    if [[ "$body" == *"\"blocked_addresses\": ${#given[@]}"[,\}]* ]]; then
+      pass "the server refuses all ${#given[@]} addresses it was given (the Mac's and one test address)"
+    else
+      fail "the server does not report ${#given[@]} blocked addresses (rebuild the image?): ${body:0:200}"
     fi
     # The folder is mounted read-only; /proc/mounts in the VM shows whether
     # Apple container did that.
