@@ -48,6 +48,8 @@ SandSeek runs only Apple's `container`.
 
 A better window.
 
+- The app has its own icon: the SandSeek logo, a magnifying glass over sand
+  dunes.
 - The Model server card and the Web sandbox card fold with the arrow beside
   the title (or a click on the title row); the choice is remembered. When both
   are ready they fold once, and a card opens again when it stops being ready.
