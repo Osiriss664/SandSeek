@@ -1115,7 +1115,9 @@ struct ResearchStreamingArgumentsTests {
     @Test func serverTypeAndStreamAreParsed() throws {
         for (text, expected) in [("tuff", ResearchServerChoice.tuff), ("llamacpp", .llamacpp),
                                  ("ollama", .ollama), ("auto", .auto)] {
-            #expect(try ResearchArguments.parse(["q", "--server-type", text]).serverType == expected)
+            // Ollama has no default model: it needs --model at parse time.
+            let model = text == "ollama" ? ["--model", "m"] : []
+            #expect(try ResearchArguments.parse(["q", "--server-type", text] + model).serverType == expected)
         }
         #expect(try ResearchArguments.parse(["q", "--stream", "off"]).stream == false)
         #expect(try ResearchArguments.parse(["--stream", "on", "q"]).stream == true)

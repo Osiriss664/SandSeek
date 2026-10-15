@@ -21,9 +21,11 @@ import Foundation
 ///   reports `tool_calls`, as the OpenAI-style reply does, so the loop acts
 ///   the same;
 /// - `error`, a string, which Ollama writes as a line of the stream (with HTTP
-///   status 200) when a request fails after the stream has started. It
-///   becomes `ResearchError.modelRequestFailed`, and the partial turn is
-///   discarded.
+///   status 200, and no status of its own) when a request fails after the
+///   stream has started. It becomes `ResearchError.modelRequestFailed` with
+///   status 500, so that the loop's one retry runs, or 400 with the code
+///   `context_length_exceeded` when the prompt did not fit. The partial turn
+///   is discarded.
 public struct ResearchOllamaStreamAssembler: Sendable {
     private var content: String?
     private var reasoning: String?
@@ -67,7 +69,7 @@ public struct ResearchOllamaStreamAssembler: Sendable {
     public mutating func feed(json chunk: ResearchJSON) throws -> Bool {
         if isDone { return true }
         if let error = chunk["error"], error != .null {
-            throw ResearchOllama.failure(error, status: chunk["status"]?.intValue)
+            throw ResearchOllama.failure(error, status: nil)
         }
         if let model = chunk["model"]?.stringValue { self.model = model }
         if let tokens = chunk["prompt_eval_count"]?.intValue { promptTokens = tokens }

@@ -118,10 +118,19 @@ do {
 } catch {
     writeProgress("error: \(error)")
     if case ResearchError.modelUnavailable = error { exit(1) }
+    // Ollama's /api/show failed on the server's side: not a usage error.
+    if case ResearchError.modelRequestFailed = error { exit(1) }
     exit(2)
 }
 if let warning = connection.warning { writeProgress("warning: \(warning)") }
 if !quiet { writeProgress(connection.progressLine) }
+// Ollama: `think` follows what the model can do (see `ResearchOllama.thinking`).
+let enableThinking = ResearchOllama.thinking(
+    requested: arguments.enableThinking, connection: connection)
+if !quiet, let note = ResearchOllama.thinkingNote(
+    requested: arguments.enableThinking, model: arguments.model, connection: connection) {
+    writeProgress(note)
+}
 let showThinking = arguments.showThinking
 // The context window the server named outside its model list (Ollama's
 // `num_ctx`) is the loop's known budget, unless --context-chars fixes one.
@@ -135,11 +144,11 @@ let agent = ResearchAgent(
         serverURL: arguments.serverURL,
         model: arguments.model,
         maxTokens: arguments.maxTokens,
-        enableThinking: arguments.enableThinking,
+        enableThinking: enableThinking,
         streaming: connection.streaming,
         authorization: authorization,
         kind: connection.kind,
-        contextTokens: connection.contextTokens,
+        requestedContextTokens: connection.contextTokens,
         transport: transport),
     sandbox: ResearchSandboxClient(
         baseURL: arguments.resolvedSandboxURL(), transport: sandboxTransport,

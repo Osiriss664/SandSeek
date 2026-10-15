@@ -106,7 +106,7 @@ private func ollamaClient(_ transport: any ResearchHTTPTransport,
     ResearchChatClient(serverURL: serverURL, model: "qwen3:8b", maxTokens: 512,
                        enableThinking: enableThinking, streaming: streaming,
                        authorization: authorization, kind: .ollama,
-                       contextTokens: contextTokens, transport: transport)
+                       requestedContextTokens: contextTokens, transport: transport)
 }
 
 private let userMessage: [ResearchJSON] = [
@@ -198,6 +198,14 @@ struct ResearchOllamaRequestTests {
                     "max_tokens", "think"] {
             #expect(sent[key] == nil, "\(key) must not be sent")
         }
+    }
+
+    @Test func theRequestCarriesThinkAsTheCallerChose() throws {
+        let client = ollamaClient(OllamaFake.version(), enableThinking: false)
+        let off = try makeBody(client)
+        #expect(off["think"] == ResearchJSON.bool(false))
+        let none = try makeBody(ollamaClient(OllamaFake.version(), enableThinking: nil))
+        #expect(none["think"] == nil)
     }
 
     @Test func streamFollowsTheClientAndAnUnknownWindowIsLeftToTheServer() throws {
@@ -602,6 +610,11 @@ struct ResearchOllamaRefusalTests {
                 == .modelRequestFailed(status: 400, message: message, code: "context_length_exceeded"))
         }
         #expect(ResearchOllama.isContextOverflow("the input length exceeds the context length"))
+        #expect(ResearchOllama.isContextOverflow(
+            "input length (40000 tokens) exceeds the model's maximum context length (32768 tokens)"))
+        #expect(ResearchOllama.isContextOverflow("the request exceeds the available context size"))
+        #expect(!ResearchOllama.isContextOverflow("requested context size too large for model"))
+        #expect(!ResearchOllama.isContextOverflow("failed to allocate the context buffer"))
         #expect(!ResearchOllama.isContextOverflow("model runner has unexpectedly stopped"))
         #expect(!ResearchOllama.isContextOverflow("\"x\" does not support thinking"))
     }
@@ -783,8 +796,11 @@ struct ResearchOllamaModelTests {
         #expect(ResearchOllama.contextTokens(requested: nil, trained: nil) == 32_768)
     }
 
-    @Test func theFlagSetsTheContextWhateverTheModelSays() {
-        #expect(ResearchOllama.contextTokens(requested: 65_536, trained: 8_192) == 65_536)
+    @Test func theFlagSetsTheContextButNeverAboveTheModelsMaximum() {
+        // Ollama lowers a larger num_ctx to the trained maximum, so the
+        // number the loop plans with is the lowered one.
+        #expect(ResearchOllama.contextTokens(requested: 65_536, trained: 8_192) == 8_192)
+        #expect(ResearchOllama.contextTokens(requested: 65_536, trained: 131_072) == 65_536)
         #expect(ResearchOllama.contextTokens(requested: 4_096, trained: 131_072) == 4_096)
         #expect(ResearchOllama.contextTokens(requested: 262_144, trained: nil) == 262_144)
     }
@@ -844,8 +860,70 @@ struct ResearchOllamaModelTests {
             transport: unknown).contextTokens == 32_768)
         #expect(try await ResearchOllama.prepare(
             base, model: "m", requestedContextTokens: 65_536, serverURL: ollamaURL,
-            transport: show(qwen)).contextTokens == 65_536)
+            transport: show(qwen)).contextTokens == 40_960)
+        #expect(try await ResearchOllama.prepare(
+            base, model: "m", requestedContextTokens: 16_384, serverURL: ollamaURL,
+            transport: show(qwen)).contextTokens == 16_384)
+        #expect(try await ResearchOllama.prepare(
+            base, model: "m", requestedContextTokens: 262_144, serverURL: ollamaURL,
+            transport: unknown).contextTokens == 262_144)
     }
+
+    @Test func prepareRecordsWhetherTheModelCanThink() async throws {
+        let thinks = try await ResearchOllama.prepare(
+            base, model: "m", requestedContextTokens: nil, serverURL: ollamaURL,
+            transport: show(qwen))
+        #expect(thinks.thinkingSupported == true)
+        let plain = try await ResearchOllama.prepare(
+            base, model: "m", requestedContextTokens: nil, serverURL: ollamaURL,
+            transport: show(#"{"capabilities":["completion","tools"],"model_info":{}}"#))
+        #expect(plain.thinkingSupported == false)
+        let unknown = try await ResearchOllama.prepare(
+            base, model: "m", requestedContextTokens: nil, serverURL: ollamaURL,
+            transport: show(#"{"model_info":{}}"#))
+        #expect(unknown.thinkingSupported == nil)
+        #expect(base.thinkingSupported == nil)
+    }
+
+    @Test func thinkIsSentOnlyWhenTheModelCanThinkAndAlwaysThen() {
+        func connection(_ supported: Bool?) -> ResearchServerConnection {
+            ResearchServerConnection(kind: .ollama, version: "0.40.2", streaming: true,
+                                     thinkingSupported: supported)
+        }
+        // A model that cannot think: never a think field.
+        for requested in [nil, true, false] as [Bool?] {
+            #expect(ResearchOllama.thinking(requested: requested, connection: connection(false)) == nil)
+        }
+        // A model that thinks: always a boolean; left alone means off.
+        #expect(ResearchOllama.thinking(requested: nil, connection: connection(true)) == false)
+        #expect(ResearchOllama.thinking(requested: false, connection: connection(true)) == false)
+        #expect(ResearchOllama.thinking(requested: true, connection: connection(true)) == true)
+        // Not known: the choice as it is.
+        #expect(ResearchOllama.thinking(requested: nil, connection: connection(nil)) == nil)
+        #expect(ResearchOllama.thinking(requested: true, connection: connection(nil)) == true)
+        // Another kind of server keeps the choice whatever the flag says.
+        let tuff = ResearchServerConnection(kind: .tuff, version: nil, streaming: true,
+                                            thinkingSupported: false)
+        #expect(ResearchOllama.thinking(requested: true, connection: tuff) == true)
+        #expect(ResearchOllama.thinking(requested: nil, connection: tuff) == nil)
+    }
+
+    @Test func aPersonWhoAskedForThinkingIsToldTheModelCannot() {
+        func connection(_ supported: Bool?) -> ResearchServerConnection {
+            ResearchServerConnection(kind: .ollama, version: nil, streaming: true,
+                                     thinkingSupported: supported)
+        }
+        let note = ResearchOllama.thinkingNote(
+            requested: true, model: "llama3.1:8b", connection: connection(false))
+        #expect(note == "note: llama3.1:8b does not support thinking in Ollama; running without it")
+        #expect(ResearchOllama.thinkingNote(
+            requested: nil, model: "m", connection: connection(false)) == nil)
+        #expect(ResearchOllama.thinkingNote(
+            requested: true, model: "m", connection: connection(true)) == nil)
+        #expect(ResearchOllama.thinkingNote(
+            requested: true, model: "m", connection: connection(nil)) == nil)
+    }
+
 
     @Test func aModelWithoutCapabilitiesInTheAnswerIsAllowed() async throws {
         let older = show(#"{"model_info":{"general.architecture":"llama","llama.context_length":4096}}"#)
@@ -856,7 +934,8 @@ struct ResearchOllamaModelTests {
 
     @Test func aCloudNameIsRefusedBeforeAnyRequest() async {
         for name in ["gpt-oss:120b-cloud", "qwen3-coder:480b-cloud", "kimi-k2:cloud",
-                     "KIMI-K2:CLOUD", " llama:Cloud "] {
+                     "KIMI-K2:CLOUD", " llama:Cloud ", "qwen3: cloud", "qwen3:\tcloud",
+                     "x:Cloud", "x-cloud ", "x:  big-Cloud ", "host/x:y: cloud"] {
             let fake = show(qwen)
             do {
                 _ = try await ResearchOllama.prepare(
@@ -874,6 +953,12 @@ struct ResearchOllamaModelTests {
         }
         #expect(ResearchOllama.isCloudModelName("a:cloud"))
         #expect(ResearchOllama.isCloudModelName("a:b-cloud"))
+        // Ollama reads the text after the last colon, spaces around it ignored.
+        #expect(ResearchOllama.isCloudModelName("a: cloud"))
+        #expect(ResearchOllama.isCloudModelName("a:Cloud\n"))
+        #expect(ResearchOllama.isCloudModelName("a:b-CLOUD "))
+        #expect(!ResearchOllama.isCloudModelName("a:cloud/b"))
+        #expect(!ResearchOllama.isCloudModelName("cloud:7b"))
         #expect(!ResearchOllama.isCloudModelName("cloudy:7b"))
         #expect(!ResearchOllama.isCloudModelName("qwen3:8b"))
     }
@@ -1003,6 +1088,17 @@ struct ResearchOllamaArgumentTests {
             .stream == false)
         // auto may find Ollama, so the model is not checked at parse time.
         #expect(try parse(["q"]).serverType == .auto)
+    }
+
+    @Test func ollamaDefaultsToItsOwnPortUnlessTheServerIsGiven() throws {
+        #expect(try parse(["q", "--server-type", "ollama", "--model", "m"]).serverURL.port == 11_434)
+        #expect(try parse(["q", "--server-type", "ollama", "--model", "m",
+                           "--server", "http://127.0.0.1:8080"]).serverURL.port == 8_080)
+        #expect(try parse(["--server-type", "ollama", "--help"]).serverURL.port == 11_434)
+        // The other types keep TUFF's port.
+        for type in ["tuff", "llamacpp", "auto"] {
+            #expect(try parse(["q", "--server-type", type]).serverURL.port == 8_080, "\(type)")
+        }
     }
 
     @Test func contextTokensIsParsedAndHasARange() throws {

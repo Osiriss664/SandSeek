@@ -351,7 +351,7 @@ public struct ResearchExposureReport: Equatable, Sendable {
         let lead = "Something answers at \(reachableText). "
             + "Other machines on that network can reach it. "
         if kind == .ollama {
-            return lead + "Start Ollama with OLLAMA_HOST=127.0.0.1:11434 so that it listens "
+            return lead + "Start Ollama with OLLAMA_HOST=127.0.0.1:\(port) so that it listens "
                 + "on 127.0.0.1 only."
         }
         return lead + "Start the server so that it listens on 127.0.0.1 only "

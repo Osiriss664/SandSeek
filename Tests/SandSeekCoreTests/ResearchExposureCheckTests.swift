@@ -487,6 +487,14 @@ private final class LocalListener {
         #expect(report.warning?.contains("llama-server: --host 127.0.0.1") == true)
     }
 
+    @Test func theAdviceNamesThePortOllamaRunsOn() async {
+        let lan = ResearchHostAddress.ipv4(192, 168, 1, 5)
+        let connector = FakeConnector(accepting: [.ipv4(127, 0, 0, 1), lan])
+        let report = await ResearchExposureCheck.run(
+            port: 11_500, addresses: [lan], connector: connector)
+        #expect(report.warning(for: .ollama)?.contains("OLLAMA_HOST=127.0.0.1:11500") == true)
+    }
+
     @Test func nothingIsSaidWhenNothingAnswersOnTheNetwork() async {
         let lan = ResearchHostAddress.ipv4(192, 168, 1, 5)
         let connector = FakeConnector(accepting: [.ipv4(127, 0, 0, 1)])

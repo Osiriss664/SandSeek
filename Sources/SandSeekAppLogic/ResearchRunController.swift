@@ -262,11 +262,12 @@ public final class ResearchRunController {
                         serverURL: serverURL,
                         model: settings.model,
                         maxTokens: settings.maxTokens,
-                        enableThinking: settings.enableThinking,
+                        enableThinking: ResearchOllama.thinking(
+                            requested: settings.enableThinking, connection: prepared),
                         streaming: prepared.streaming,
                         authorization: authorization,
                         kind: prepared.kind,
-                        contextTokens: prepared.contextTokens,
+                        requestedContextTokens: prepared.contextTokens,
                         transport: transport),
                     sandbox: ResearchSandboxClient(
                         baseURL: sandboxURL, transport: sandboxTransport,

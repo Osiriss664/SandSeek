@@ -62,11 +62,14 @@ public struct ResearchChatClient: Sendable {
     public let maxTokens: Int
     public let enableThinking: Bool?
     public let streaming: Bool
-    /// The kind of server the requests go to.
+    /// The kind of server the requests go to. Ollama's `/api/chat` streams
+    /// newline-delimited JSON (`application/x-ndjson`), not server-sent events;
+    /// the transport asks for that type on `/api/` routes, and the line
+    /// splitter is the same.
     public let kind: ResearchServerKind
     /// The context window an Ollama request asks for (`options.num_ctx`).
     /// Nil leaves it to the server. Not used for the other kinds.
-    public let contextTokens: Int?
+    public let requestedContextTokens: Int?
     /// The `Authorization` header value for every request, such as
     /// `Bearer <key>` for a llama.cpp server started with `--api-key`. Sent
     /// as that header only: never in a body or URL, and not printed.
@@ -82,7 +85,7 @@ public struct ResearchChatClient: Sendable {
                 streaming: Bool = false,
                 authorization: String? = nil,
                 kind: ResearchServerKind = .tuff,
-                contextTokens: Int? = nil,
+                requestedContextTokens: Int? = nil,
                 transport: any ResearchHTTPTransport) {
         var base = serverURL.absoluteString
         if base.hasSuffix("/v1") { base.removeLast(3) }
@@ -92,7 +95,7 @@ public struct ResearchChatClient: Sendable {
         self.enableThinking = enableThinking
         self.streaming = streaming
         self.kind = kind
-        self.contextTokens = contextTokens
+        self.requestedContextTokens = requestedContextTokens
         // Ollama on this Mac has no key: nothing is sent to it.
         self.authorization = kind == .ollama ? nil : authorization
         self.transport = transport
@@ -148,7 +151,7 @@ public struct ResearchChatClient: Sendable {
                            toolUse: ResearchToolUse,
                            thinking: Bool? = nil) -> ResearchJSON {
         var options: [String: ResearchJSON] = ["num_predict": .integer(maxTokens)]
-        if let contextTokens { options["num_ctx"] = .integer(contextTokens) }
+        if let requestedContextTokens { options["num_ctx"] = .integer(requestedContextTokens) }
         var body: [String: ResearchJSON] = [
             "model": .string(model),
             "messages": .array(ResearchOllama.messages(from: messages)),
@@ -217,6 +220,9 @@ public struct ResearchChatClient: Sendable {
         } catch let error as URLError where error.code == .timedOut {
             throw ResearchError.modelTimedOut
         } catch {
+            if kind == .ollama, Task.isCancelled || error is CancellationError {
+                throw CancellationError()
+            }
             throw ResearchError.modelUnavailable(error.localizedDescription)
         }
         // A 3xx is not followed and not read: nothing that answers with one is

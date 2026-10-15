@@ -23,11 +23,20 @@ public enum ResearchOllama {
 
     // MARK: - Model names
 
-    /// A name Ollama sends to ollama.com: ending in `:cloud` or `-cloud`.
-    /// Ollama itself reads these suffixes as "run this model remotely".
+    /// A name Ollama sends to ollama.com. It reads the text after the last
+    /// `:` (spaces around it ignored, upper and lower case alike) and runs
+    /// the model remotely when that text is `cloud`, or, without a `/`, ends
+    /// in `-cloud` (`internal/modelref` in Ollama). This follows the same
+    /// rule, so a name Ollama would send away is refused here first. A name
+    /// without a `:` that ends in `-cloud` is refused too; Ollama would run
+    /// that one locally, but the name is better refused than guessed.
     public static func isCloudModelName(_ name: String) -> Bool {
         let lowered = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return lowered.hasSuffix(":cloud") || lowered.hasSuffix("-cloud")
+        if lowered.hasSuffix("-cloud") { return true }
+        guard let colon = lowered.lastIndex(of: ":") else { return false }
+        let tag = lowered[lowered.index(after: colon)...]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return tag == "cloud" || (!tag.contains("/") && tag.hasSuffix("-cloud"))
     }
 
     /// Why a cloud model is not used. The question stays on this Mac.
@@ -112,12 +121,42 @@ public enum ResearchOllama {
     }
 
     /// The `num_ctx` a run asks for: `requested` (`--context-tokens`) when
-    /// given; else 32,768, or the model's trained maximum when that is
-    /// smaller.
+    /// given, else 32,768, and in both cases no more than the model's
+    /// trained maximum when that is known (Ollama cuts a larger `num_ctx`
+    /// down to it, so the number the loop plans with must be the smaller).
     public static func contextTokens(requested: Int?, trained: Int?) -> Int {
-        if let requested { return requested }
-        guard let trained else { return defaultContextTokens }
-        return min(defaultContextTokens, trained)
+        let wanted = requested ?? defaultContextTokens
+        guard let trained else { return wanted }
+        return min(wanted, trained)
+    }
+
+    /// What the `think` field of a request is for an Ollama run, given the
+    /// person's choice (`requested`, nil when none was made) and the
+    /// connection after `prepare`:
+    /// - the model lists no `thinking` capability: nil, no `think` is sent
+    ///   (Ollama answers `think: true` with an error for such a model);
+    /// - the model thinks: always a boolean, `requested ?? false`. Left out,
+    ///   Ollama would turn thinking on by itself, while the run's token
+    ///   limit assumes it is off;
+    /// - not known: the choice as it is.
+    /// A connection of another kind keeps the choice.
+    public static func thinking(requested: Bool?,
+                                connection: ResearchServerConnection) -> Bool? {
+        guard connection.kind == .ollama else { return requested }
+        switch connection.thinkingSupported {
+        case false?: return nil
+        case true?: return requested ?? false
+        case nil: return requested
+        }
+    }
+
+    /// The progress note for a person who asked for thinking and a model that
+    /// cannot do it. Nil when there is nothing to say.
+    public static func thinkingNote(requested: Bool?, model: String,
+                                    connection: ResearchServerConnection) -> String? {
+        guard connection.kind == .ollama, requested == true,
+              connection.thinkingSupported == false else { return nil }
+        return "note: \(model) does not support thinking in Ollama; running without it"
     }
 
     /// Asks `/api/show` about a model. Throws the error the run reports:
@@ -189,8 +228,10 @@ public enum ResearchOllama {
                     + "that can. Choose another model, or install one with tool support "
                     + "(`ollama pull <name>`).")
         }
-        return connection.withContextTokens(
-            contextTokens(requested: requestedContextTokens, trained: info.trainedContextTokens))
+        return connection.withModel(
+            contextTokens: contextTokens(
+                requested: requestedContextTokens, trained: info.trainedContextTokens),
+            thinkingSupported: info.capabilities.map { $0.contains("thinking") })
     }
 
     // MARK: - Errors
@@ -210,13 +251,23 @@ public enum ResearchOllama {
     /// window. With `truncate: false` Ollama refuses such a request, and the
     /// loop shortens the conversation when the error has the code
     /// `context_length_exceeded`, so this maps the wording onto that code.
+    /// It lists the wordings found in Ollama's source and is narrow on
+    /// purpose: an error about anything else is reported as it is.
+    /// - "the prompt is longer than the context length currently available
+    ///   to the model; ..." (llama runner, context shift off)
+    /// - "the input length exceeds the context length"
+    /// - "input length (N tokens) exceeds the model's maximum context length
+    ///   (M tokens)" (MLX runner)
+    /// - "the request exceeds the available context size" (llama-server)
     static func isContextOverflow(_ message: String) -> Bool {
         let lowered = message.lowercased()
-        guard lowered.contains("context") || lowered.contains("prompt is too long") else {
-            return false
-        }
-        return ["longer than", "exceed", "too large", "too long", "does not fit"]
-            .contains { lowered.contains($0) }
+        return [
+            "longer than the context length",
+            "exceeds the context length",
+            "exceeds the model's maximum context length",
+            "exceeds the available context",
+            "prompt is too long",
+        ].contains { lowered.contains($0) }
     }
 
     /// The error for a refusal from Ollama. `status` is the HTTP status, or

@@ -62,14 +62,20 @@ public struct ResearchServerConnection: Equatable, Sendable {
     /// not known; the run then follows the model list, or its small fallback
     /// budget.
     public let contextTokens: Int?
+    /// For Ollama, after `ResearchOllama.prepare`: whether the model lists
+    /// `thinking` among its capabilities. Nil when it is not known (not
+    /// checked yet, or the server lists no capabilities).
+    public let thinkingSupported: Bool?
 
     public init(kind: ResearchServerKind, version: String?, streaming: Bool,
-                warning: String? = nil, contextTokens: Int? = nil) {
+                warning: String? = nil, contextTokens: Int? = nil,
+                thinkingSupported: Bool? = nil) {
         self.kind = kind
         self.version = version
         self.streaming = streaming
         self.warning = warning
         self.contextTokens = contextTokens
+        self.thinkingSupported = thinkingSupported
     }
 
     /// The one progress line a run prints before it starts.
@@ -91,7 +97,16 @@ public struct ResearchServerConnection: Equatable, Sendable {
     /// The same connection with the context window the run will ask for.
     public func withContextTokens(_ tokens: Int?) -> ResearchServerConnection {
         ResearchServerConnection(kind: kind, version: version, streaming: streaming,
-                                 warning: warning, contextTokens: tokens)
+                                 warning: warning, contextTokens: tokens,
+                                 thinkingSupported: thinkingSupported)
+    }
+
+    /// The same connection with what `/api/show` said about the model.
+    public func withModel(contextTokens tokens: Int?,
+                          thinkingSupported: Bool?) -> ResearchServerConnection {
+        ResearchServerConnection(kind: kind, version: version, streaming: streaming,
+                                 warning: warning, contextTokens: tokens,
+                                 thinkingSupported: thinkingSupported)
     }
 
     /// TUFF's status route. The server URL may end in `/v1`, as for chat.

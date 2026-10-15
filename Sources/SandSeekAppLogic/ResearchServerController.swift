@@ -684,7 +684,7 @@ public final class ResearchServerController {
     /// The rest of a sentence that begins "A server answers at <address>, but".
     nonisolated static func redirectNote(_ status: Int) -> String {
         "it answered with a redirect (HTTP \(status)), which SandSeek refuses. It never follows "
-            + "redirects from the model server, and neither TUFF nor llama.cpp redirects, so "
+            + "redirects from the model server, and none of TUFF, llama.cpp and Ollama redirects, so "
             + "another program may be using this port."
     }
 

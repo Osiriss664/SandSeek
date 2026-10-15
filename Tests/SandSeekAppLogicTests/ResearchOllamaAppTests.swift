@@ -494,8 +494,9 @@ private final class NothingListens: ResearchHTTPTransport, @unchecked Sendable {
             #expect(body["stream"] == ResearchJSON.bool(true))
             #expect(body["enable_thinking"] == nil)
         }
-        // The thinking switch was left alone, so no `think` is sent.
-        #expect(bodies.first?["think"] == nil)
+        // The thinking switch was left alone and the model can think: `think`
+        // is sent as false, so that Ollama's own default (on) does not apply.
+        #expect(bodies.first?["think"] == ResearchJSON.bool(false))
         // Ollama is never sent a key.
         #expect(services.seen.allSatisfy { $0.authorization == nil })
     }
@@ -518,7 +519,46 @@ private final class NothingListens: ResearchHTTPTransport, @unchecked Sendable {
         }
     }
 
+    @Test func aModelThatCannotThinkIsNeverSentThink() async {
+        for setting in [true, false] {
+            let services = FakeOllamaServices(
+                show: ok(FakeOllamaServices.showJSON(
+                    capabilities: ["completion", "tools"], context: 40_960)),
+                chatReplies: [
+                    FakeOllamaServices.call(
+                        "open_page", .object(["url": .string("https://github.com/apple/container")])),
+                    FakeOllamaServices.text("From the page [1]."),
+                    FakeOllamaServices.text("From the page [1]."),
+                ])
+            let run = controller(services)
+            run.start(question: "Anything about https://github.com/apple/container",
+                      settings: ResearchRunSettings(model: "qwen3:8b", thinking: setting),
+                      serverURL: serverURL, sandboxURL: sandboxURL, connection: connection)
+            await waitUntil { !run.isRunning }
+            #expect(run.phase == .finished, "thinking \(setting)")
+            let bodies = services.chatBodies
+            #expect(!bodies.isEmpty)
+            for body in bodies { #expect(body["think"] == nil, "thinking \(setting)") }
+        }
+    }
+
     @Test func theContextCanBeSetInTheSettings() async {
+        let services = FakeOllamaServices(chatReplies: [
+            FakeOllamaServices.call(
+                "open_page", .object(["url": .string("https://github.com/apple/container")])),
+            FakeOllamaServices.text("From the page [1]."),
+            FakeOllamaServices.text("From the page [1]."),
+        ])
+        let run = controller(services)
+        run.start(question: "Anything about https://github.com/apple/container",
+                  settings: ResearchRunSettings(
+                      model: "qwen3:8b", showThinking: false, ollamaContextTokens: 16_384),
+                  serverURL: serverURL, sandboxURL: sandboxURL, connection: connection)
+        await waitUntil { !run.isRunning }
+        #expect(services.chatBodies.first?["options"]?["num_ctx"] == ResearchJSON.integer(16_384))
+    }
+
+    @Test func aSettingAboveTheModelsMaximumIsLoweredToIt() async {
         let services = FakeOllamaServices(chatReplies: [
             FakeOllamaServices.call(
                 "open_page", .object(["url": .string("https://github.com/apple/container")])),
@@ -531,7 +571,8 @@ private final class NothingListens: ResearchHTTPTransport, @unchecked Sendable {
                       model: "qwen3:8b", showThinking: false, ollamaContextTokens: 65_536),
                   serverURL: serverURL, sandboxURL: sandboxURL, connection: connection)
         await waitUntil { !run.isRunning }
-        #expect(services.chatBodies.first?["options"]?["num_ctx"] == ResearchJSON.integer(65_536))
+        // The trained maximum of the fake model is 40,960.
+        #expect(services.chatBodies.first?["options"]?["num_ctx"] == ResearchJSON.integer(40_960))
     }
 
     @Test func theSettingsKeepTheContextInsideTheCommandsRange() {

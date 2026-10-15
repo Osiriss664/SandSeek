@@ -68,7 +68,8 @@ public struct ResearchArguments: Equatable, Sendable {
     options:
       --model <name>           Model the server should use (default: default,
                                the model selected on the server).
-      --server <url>           Model server (default: http://127.0.0.1:8080).
+      --server <url>           Model server (default: http://127.0.0.1:8080, or
+                               http://127.0.0.1:11434 with --server-type ollama).
       --server-type tuff|llamacpp|ollama|auto
                                Kind of model server (default auto: the
                                command asks TUFF's /tuff/v1/status and uses
@@ -81,9 +82,12 @@ public struct ResearchArguments: Equatable, Sendable {
                                answer at all ends the run (exit code 1), one
                                that answers something else gives a warning.
                                Ollama is experimental. It is used through its
-                               own /api/chat, on 127.0.0.1:11434 (--server
-                               http://127.0.0.1:11434); --model must name an
-                               installed model that can call tools. Ollama
+                               own /api/chat, on 127.0.0.1:11434 by default;
+                               --model must name an installed model that can
+                               call tools. Thinking: a model that cannot think
+                               gets no think field; one that can gets think
+                               on only when --thinking on or --show-thinking
+                               asks for it, else off. Ollama
                                cloud models (names ending in :cloud or -cloud)
                                are refused, because the question would leave
                                this Mac. Ollama needs no key, so
@@ -91,8 +95,9 @@ public struct ResearchArguments: Equatable, Sendable {
       --context-tokens <4096...262144>
                                Context window of an Ollama run (num_ctx), also
                                the budget the research plans its prompts with
-                               (default: 32768, or the model's trained maximum
-                               when that is smaller). Only for Ollama, whose
+                               (unless --context-chars fixes one). Default
+                               32768; never more than the model's trained
+                               maximum, which Ollama enforces. Only for Ollama, whose
                                own default of 4096 tokens is too small. A
                                larger window needs more memory.
       --api-key-file <path>    File with the key of a model server that asks
@@ -226,6 +231,7 @@ public struct ResearchArguments: Equatable, Sendable {
         var words: [String] = []
         var index = 0
         var maxTokensGiven = false
+        var serverGiven = false
         // The first option other than the replay's own, which it cannot take.
         var runOption: String?
         // The same for --check-exposure, which takes only --server, --sandbox and --quiet.
@@ -271,6 +277,7 @@ public struct ResearchArguments: Equatable, Sendable {
                 parsed.model = try value(argument)
             case "--server":
                 parsed.serverURL = try ResearchEndpoint.loopbackURL(try value(argument), flag: argument)
+                serverGiven = true
             case "--server-type":
                 let text = try value(argument)
                 guard let choice = ResearchServerChoice(rawValue: text) else {
@@ -396,6 +403,10 @@ public struct ResearchArguments: Equatable, Sendable {
         // such window. Refused here, so that nothing is sent anywhere.
         let runs = !parsed.showHelp && !parsed.showVersion && parsed.replayFiguresPath == nil
             && !parsed.checkExposure
+        // Ollama listens on 11434, not on TUFF's 8080, unless --server says otherwise.
+        if parsed.serverType == .ollama, !serverGiven {
+            parsed.serverURL = URL(string: "http://127.0.0.1:11434")!
+        }
         if runs, parsed.serverType == .ollama {
             if parsed.apiKeyFile != nil {
                 throw ResearchArgumentError(
