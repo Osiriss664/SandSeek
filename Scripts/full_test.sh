@@ -113,7 +113,10 @@ CURL="${FT_CURL:-curl}"
 GIT="${FT_GIT:-git}"
 PGREP="${FT_PGREP:-pgrep}"
 SANDBOX_SH="$ROOT/Scripts/research_sandbox.sh"
-PORT="${SANDSEEK_SANDBOX_PORT:-9100}"
+# The sandbox's port on the Mac. SANDSEEK_SANDBOX_PORT fixes it; otherwise
+# `start` picks a free one, and it is read from the sandbox folder after the
+# start (empty until then).
+PORT="${SANDSEEK_SANDBOX_PORT:-}"
 secret_folder="${FT_SECRET_FOLDER:-$HOME/Library/Application Support/SandSeek/sandbox}"
 secret_file="$secret_folder/secret"
 app="$ROOT/build/SandSeek.app"
@@ -275,15 +278,18 @@ do_cleanup() { # id name
       ctl "$id-list" 30 "$CONTAINER" list --all --quiet
       count="$(printf '%s\n' "$CTL_OUT" | grep -c sandseek || true)"
       if [[ "${count:-0}" -gt 0 ]]; then
-        ctl "$id-force-stop" 30 "$CONTAINER" stop sandseek-sandbox
-        ctl "$id-force-delete" 30 "$CONTAINER" delete sandseek-sandbox
+        # Every VM named sandseek-sandbox or sandseek-sandbox-<8 hex digits>.
+        for leftover in $(printf '%s\n' "$CTL_OUT" | grep -E '^sandseek-sandbox(-[0-9a-f]{8})?$' || true); do
+          ctl "$id-force-stop" 30 "$CONTAINER" stop "$leftover"
+          ctl "$id-force-delete" 30 "$CONTAINER" delete "$leftover"
+        done
         ctl "$id-list2" 30 "$CONTAINER" list --all --quiet
         count="$(printf '%s\n' "$CTL_OUT" | grep -c sandseek || true)"
         [[ "${count:-0}" -eq 0 ]] || problems="$problems $count sandseek container(s) left;"
       fi
     fi
     [[ ! -e "$secret_file" ]] || problems="$problems secret file left in the sandbox folder;"
-    if "$PY" "$helpers" listening "$PORT"; then problems="$problems something still listens on port $PORT;"; fi
+    if [[ -n "$PORT" ]] && "$PY" "$helpers" listening "$PORT"; then problems="$problems something still listens on port $PORT;"; fi
   fi
   if [[ $BUILDER_TOUCHED -eq 1 && -x "$CONTAINER" ]]; then
     # The image build starts Apple's builder VM; a build that ran into its time
@@ -407,7 +413,7 @@ else
   conflict=""
   if [[ $take_over -eq 0 ]]; then
     if [[ -e "$secret_file" ]]; then conflict="the secret file exists"
-    elif "$PY" "$helpers" listening "$PORT"; then conflict="something listens on port $PORT"
+    elif [[ -n "$PORT" ]] && "$PY" "$helpers" listening "$PORT"; then conflict="something listens on port $PORT"
     else
       ctl 5.0-existing 30 "$CONTAINER" list --all --quiet
       if printf '%s\n' "$CTL_OUT" | grep -q sandseek-sandbox; then conflict="a sandseek-sandbox container exists"; fi
@@ -440,7 +446,21 @@ else
       step 5.1 "sandbox image build" 2700 '/bin/bash "$SANDBOX_SH" build' || true
     fi
     SANDBOX_TOUCHED=1   # the check passed and the start is attempted now
-    if step 5.2 "sandbox start" 300 '/bin/bash "$SANDBOX_SH" start'; then sandbox_ready=1; fi
+    if step 5.2 "sandbox start" 300 '/bin/bash "$SANDBOX_SH" start'; then
+      sandbox_ready=1
+      # The port `start` picked (digits only, 1024 to 65535), recorded beside the secret.
+      if [[ -z "$PORT" ]]; then
+        PORT="$(head -c 16 "$secret_folder/port" 2>/dev/null || true)"
+        if [[ "$PORT" =~ ^[0-9]{4,5}$ ]] && (( 10#$PORT >= 1024 && 10#$PORT <= 65535 )); then
+          PORT=$((10#$PORT))
+          export PORT
+        else
+          PORT=""
+          sandbox_ready=0
+          echo "the sandbox started but recorded no usable port in $secret_folder/port" > "$FT_NOTE_FILE"
+        fi
+      fi
+    fi
   else
     skip_sandbox_steps "container service not running" 5.1 5.2
   fi

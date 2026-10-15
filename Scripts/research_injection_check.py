@@ -409,7 +409,8 @@ def main() -> int:
                                         "and in its summary (for example \"llama.cpp + Bonsai\")")
     parser.add_argument("--output", metavar="FILE",
                         help="also write the report (what is printed) to this new file")
-    parser.add_argument("--sandbox")
+    parser.add_argument("--sandbox", help="passed to sandseek; without it sandseek finds the "
+                                          "port the sandbox's start recorded")
     parser.add_argument("--max-steps", type=int, default=4)
     parser.add_argument("--research-arg", action="append", default=[], metavar="ARG",
                         help="pass one more argument on to the research command, for example "

@@ -4,9 +4,10 @@ answer, for the Mac test steps.
 
   verify_sandbox_signature.py SECRET_FILE [PORT]
 
-Sends GET /health to 127.0.0.1:PORT (default 9100), signed with the secret in
-SECRET_FILE, and checks that the answer is signed with the same secret for that
-request. The secret is read from the file and never printed or taken from an
+Sends GET /health to 127.0.0.1:PORT, signed with the secret in SECRET_FILE, and checks that the answer is signed with the same secret for that
+request. Without PORT, the port is SANDSEEK_SANDBOX_PORT if that is set, else
+the one `research_sandbox.sh start` recorded in the file `port` beside the
+secret. The secret is read from the file and never printed or taken from an
 argument, so it does not appear in `ps`. The formulas are the ones in
 Sandbox/server.py. Prints one line; exits 0 when the answer is a signed 200 that
 matches, 1 otherwise.
@@ -65,6 +66,43 @@ def read_secret(path: str) -> bytes:
     return value
 
 
+def recorded_port(secret_path: str) -> int | None:
+    """The port `research_sandbox.sh start` wrote to the file `port` beside the
+    secret, or None. Strict, like the app: a plain file of yours, mode 0600,
+    digits only (and one line break), 1024 to 65535."""
+    path = os.path.join(os.path.dirname(os.path.abspath(secret_path)), "port")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                             | getattr(os, "O_NONBLOCK", 0))
+    except OSError:
+        return None
+    try:
+        info = os.fstat(descriptor)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                or info.st_mode & 0o077):
+            return None
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = -1
+            text = handle.read(32).decode("ascii", "replace")
+    except OSError:
+        return None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    text = text.removesuffix("\n")
+    if not (text.isascii() and text.isdigit() and 4 <= len(text) <= 5):
+        return None
+    return int(text) if 1024 <= int(text) <= 65535 else None
+
+
+def sandbox_port(secret_path: str) -> int | None:
+    """SANDSEEK_SANDBOX_PORT when it is set, else the recorded port."""
+    fixed = os.environ.get("SANDSEEK_SANDBOX_PORT", "")
+    if fixed:
+        return int(fixed) if fixed.isascii() and fixed.isdigit() and 0 < int(fixed) < 65536 else None
+    return recorded_port(secret_path)
+
+
 def request_auth(secret: bytes, method: str, path: str, nonce: str, timestamp: str,
                  body: bytes) -> str:
     text = "\n".join((REQUEST_LABEL, method, path, nonce, timestamp,
@@ -87,7 +125,11 @@ def main(argv):
     except SecretFileError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
-    port = int(argv[2]) if len(argv) == 3 else 9100
+    port = int(argv[2]) if len(argv) == 3 else sandbox_port(argv[1])
+    if port is None:
+        print("error: no sandbox port: pass PORT, or start the sandbox "
+              "(Scripts/research_sandbox.sh start records it)", file=sys.stderr)
+        return 1
     method, path = "GET", "/health"
     nonce = os.urandom(32).hex()
     stamp = str(int(time.time()))

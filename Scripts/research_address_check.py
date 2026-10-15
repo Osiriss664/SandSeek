@@ -4,7 +4,7 @@
 This is the address half of the sandbox's protection, tried from outside and
 without a model. It sends `open_page` requests (the sandbox's POST /v1/fetch),
 signed with the sandbox's secret file, straight to the sandbox on
-127.0.0.1:9100 and expects every one of these to be
+127.0.0.1 (on the port `start` recorded) and expects every one of these to be
 refused:
 
   private       loopback, private, link-local, shared, multicast and reserved
@@ -61,7 +61,8 @@ from dataclasses import dataclass
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import verify_sandbox_signature as signing  # noqa: E402
 
-DEFAULT_SANDBOX = "http://127.0.0.1:9100"
+# Without --sandbox the port is found as for verify_sandbox_signature.py: the
+# environment, else the file `port` beside the secret.
 DEFAULT_SECRET_FILE = os.path.join(os.path.expanduser("~"), "Library", "Application Support",
                                    "SandSeek", "sandbox", "secret")
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
@@ -323,8 +324,10 @@ class Report:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--sandbox", default=DEFAULT_SANDBOX,
-                        help=f"the sandbox (default {DEFAULT_SANDBOX}); loopback only")
+    parser.add_argument("--sandbox",
+                        help="the sandbox, such as http://127.0.0.1:49152 (default: the port "
+                             "SANDSEEK_SANDBOX_PORT names, else the one `start` recorded); "
+                             "loopback only")
     parser.add_argument("--secret-file", default=DEFAULT_SECRET_FILE, metavar="FILE",
                         help="the sandbox's secret, written by `research_sandbox.sh start` "
                              "(default: SandSeek/sandbox/secret in Application Support)")
@@ -347,8 +350,8 @@ def main() -> int:
             print(f"{case.group:<8}{printable(case.url)}")
         print(f"{len(selected)} addresses")
         return 0
-    if not is_loopback(args.sandbox):
-        parser.error("--sandbox must be a loopback address, such as http://127.0.0.1:9100")
+    if args.sandbox and not is_loopback(args.sandbox):
+        parser.error("--sandbox must be a loopback address, such as http://127.0.0.1:49152")
     if args.output and os.path.exists(args.output):
         parser.error(f"{args.output} already exists; choose a new --output file")
     try:
@@ -357,6 +360,13 @@ def main() -> int:
         print(f"error: {error}; start the sandbox with Scripts/research_sandbox.sh start",
               file=sys.stderr)
         return 2
+    if not args.sandbox:
+        port = signing.sandbox_port(args.secret_file)
+        if port is None:
+            print("error: no sandbox port is recorded; start the sandbox with "
+                  "Scripts/research_sandbox.sh start, or pass --sandbox", file=sys.stderr)
+            return 2
+        args.sandbox = f"http://127.0.0.1:{port}"
     if not sandbox_answers(args.sandbox, secret):
         print(f"error: the sandbox does not answer at {args.sandbox}, or its answer is not "
               "signed with the current secret; start it with Scripts/research_sandbox.sh start",

@@ -13,6 +13,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 
 SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "research_sandbox.sh")
@@ -375,6 +376,271 @@ class NotInstalledTests(unittest.TestCase):
                                       timeout=30)
                 self.assertEqual(done.returncode, 1)
                 self.assertIn("Apple container is not installed at /usr/local/bin/container", done.stderr)
+
+
+class OneSandSeekAtATimeTests(unittest.TestCase):
+    """`start` and `stop` with a fake `container`: the lock, the random port,
+    the VM's name and the removal of leftovers (docs/SECURITY.md)."""
+
+    UNSIGNED = '{"error": {"message": "not signed", "code": "unauthorized"}}'
+    BUSY = "Another SandSeek is using the web sandbox. Close it first."
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.home, True)
+        self.addCleanup(self.end_lock_holders)
+        self.bin = os.path.join(self.home, "bin")
+        os.mkdir(self.bin)
+        self.calls = os.path.join(self.home, "calls")
+        self.vms = os.path.join(self.home, "vms")
+        open(self.calls, "w").close()
+        open(self.vms, "w").close()
+        self.folder = os.path.join(self.home, "Library", "Application Support", "SandSeek", "sandbox")
+        # `run` adds its --name to the list, stop and delete take a name out.
+        self.write_stub("container", '''#!/bin/bash
+echo "$*" >> "$FAKE_CALLS"
+vms="$(dirname "$0")/../vms"
+case "$1" in
+  run)
+    [[ -z "${FAKE_RUN_EXIT:-}" ]] || exit "$FAKE_RUN_EXIT"
+    previous=""
+    for word in "$@"; do
+      [[ "$previous" != --name ]] || echo "$word" >> "$vms"
+      previous="$word"
+    done ;;
+  stop|delete)
+    grep -vxF "$2" "$vms" > "$vms.new" || true
+    mv "$vms.new" "$vms" ;;
+  list) cat "$vms" ;;
+  logs) ;;
+esac
+exit 0
+''')
+        self.write_stub("curl", "#!/bin/bash\nprintf '%s\\n%s' '" + self.UNSIGNED + "' 401\n")
+        self.write_stub("ifconfig", "#!/bin/bash\necho '\tinet 127.0.0.1 netmask 0xff000000'\n")
+        with open(SCRIPT, encoding="utf-8") as handle:
+            text = handle.read()
+        text = text.replace("container_bin=/usr/local/bin/container",
+                            f'container_bin="{self.bin}/container"', 1)
+        text = text.replace("ifconfig_bin=/sbin/ifconfig", f'ifconfig_bin="{self.bin}/ifconfig"', 1)
+        start = text.index("require_container() {")
+        end = text.index("\n}\n", start) + 3
+        text = text[:start] + "require_container() {\n  :\n}\n" + text[end:]
+        text = re.sub(r"\bcurl (-s)", lambda match: f"{self.bin}/curl {match.group(1)}", text)
+        self.script = os.path.join(self.home, "research_sandbox.sh")
+        with open(self.script, "w", encoding="utf-8") as handle:
+            handle.write(text)
+
+    def write_stub(self, name, text):
+        path = os.path.join(self.bin, name)
+        with open(path, "w") as handle:
+            handle.write(text)
+        os.chmod(path, 0o755)
+
+    def run_script(self, *args, **extra):
+        env = {"PATH": self.bin + os.pathsep + os.environ["PATH"], "HOME": self.home,
+               "SANDSEEK_SANDBOX_CLEAN_ENV": "1", "FAKE_CALLS": self.calls, **extra}
+        return subprocess.run(["bash", self.script, *args], env=env, capture_output=True,
+                              text=True, timeout=60, stdin=subprocess.DEVNULL)
+
+    def lines(self, path):
+        with open(path) as handle:
+            return handle.read().splitlines()
+
+    def in_folder(self, name):
+        return os.path.join(self.folder, name)
+
+    def holder_pid(self):
+        return int(self.lines(self.in_folder("lock"))[0].split()[0])
+
+    def end_lock_holders(self):
+        try:
+            os.kill(self.holder_pid(), 15)
+        except (OSError, ValueError, IndexError):
+            pass
+
+    def ended(self, pid):
+        """True when process `pid` is gone (or only a zombie), within 5 seconds."""
+        for _ in range(50):
+            state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True,
+                                   text=True).stdout.strip()
+            if not state or state.startswith("Z"):
+                return True
+            time.sleep(0.1)
+        return False
+
+    def started(self, **extra):
+        done = self.run_script("start", **extra)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        return done
+
+    def test_a_start_records_a_free_port_and_a_new_name(self):
+        self.started()
+        port_file = self.in_folder("port")
+        self.assertEqual(os.stat(port_file).st_mode & 0o777, 0o600)
+        text = self.lines(port_file)
+        self.assertEqual(len(text), 1)
+        self.assertRegex(text[0], r"^[0-9]{4,5}$")
+        port = int(text[0])
+        self.assertTrue(1024 <= port <= 65535)
+        name_file = self.in_folder("vm-name")
+        self.assertEqual(os.stat(name_file).st_mode & 0o777, 0o600)
+        name = self.lines(name_file)[0]
+        self.assertRegex(name, r"^sandseek-sandbox-[0-9a-f]{8}$")
+        run = next(c for c in self.lines(self.calls) if c.startswith("run "))
+        self.assertIn(f"--name {name} ", run)
+        # Only the Mac's side is the picked port; inside the VM it stays 9100.
+        self.assertIn(f"--publish 127.0.0.1:{port}:9100", run)
+        self.assertEqual(self.lines(self.vms), [name])
+
+    def test_the_port_is_picked_again_at_each_start(self):
+        ports = set()
+        for _ in range(3):
+            self.started()
+            ports.add(self.lines(self.in_folder("port"))[0])
+            done = self.run_script("stop")
+            self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertGreater(len(ports), 1)
+
+    def test_a_fixed_port_overrides_the_free_one(self):
+        self.started(SANDSEEK_SANDBOX_PORT="45678")
+        self.assertEqual(self.lines(self.in_folder("port")), ["45678"])
+        self.assertIn("--publish 127.0.0.1:45678:9100",
+                      next(c for c in self.lines(self.calls) if c.startswith("run ")))
+
+    def test_status_finds_the_recorded_port(self):
+        self.started()
+        done = self.run_script("status")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertIn("127.0.0.1:" + self.lines(self.in_folder("port"))[0], done.stdout)
+        # Not like the file says (digits only, 1024 to 65535): nothing is found.
+        for bad in ("80", "99999", "1234 ", "12a45", ""):
+            with open(self.in_folder("port"), "w") as handle:
+                handle.write(bad + "\n")
+            os.chmod(self.in_folder("port"), 0o600)
+            self.assertEqual(self.run_script("status").returncode, 1, bad)
+        with open(self.in_folder("port"), "w") as handle:
+            handle.write("45678\n")
+        os.chmod(self.in_folder("port"), 0o644)
+        self.assertEqual(self.run_script("status").returncode, 1)
+
+    def test_a_second_start_fails_and_leaves_the_first_alone(self):
+        self.started()
+        name = self.lines(self.in_folder("vm-name"))[0]
+        port = self.lines(self.in_folder("port"))[0]
+        secret = self.lines(self.in_folder("secret"))
+        before = len(self.lines(self.calls))
+        done = self.run_script("start")
+        self.assertEqual(done.returncode, 75)
+        self.assertIn(self.BUSY, done.stderr)
+        # Nothing was stopped, deleted or run, and no file was touched.
+        self.assertEqual([c for c in self.lines(self.calls)[before:] if c.split()[0] in ("stop", "delete", "run")], [])
+        self.assertEqual(self.lines(self.vms), [name])
+        self.assertEqual(self.lines(self.in_folder("vm-name")), [name])
+        self.assertEqual(self.lines(self.in_folder("port")), [port])
+        self.assertEqual(self.lines(self.in_folder("secret")), secret)
+
+    def test_the_lock_holds_a_pid_and_a_start_time(self):
+        self.started()
+        pid, stamp = self.lines(self.in_folder("lock"))[0].split()
+        os.kill(int(pid), 0)
+        self.assertLess(abs(int(stamp) - time.time()), 60)
+
+    def test_stop_lets_go_of_the_lock(self):
+        self.started()
+        pid = self.holder_pid()
+        done = self.run_script("stop")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        for name in ("secret", "port", "vm-name", "blocked-addresses"):
+            self.assertFalse(os.path.exists(self.in_folder(name)), name)
+        self.assertEqual(self.lines(self.vms), [])
+        self.assertTrue(self.ended(pid))
+        self.started()
+
+    def test_stop_removes_only_the_vm_that_was_started(self):
+        self.started()
+        name = self.lines(self.in_folder("vm-name"))[0]
+        with open(self.vms, "a") as handle:
+            handle.write("sandseek-sandbox-0123abcd\n")
+        self.assertEqual(self.run_script("stop").returncode, 0)
+        self.assertEqual(self.lines(self.vms), ["sandseek-sandbox-0123abcd"])
+        stops = [c for c in self.lines(self.calls) if c.startswith(("stop ", "delete "))]
+        self.assertEqual(stops, [f"stop {name}", f"delete {name}"])
+
+    def test_a_lock_whose_process_is_gone_is_taken_over(self):
+        os.makedirs(self.folder, mode=0o700)
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        with open(self.in_folder("lock"), "w") as handle:
+            handle.write(f"{dead.pid} 1\n")
+        self.started()
+        self.assertEqual(self.holder_pid() != dead.pid, True)
+        os.kill(self.holder_pid(), 0)
+
+    def test_leftovers_with_the_prefix_are_removed_at_the_next_start(self):
+        os.makedirs(self.folder, mode=0o700)
+        for name in ("secret", "port", "vm-name", "blocked-addresses"):
+            with open(self.in_folder(name), "w") as handle:
+                handle.write("old\n")
+        with open(self.vms, "w") as handle:
+            handle.write("sandseek-sandbox\nsandseek-sandbox-0123abcd\nother\n"
+                         "sandseek-sandbox-debug\nsandseek-sandbox-0123ABCD\n")
+        self.started()
+        removed = [c for c in self.lines(self.calls) if c.startswith("stop ")]
+        self.assertEqual(removed, ["stop sandseek-sandbox", "stop sandseek-sandbox-0123abcd"])
+        deleted = [c for c in self.lines(self.calls) if c.startswith("delete ")]
+        self.assertEqual(deleted, ["delete sandseek-sandbox", "delete sandseek-sandbox-0123abcd"])
+        name = self.lines(self.in_folder("vm-name"))[0]
+        self.assertEqual(self.lines(self.vms), ["other", "sandseek-sandbox-debug",
+                                                "sandseek-sandbox-0123ABCD", name])
+        self.assertEqual(len(self.lines(self.in_folder("secret"))[0]), 64)
+        self.assertNotEqual(self.lines(self.in_folder("port")), ["old"])
+        self.assertNotIn("old", self.lines(self.in_folder("blocked-addresses")))
+
+    def test_nothing_is_removed_before_the_lock_is_ours(self):
+        self.started()
+        with open(self.vms, "a") as handle:
+            handle.write("sandseek-sandbox-0123abcd\n")
+        before = len(self.lines(self.calls))
+        self.assertEqual(self.run_script("start").returncode, 75)
+        self.assertNotIn("sandseek-sandbox-0123abcd",
+                         " ".join(self.lines(self.calls)[before:]))
+        self.assertIn("sandseek-sandbox-0123abcd", self.lines(self.vms))
+
+    def test_a_holder_whose_vm_is_gone_is_taken_over_after_the_grace_time(self):
+        self.started()
+        old = self.holder_pid()
+        # The VM is gone and the holder is old; a younger holder is left alone.
+        open(self.vms, "w").close()
+        self.assertEqual(self.run_script("start").returncode, 75)
+        with open(self.in_folder("lock"), "w") as handle:
+            handle.write(f"{old} {int(time.time()) - 1000}\n")
+        self.started()
+        self.assertNotEqual(self.holder_pid(), old)
+        self.assertEqual(len(self.lines(self.vms)), 1)
+        self.assertTrue(self.ended(old))
+
+    def test_the_apps_own_running_sandbox_can_be_replaced_in_one_start(self):
+        # The app makes a fresh VM for the next question with this setting; any
+        # other start is still refused.
+        self.started()
+        first = self.lines(self.in_folder("vm-name"))[0]
+        old = self.holder_pid()
+        self.assertEqual(self.run_script("start").returncode, 75)
+        self.started(SANDSEEK_SANDBOX_REPLACE="1")
+        second = self.lines(self.in_folder("vm-name"))[0]
+        self.assertNotEqual(first, second)
+        self.assertEqual(self.lines(self.vms), [second])
+        self.assertTrue(self.ended(old))
+        self.assertNotEqual(self.holder_pid(), old)
+
+    def test_a_failed_start_lets_go_of_the_lock(self):
+        done = self.run_script("start", FAKE_RUN_EXIT="1")
+        self.assertEqual(done.returncode, 1)
+        for name in ("secret", "port", "vm-name", "blocked-addresses"):
+            self.assertFalse(os.path.exists(self.in_folder(name)), name)
+        self.assertTrue(self.ended(self.holder_pid()))
+        self.started()
 
 
 if __name__ == "__main__":

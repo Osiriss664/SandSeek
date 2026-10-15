@@ -2,7 +2,7 @@
 # Builds and runs the web research sandbox with Apple `container`.
 #
 #   Scripts/research_sandbox.sh build    build the sandseek-sandbox image
-#   Scripts/research_sandbox.sh start    start a fresh sandbox on 127.0.0.1:9100 (SANDSEEK_SANDBOX_PORT)
+#   Scripts/research_sandbox.sh start    start a fresh sandbox on a free port of 127.0.0.1
 #   Scripts/research_sandbox.sh stop     stop and remove the sandbox
 #   Scripts/research_sandbox.sh status   report whether the sandbox answers
 #   Scripts/research_sandbox.sh selftest check that the sandbox refuses the Mac,
@@ -13,11 +13,12 @@
 # firewall inside the VM lets it reach public internet addresses, but not the
 # Mac's own addresses (private or public, collected at start), plus DNS on
 # the Mac when the Mac is its name server, and accepts new inbound connections
-# on port 9100 only, from the VM's default gateway (the address the published
-# port connects from; anything that can send from that address, such as
-# processes on the Mac, can still reach 9100). The
+# on port 9100 inside the VM only, from the VM's default gateway (the address
+# the published port connects from; anything that can send from that address,
+# such as processes on the Mac, can still reach 9100). The
 # server runs as a non-root user with no Linux capabilities. Its port is
-# published to the Mac's loopback address only. See docs/SECURITY.md.
+# published to the Mac's loopback address only, on a free port that `start`
+# picks each time (inside the VM the port stays 9100). See docs/SECURITY.md.
 #
 # Each `start` makes a new random secret and writes it to a file (mode 0600, in
 # a folder only you can write to). The folder is mounted read-only into the VM,
@@ -27,6 +28,18 @@
 # port. The secret is in no environment variable and no command line. `stop`
 # deletes the file: no secret means the sandbox is not running. The Mac's own
 # addresses go into the same folder as a second file, `blocked-addresses`.
+#
+# One SandSeek at a time. `start` first takes a lock (the file `lock` in that
+# folder) and keeps it for as long as the sandbox runs; a second `start`, from
+# the app, the command line or another copy, fails with a plain message
+# instead of stopping the first one's VM. The lock is an operating system
+# lock (flock) held by a small perl process that `start` leaves running; it
+# writes its pid and start time into the file. The system drops the lock when
+# that process ends, however it ends, so a crash never leaves a stale one.
+# `start` also records the port it picked (file `port`) and the VM's name
+# (file `vm-name`), both mode 0600, for the app, the command line and the
+# other commands to read. Under the lock, `start` removes the VMs and files a
+# crashed run left behind. SANDSEEK_SANDBOX_PORT fixes the port (for tests).
 #
 # The only `container` this script runs is Apple's, at /usr/local/bin/container,
 # and only after `require_container` has checked it (see below). It never
@@ -53,12 +66,13 @@ done
 # nothing else of your shell's environment (DYLD_*, BASH_ENV, proxy variables,
 # tokens) reaches it, `container` or the programs they start. These are kept:
 # HOME, USER, LOGNAME and TMPDIR, the language, and the three settings the
-# script reads: SANDSEEK_SANDBOX_PORT, SANDSEEK_DNS and SEARXNG_URL. The
+# script reads: SANDSEEK_SANDBOX_PORT, SANDSEEK_SANDBOX_REPLACE, SANDSEEK_DNS and
+# SEARXNG_URL. The
 # marker below tells the second run that it already has the fixed environment.
 if [[ "${SANDSEEK_SANDBOX_CLEAN_ENV:-}" != 1 ]]; then
   clean_env=(PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=en_US.UTF-8
              HOME="${HOME:?HOME is not set}" SANDSEEK_SANDBOX_CLEAN_ENV=1)
-  for kept_name in USER LOGNAME TMPDIR SANDSEEK_SANDBOX_PORT SANDSEEK_DNS SEARXNG_URL; do
+  for kept_name in USER LOGNAME TMPDIR SANDSEEK_SANDBOX_PORT SANDSEEK_SANDBOX_REPLACE SANDSEEK_DNS SEARXNG_URL; do
     if [[ -n "${!kept_name:-}" ]]; then
       clean_env+=("$kept_name=${!kept_name}")
     fi
@@ -70,8 +84,15 @@ PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
 
 image="sandseek-sandbox:latest"
-name="sandseek-sandbox"
-port="${SANDSEEK_SANDBOX_PORT:-9100}"
+# Every VM is called sandseek-sandbox-<8 hex digits>, new at each start, so
+# `container list | grep sandseek` finds them. `name` is set by `start` (made)
+# and by the other commands (read from the vm-name file).
+name_prefix="sandseek-sandbox"
+name=""
+# SANDSEEK_SANDBOX_PORT fixes the Mac's port (tests). Without it, `start` picks
+# a free one and records it, and the other commands read it back.
+port_override="${SANDSEEK_SANDBOX_PORT:-}"
+port="$port_override"
 # DNS servers for the VM, space-separated. Unset, the VM asks the Mac, which
 # uses the same DNS as the rest of the Mac; set it (for example to
 # "1.1.1.1 9.9.9.9") to use public resolvers instead.
@@ -84,6 +105,14 @@ context="$script_directory/../Sandbox"
 secret_folder="$HOME/Library/Application Support/SandSeek/sandbox"
 secret_file="$secret_folder/secret"
 vm_secret_folder="/run/sandseek-sandbox"
+# What `start` records next to the secret (the app reads the same files; see
+# ResearchSandboxFiles in Sources/SandSeekCore): the Mac's port, the VM's
+# name, and the lock.
+port_file="$secret_folder/port"
+name_file="$secret_folder/vm-name"
+lock_file="$secret_folder/lock"
+# A perl that is not Apple's own copy in /usr/bin is never used.
+perl_bin=/usr/bin/perl
 # The Mac's own interface addresses, one per line, written at each start. The
 # VM's entrypoint puts them into its firewall and the server refuses them (see
 # Sandbox/entrypoint.sh and Sandbox/server.py); the file name must match
@@ -100,7 +129,9 @@ old_secret_file="$HOME/Library/Application Support/TUFF/web-sandbox.secret"
 
 # SANDSEEK_SANDBOX_PORT and SANDSEEK_DNS go into `container run` arguments;
 # a typo gives a confusing error from deep inside it, so check the form first.
+# Nothing to check when the port is not fixed.
 check_port() {
+  [[ -n "$port_override" ]] || return 0
   if ! [[ "$port" =~ ^[1-9][0-9]{1,4}$ ]] || (( 10#$port < 1 || 10#$port > 65535 )); then
     echo "SANDSEEK_SANDBOX_PORT must be a port number from 10 to 65535, not: $port" >&2
     exit 2
@@ -347,8 +378,8 @@ require_container() {
 # symlink, and not writable by group or others, so that nobody else can replace
 # the file. Its path goes into `--mount`, which splits on commas, so a comma or
 # a line break in it is refused.
-write_secret() {
-  local modes secret temporary
+prepare_secret_folder() {
+  local modes
   if [[ "$secret_folder" == *,* || "$secret_folder" == *"$nl"* ]]; then
     echo "the sandbox secret folder's path has a comma or a line break in it; not writing the sandbox secret" >&2
     return 1
@@ -365,6 +396,12 @@ write_secret() {
     return 1
   fi
   chmod 700 "$secret_folder"
+}
+
+# Then the secret itself, as described above.
+write_secret() {
+  local secret temporary
+  prepare_secret_folder || return 1
   if [[ -d "$secret_file" ]]; then
     echo "$secret_file is a folder; not writing the sandbox secret" >&2
     return 1
@@ -386,11 +423,252 @@ write_secret() {
   fi
 }
 
-# Removes the secret and the list of the Mac's addresses and, when nothing else
-# is in it, their folder.
+# Removes the secret, the list of the Mac's addresses, the port and the VM's
+# name. The folder stays: it holds the lock file, which is never deleted (a
+# new file under the same name would be a second lock).
 remove_secret() {
-  rm -f -- "$secret_file" "$blocked_file"
-  rmdir -- "$secret_folder" 2>/dev/null || true
+  rm -f -- "$secret_file" "$blocked_file" "$port_file" "$name_file"
+}
+
+# --- Port, name, lock, leftovers -------------------------------------------
+
+# Writes $2 and a line break to the file $1 in the secret folder, mode 0600,
+# through a temporary file that is renamed (like the secret).
+write_private_file() {
+  local temporary
+  temporary="$(umask 077 && mktemp -- "$secret_folder/.state.XXXXXX")" || return 1
+  if ! { printf '%s\n' "$2" >"$temporary" \
+         && chmod 600 "$temporary" \
+         && mv -f -- "$temporary" "$1"; }; then
+    rm -f -- "$temporary"
+    echo "could not write $1" >&2
+    return 1
+  fi
+}
+
+# Succeeds for a plain file of yours that only you can read and write (a link
+# is not followed: it fails). The app checks the same for the port file.
+private_file_ok() {
+  local facts
+  [[ -f "$1" && ! -L "$1" ]] || return 1
+  facts="$(/usr/bin/stat "${stat_format[@]}" -- "$1" 2>/dev/null)" || return 1
+  [[ "$facts" == "$(/usr/bin/id -u) 600" ]]
+}
+
+# Prints the port `start` recorded: digits only, 1024 to 65535, in a private
+# file. Fails when there is none or it is not like that.
+recorded_port() {
+  local text
+  private_file_ok "$port_file" || return 1
+  text="$(head -c 16 "$port_file")" || return 1
+  [[ "$text" =~ ^[0-9]{4,5}$ ]] || return 1
+  (( 10#$text >= 1024 && 10#$text <= 65535 )) || return 1
+  printf '%s' "$((10#$text))"
+}
+
+# Prints the VM name `start` recorded (sandseek-sandbox- and 8 hex digits).
+recorded_name() {
+  local text
+  private_file_ok "$name_file" || return 1
+  text="$(head -c 64 "$name_file")" || return 1
+  [[ "$text" =~ ^sandseek-sandbox-[0-9a-f]{8}$ ]] || return 1
+  printf '%s' "$text"
+}
+
+# Sets $port (unless SANDSEEK_SANDBOX_PORT fixes it) and $name from what
+# `start` recorded, for the commands that talk to a sandbox that is running.
+# Without a record there is nothing to find: $port stays empty.
+find_sandbox() {
+  if [[ -z "$port_override" ]]; then
+    port="$(recorded_port)" || port=""
+  fi
+  name="$(recorded_name)" || name=""
+}
+
+# A free port on 127.0.0.1: perl binds port 0, reads the port the system chose
+# and lets go of it. Another program can take it before the VM publishes it;
+# `start` then tries another (see there).
+pick_port() {
+  local picked
+  picked="$("$perl_bin" -e 'use strict; use IO::Socket::INET;
+    my $socket = IO::Socket::INET->new(Listen => 1, LocalAddr => "127.0.0.1",
+      LocalPort => 0, Proto => "tcp", ReuseAddr => 1) or exit 1;
+    print $socket->sockport;' 2>/dev/null)" || return 1
+  [[ "$picked" =~ ^[0-9]{4,5}$ ]] && (( 10#$picked >= 1024 && 10#$picked <= 65535 )) || return 1
+  port=$((10#$picked))
+}
+
+# Succeeds for a name `start` could have made: sandseek-sandbox-<8 hex digits>,
+# or the plain sandseek-sandbox of SandSeek 0.1.0. A VM someone started by hand
+# under another name is not touched.
+is_sandbox_name() {
+  [[ "$1" == "$name_prefix" || "$1" =~ ^sandseek-sandbox-[0-9a-f]{8}$ ]]
+}
+
+# The lock. A small perl process takes flock on $lock_file, writes "<pid>
+# <start time>" into it, tells `start` ("locked <pid>", or "busy <pid> <time>"
+# when someone else holds it), detaches from the script and then only waits.
+# It ends on SIGTERM, or when the lock file is gone or replaced. The marker
+# word in its command line lets `stop` recognise it before sending a signal.
+lock_marker=sandseek-lock-holder
+lock_helper_code='use strict; use warnings;
+use Fcntl qw(:flock O_RDWR O_CREAT);
+use POSIX ();
+my ($marker, $path, $stamp) = @ARGV;
+$| = 1;
+sysopen(my $handle, $path, O_RDWR | O_CREAT, 0600) or do { print "error cannot open the lock file\n"; exit 3 };
+if (!flock($handle, LOCK_EX | LOCK_NB)) {
+  my $held = <$handle>;
+  $held = "" unless defined $held;
+  $held =~ s/\s+\z//;
+  print "busy $held\n";
+  exit 1;
+}
+truncate($handle, 0);
+sysseek($handle, 0, 0);
+syswrite($handle, "$$ $stamp\n");
+POSIX::setsid();
+$SIG{TERM} = sub { exit 0 };
+$SIG{HUP} = "IGNORE";
+print "locked $$\n";
+open(STDIN, "<", "/dev/null");
+open(STDOUT, ">", "/dev/null");
+open(STDERR, ">", "/dev/null");
+my $inode = (stat $handle)[1];
+while (1) {
+  select(undef, undef, undef, 1);
+  my @now = stat($path);
+  exit 0 unless @now && $now[1] == $inode;
+}'
+# A lock holder younger than this many seconds may still be starting its VM.
+lock_grace=300
+lock_pid=""
+# Set to 1 by the app when it starts a fresh VM in place of its own running one.
+replace_requested="${SANDSEEK_SANDBOX_REPLACE:-}"
+
+# Succeeds when process $1 exists and is not a zombie.
+process_alive() {
+  local state
+  state="$(ps -o stat= -p "$1" 2>/dev/null)" || return 1
+  [[ -n "$state" && "$state" != Z* ]]
+}
+
+# Succeeds when process $1 is a lock holder of this script for this lock file.
+lock_holder_is_ours() {
+  local command
+  [[ "$1" =~ ^[0-9]+$ ]] || return 1
+  command="$(ps -ww -o command= -p "$1" 2>/dev/null)" || return 1
+  [[ "$command" == *"$lock_marker"*"$lock_file"* ]]
+}
+
+# Ends lock holder $1 (only if it is one) and waits up to 5 seconds for it.
+end_lock_holder() {
+  local waited=0
+  lock_holder_is_ours "$1" || return 1
+  kill "$1" 2>/dev/null || true
+  while process_alive "$1" && (( waited < 50 )); do
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  return 0
+}
+
+# Succeeds when the live holder $1 (started at time $2) has lost its VM: it is
+# older than $lock_grace and the VM it recorded is not in `container list`
+# any more (the VM crashed or was deleted by hand). It cannot be ended by a
+# `stop` that has nothing to stop, and would block every start. If the list
+# cannot be read, nothing is assumed.
+lock_holder_is_orphan() {
+  local listed recorded
+  [[ "$1" =~ ^[0-9]+$ && "$2" =~ ^[0-9]+$ ]] || return 1
+  lock_holder_is_ours "$1" || return 1
+  (( $(/bin/date +%s) - $2 > lock_grace )) || return 1
+  listed="$("$container_bin" list --all --quiet 2>/dev/null)" || return 1
+  if recorded="$(recorded_name)"; then
+    ! grep -qxF "$recorded" <<<"$listed"
+  fi
+}
+
+# Takes the lock, for as long as the sandbox runs. Sets $lock_pid. Returns 75
+# with a plain message when another SandSeek holds it. A lock whose process is
+# gone is free (the system dropped it): it is simply taken.
+take_lock() {
+  local attempt reply reply_file waited held_pid held_stamp
+  for attempt in 1 2; do
+    reply_file="$(umask 077 && mktemp -- "$secret_folder/.lock-reply.XXXXXX")" || return 1
+    "$perl_bin" -e "$lock_helper_code" -- "$lock_marker" "$lock_file" "$(/bin/date +%s)" \
+      >"$reply_file" 2>&1 </dev/null &
+    lock_pid=$!
+    waited=0
+    reply=""
+    while (( waited < 50 )); do
+      reply="$(head -n 1 "$reply_file" 2>/dev/null || true)"
+      [[ -z "$reply" ]] || break
+      sleep 0.1
+      waited=$((waited + 1))
+    done
+    rm -f -- "$reply_file"
+    case "$reply" in
+      "locked "*)
+        lock_pid="${reply#locked }"
+        return 0 ;;
+      "busy "*)
+        wait "$lock_pid" 2>/dev/null || true
+        lock_pid=""
+        held_pid="" held_stamp=""
+        read -r held_pid held_stamp <<<"${reply#busy }" || true
+        if (( attempt == 1 )) && [[ "$replace_requested" == 1 ]] && lock_holder_is_ours "$held_pid"; then
+          # The caller says the sandbox that holds the lock is its own (the app
+          # makes a fresh VM for the next question): end that one first.
+          end_lock_holder "$held_pid" || true
+          continue
+        fi
+        if (( attempt == 1 )) && lock_holder_is_orphan "$held_pid" "$held_stamp"; then
+          echo "the sandbox of another SandSeek (process $held_pid) is gone; taking over its lock" >&2
+          end_lock_holder "$held_pid" || true
+          continue
+        fi
+        echo "Another SandSeek is using the web sandbox. Close it first." >&2
+        return 75 ;;
+      *)
+        kill "$lock_pid" 2>/dev/null || true
+        wait "$lock_pid" 2>/dev/null || true
+        lock_pid=""
+        echo "could not take the sandbox lock ($lock_file): ${reply:-no answer from $perl_bin}" >&2
+        return 1 ;;
+    esac
+  done
+  return 75
+}
+
+# Lets go of the lock this script took (ends its holder).
+release_lock() {
+  if [[ -n "$lock_pid" ]]; then
+    kill "$lock_pid" 2>/dev/null || true
+    wait "$lock_pid" 2>/dev/null || true
+    lock_pid=""
+  fi
+}
+
+# Stops and deletes the VM $1, ignoring errors.
+remove_vm() {
+  "$container_bin" stop "$1" >/dev/null 2>&1 || true
+  "$container_bin" delete "$1" >/dev/null 2>&1 || true
+}
+
+# Removes what a run that did not end normally left: every VM made by this
+# script (see is_sandbox_name) and the secret, port, name and address files.
+# Only call it while holding the lock, so no live owner's VM is touched.
+remove_leftovers() {
+  local listed id
+  if listed="$("$container_bin" list --all --quiet 2>/dev/null)"; then
+    while IFS= read -r id; do
+      if is_sandbox_name "$id"; then remove_vm "$id"; fi
+    done <<<"$listed"
+  else
+    echo "warning: could not list the containers, so leftover sandboxes were not looked for" >&2
+  fi
+  remove_secret
 }
 
 # The file SandSeek 0.1.0 wrote in TUFF's folder. Only that file, and only a
@@ -522,41 +800,76 @@ case "${1:-}" in
     check_port
     check_dns
     require_container
-    "$container_bin" stop "$name" >/dev/null 2>&1 || true
-    "$container_bin" delete "$name" >/dev/null 2>&1 || true
+    prepare_secret_folder || exit 1
+    # One SandSeek at a time: nothing is touched until the lock is ours.
+    lock_status=0
+    take_lock || lock_status=$?
+    (( lock_status == 0 )) || exit "$lock_status"
+    # From here on, every way out but success deletes the new secret and any
+    # VM that was started, so a missing secret still means "not running", and
+    # lets go of the lock. (On success the lock stays: see take_lock.)
+    cleanup_failed_start() {
+      if [[ -n "$name" ]]; then remove_vm "$name"; fi
+      remove_secret
+      release_lock
+    }
+    trap cleanup_failed_start EXIT
+    # The lock is ours, so any VM and file from an earlier run has no owner
+    # (it crashed, or was never stopped): remove them. This also removes a VM
+    # of SandSeek 0.1.0, which was called plain sandseek-sandbox.
+    remove_leftovers
+    name="$name_prefix-$(LC_ALL=C od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
+    if [[ ! "$name" =~ ^sandseek-sandbox-[0-9a-f]{8}$ ]]; then
+      echo "could not make a random name for the sandbox" >&2
+      exit 1
+    fi
+    # The file is complete before the sandbox starts, which reads it once. The
+    # old VM is gone by now, so nothing is signing with the previous secret.
+    write_secret || exit 1
+    write_blocked_addresses || exit 1
+    remove_old_secret
+    write_private_file "$name_file" "$name" || exit 1
     # The entrypoint starts as root with these four capabilities only, to load
     # the firewall; the server then gives them all up and runs as user 10001.
     # The secret goes in as a read-only file in a mounted folder, never in the
     # environment or a command line, where other users would see it in `ps`.
-    run_options=(
-      --detach --rm --name "$name"
-      --mount "type=bind,source=$secret_folder,target=$vm_secret_folder,readonly"
-      --read-only --tmpfs /tmp
-      --cap-drop ALL --cap-add NET_ADMIN --cap-add SETUID --cap-add SETGID --cap-add SETPCAP
-      --ulimit nproc=512
-      --cpus 2 --memory 1G
-      --publish "127.0.0.1:$port:9100"
-    )
-    for server in $dns_servers; do
-      run_options+=(--dns "$server")
+    # Only the Mac's side of --publish is the free port; the server and the
+    # firewall in the VM keep port 9100.
+    attempt=1
+    while :; do
+      if [[ -z "$port_override" ]]; then
+        pick_port || { echo "could not find a free port on 127.0.0.1" >&2; exit 1; }
+      fi
+      write_private_file "$port_file" "$port" || exit 1
+      run_options=(
+        --detach --rm --name "$name"
+        --mount "type=bind,source=$secret_folder,target=$vm_secret_folder,readonly"
+        --read-only --tmpfs /tmp
+        --cap-drop ALL --cap-add NET_ADMIN --cap-add SETUID --cap-add SETGID --cap-add SETPCAP
+        --ulimit nproc=512
+        --cpus 2 --memory 1G
+        --publish "127.0.0.1:$port:9100"
+      )
+      for server in $dns_servers; do
+        run_options+=(--dns "$server")
+      done
+      if [[ -n "${SEARXNG_URL:-}" ]]; then
+        run_options+=(--env "SEARXNG_URL=$SEARXNG_URL")
+      fi
+      if run_output="$("$container_bin" run "${run_options[@]}" "$image" 2>&1)"; then
+        break
+      fi
+      # Another program may have taken the port since it was picked. Try a new
+      # one (a fixed port is not changed).
+      if [[ -z "$port_override" ]] && (( attempt < 3 )) \
+          && grep -qiE 'in use|already|bind' <<<"$run_output"; then
+        attempt=$((attempt + 1))
+        remove_vm "$name"
+        continue
+      fi
+      printf '%s\n' "$run_output" >&2
+      exit 1
     done
-    if [[ -n "${SEARXNG_URL:-}" ]]; then
-      run_options+=(--env "SEARXNG_URL=$SEARXNG_URL")
-    fi
-    # The file is complete before the sandbox starts, which reads it once. The
-    # old VM is gone by now, so nothing is signing with the previous secret.
-    # From here on, every way out but success deletes the new secret and any
-    # VM that was started, so a missing secret still means "not running".
-    cleanup_failed_start() {
-      "$container_bin" stop "$name" >/dev/null 2>&1 || true
-      "$container_bin" delete "$name" >/dev/null 2>&1 || true
-      remove_secret
-    }
-    trap cleanup_failed_start EXIT
-    write_secret || exit 1
-    write_blocked_addresses || exit 1
-    remove_old_secret
-    "$container_bin" run "${run_options[@]}" "$image" >/dev/null
     # The entrypoint refuses to start when it finds no default gateway (see
     # Sandbox/entrypoint.sh) or cannot load the firewall, and `--rm` deletes the
     # container then, so keep the last non-empty log (a later "not found" error
@@ -645,19 +958,31 @@ case "${1:-}" in
     ;;
   stop)
     require_container
-    "$container_bin" stop "$name" >/dev/null 2>&1 || true
-    "$container_bin" delete "$name" >/dev/null 2>&1 || true
+    # Exactly the VM `start` recorded (or the plain name of 0.1.0's VM).
+    name="$(recorded_name)" || name="$name_prefix"
+    remove_vm "$name"
     if ! remaining="$("$container_bin" list --all --quiet 2>/dev/null)" \
-        || grep -qx "$name" <<<"$remaining"; then
+        || grep -qxF "$name" <<<"$remaining"; then
       echo "could not confirm the sandbox was removed; see: container list --all" >&2
       exit 1
     fi
     # No secret means no sandbox is running.
     remove_secret
+    # The VM is gone, so the lock can go: end its holder, if the file names one.
+    if [[ -f "$lock_file" ]]; then
+      held_pid=""
+      read -r held_pid _ <"$lock_file" || true
+      end_lock_holder "$held_pid" || true
+    fi
     echo "web research sandbox stopped"
     ;;
   status)
     check_port
+    find_sandbox
+    if [[ -z "$port" ]]; then
+      echo "web research sandbox is not answering: none was started (no port is recorded)" >&2
+      exit 1
+    fi
     probe || true
     if [[ "$health_state" == ok ]]; then
       echo "web research sandbox answers at http://127.0.0.1:$port and refuses unsigned requests; SandSeek checks its signature before use"
@@ -672,6 +997,8 @@ case "${1:-}" in
   selftest)
     check_port
     require_container
+    find_sandbox
+    [[ -n "$port" && -n "$name" ]] || { echo "start the sandbox first: $0 start" >&2; exit 1; }
     probe || true
     if [[ "$health_state" == old ]]; then
       echo "$old_image_message" >&2

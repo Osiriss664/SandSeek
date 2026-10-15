@@ -3505,9 +3505,21 @@ class LauncherTests(unittest.TestCase):
         open(self.calls, "w").close()
         self.write_stub("container", '''#!/bin/bash
 echo "$*" >> "$FAKE_CALLS"
+# The VM's name is random: `@vm` in a list stands for the name of the VM
+# that `run` was given (nothing before a run).
+vm_file="$(dirname "$0")/vm"
 case "$1" in
-  run) exit "${FAKE_RUN_EXIT:-0}" ;;
-  list) case "$*" in *--all*) printf '%s' "$FAKE_ALL_LIST" ;; *) printf '%s' "$FAKE_LIST" ;; esac ;;
+  run)
+    previous=""
+    for word in "$@"; do
+      [[ "$previous" != --name ]] || echo "$word" > "$vm_file"
+      previous="$word"
+    done
+    exit "${FAKE_RUN_EXIT:-0}" ;;
+  list)
+    case "$*" in *--all*) text="$FAKE_ALL_LIST" ;; *) text="$FAKE_LIST" ;; esac
+    vm=""; [[ ! -f "$vm_file" ]] || vm="$(cat "$vm_file")"
+    printf '%s' "${text//@vm/$vm}" ;;
   logs) printf '%s' "$FAKE_LOGS" ;;
 esac
 exit 0
@@ -3555,8 +3567,8 @@ cat "$(dirname "$0")/ifconfig.out"
         # environment, which would drop the FAKE_ variables the stubs read.
         env = {"PATH": self.bin + os.pathsep + os.environ["PATH"], "HOME": self.home,
                "SANDSEEK_SANDBOX_CLEAN_ENV": "1",
-               "FAKE_CALLS": self.calls, "FAKE_ALL_LIST": "sandseek-sandbox\n",
-               "FAKE_LIST": "sandseek-sandbox\n", "FAKE_LOGS": "", "FAKE_BODY": "",
+               "FAKE_CALLS": self.calls, "FAKE_ALL_LIST": "@vm\n",
+               "FAKE_LIST": "@vm\n", "FAKE_LOGS": "", "FAKE_BODY": "",
                "FAKE_CODE": "", **fake}
         return subprocess.run(["bash", self.script, *args], env=env, capture_output=True,
                               text=True, timeout=60, stdin=subprocess.DEVNULL)
@@ -3641,7 +3653,7 @@ cat "$(dirname "$0")/ifconfig.out"
         self.assertFalse(os.path.exists(listed))
 
     def test_a_health_body_without_spaces_after_the_colon_still_counts(self):
-        done = self.run_script("status", FAKE_CODE="401",
+        done = self.run_script("status", FAKE_CODE="401", SANDSEEK_SANDBOX_PORT="9100",
                                FAKE_BODY='{"error":{"code":"unauthorized"}}')
         self.assertEqual(done.returncode, 0, done.stderr)
 
@@ -3679,7 +3691,8 @@ cat "$(dirname "$0")/ifconfig.out"
         self.assertIn("older than this SandSeek", done.stderr)
         self.assertIn("rebuild", done.stderr)
         self.assertFalse(os.path.exists(self.secret))
-        done = self.run_script("status", FAKE_CODE="200", FAKE_BODY=old)
+        done = self.run_script("status", FAKE_CODE="200", FAKE_BODY=old,
+                               SANDSEEK_SANDBOX_PORT="9100")
         self.assertEqual(done.returncode, 1)
         self.assertIn("older than this SandSeek", done.stderr)
 
