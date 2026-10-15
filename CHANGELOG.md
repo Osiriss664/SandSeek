@@ -28,6 +28,27 @@ Only SandSeek may use the sandbox.
   sign their requests; the address check reads the secret file (`--secret-file`
   to name another).
 
+One SandSeek at a time.
+
+- The app, the `sandseek` command's scripts and a second copy of the app can no
+  longer stop each other's sandbox. `Scripts/research_sandbox.sh start` takes a
+  lock (a `lock` file in the sandbox folder, an operating system lock held by a
+  small perl process for as long as the sandbox runs) and a second start says
+  "Another SandSeek is using the web sandbox. Close it first." A crash releases
+  the lock; a lock whose process is gone is taken over.
+- The sandbox is published on a free port of 127.0.0.1 picked at each start, no
+  longer fixed 9100. The port is recorded beside the secret (`port`, mode 0600),
+  and the app, `sandseek` (without `--sandbox`), `research_sandbox.sh status` and
+  `selftest`, `full_test.sh` and the two check scripts read it from there.
+  `SANDSEEK_SANDBOX_PORT` still fixes the port, for tests. Inside the VM the
+  server and firewall keep port 9100.
+- Each VM is called `sandseek-sandbox-<random>` (recorded in `vm-name`). A start
+  removes the VMs and the secret, port, name and address files that an earlier
+  run left, once it holds the lock; `stop` removes exactly the VM it started.
+  The app's Stop looks only for its own VM.
+- The app still starts a fresh VM for each question, and now replaces its own
+  running VM in one `start` (`SANDSEEK_SANDBOX_REPLACE=1`).
+
 A sturdier sandbox server.
 
 - A whole request must arrive within 10 seconds (a body that stops short gets a

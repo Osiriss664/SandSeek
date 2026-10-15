@@ -140,8 +140,8 @@ and a model server SandSeek started.
 
 - **Model server.** Pick TUFF (127.0.0.1:8080) or llama.cpp (127.0.0.1:8081);
   Ollama and LM Studio are listed as "later". The address can be edited but
-  must be on this Mac's loopback interface, with a port (not the sandbox's
-  9100). A ready server is asked only its status route every ten seconds
+  must be on this Mac's loopback interface, with a port (not the sandbox's,
+  which each start picks and records). A ready server is asked only its status route every ten seconds
   (TUFF `/tuff/v1/status`, llama.cpp `/health`); the model list (`/v1/models`)
   is fetched on Check, when the status changes, and from the reload button
   beside the model picker. The type, address and Check are locked while a
@@ -168,8 +168,9 @@ and a model server SandSeek started.
   The image is rebuilt when a hash of the `Sandbox/` files changes.
   `SANDSEEK_SOURCE_DIR=/path/to/checkout` uses a checkout's files instead, but
   only in debug builds or when the app has no files of its own (`swift run`);
-  a release app ignores it. The script always gets
-  `SANDSEEK_SANDBOX_PORT=9100`, whatever the environment says. The files are
+  a release app ignores it. The script never gets `SANDSEEK_SANDBOX_PORT`,
+  whatever the environment says: each start picks a free port and the app
+  reads it back from the sandbox folder. The files are
   put into the bundle by `Scripts/package_app.sh` and not declared as SwiftPM
   resources, because the sandbox script needs them as a plain folder laid out
   like a checkout (it builds the image from `../Sandbox`).
@@ -202,7 +203,10 @@ The app does this itself. By hand:
     Scripts/research_sandbox.sh start
     Scripts/research_sandbox.sh selftest
 
-`build` is needed once. `start` publishes the sandbox on 127.0.0.1:9100.
+`build` is needed once. `start` publishes the sandbox on a free port of
+127.0.0.1 and records it (and the VM's name) beside the secret; `sandseek` and
+the other scripts find it there. Only one SandSeek can run the sandbox at a
+time: a second `start` says so and changes nothing.
 `selftest` is optional and checks the VM's isolation.
 
 ## Run
@@ -246,8 +250,8 @@ To record real streams from a running server for test fixtures, use
   LM Studio come later.
 - Thorough preset values are a first guess; they will be adjusted after
   measuring.
-- The pre-question check does not yet verify mounts or that port 9100 is
-  published by `sandseek-sandbox`.
+- The pre-question check does not yet verify mounts or that the recorded port
+  is published by the VM recorded in `vm-name`.
 - Model names in the picker are the ids the server lists; there is no table of
   display names.
 - The Quick answer / Thorough switch is labelled in English like the rest of

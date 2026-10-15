@@ -16,7 +16,7 @@ Mac
   SandSeek            the app, or the `sandseek` command: the loop that asks
                       the model, runs its tool calls and writes the report
       |
-      v  127.0.0.1:9100
+      v  127.0.0.1:<free port, picked at each start>
 Linux VM (Apple container)
   web sandbox         searches, downloads pages, turns them into plain text
 ```

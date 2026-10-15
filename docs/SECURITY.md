@@ -55,7 +55,7 @@ Apple `container` software (see below for how SandSeek makes sure the
 | Boundary | What crosses it | What holds it |
 | --- | --- | --- |
 | Web → sandbox VM | page bytes | read-only VM, firewall (outbound and inbound), no root, extractor, fallback parser and PDF reader in time-limited child processes, address checks, one deadline per request |
-| Sandbox VM → Mac | cleaned page text and search results over 127.0.0.1:9100 | the VM cannot call the Mac (except DNS); the Mac calls the VM; text is cleaned again on the Mac |
+| Sandbox VM → Mac | cleaned page text and search results over 127.0.0.1 (a free port each start) | the VM cannot call the Mac (except DNS); the Mac calls the VM; text is cleaned again on the Mac |
 | Text → model | tool results | fenced as untrusted; the model has nothing dangerous to call |
 | Model → tools | `web_search`, `open_page` | only these two exist; unknown tool names are refused by the loop; addresses must have been shown to the model |
 | Model → you | the answer and the report | plain text only, no images loaded, no links that act, source addresses opened only after you confirm them |
@@ -124,8 +124,9 @@ These hold as long as the design is intact and the VM boundary holds.
   or global IPv6 address, which no range rule covers (see "The Mac's own
   addresses" below). The
   firewall is loaded before the server starts, and the sandbox refuses to
-  start without it. Inbound, the VM accepts new connections on port 9100 only,
-  and only from its default gateway (plus replies and loopback). The entrypoint
+  start without it. Inbound, the VM accepts new connections on port 9100 only
+  (its own port; the Mac side is a different, free port, see "One SandSeek at a
+  time" below), and only from its default gateway (plus replies and loopback). The entrypoint
   reads the gateway from `/proc/net/route`, checks that it is a plain IPv4
   address, puts it into the rule and prints it in the sandbox log; without a
   usable gateway the sandbox refuses to start instead of opening the port to
@@ -195,6 +196,33 @@ These hold as long as the design is intact and the VM boundary holds.
   written as Markdown; a title is cut to one line of 300 characters. The
   app shows web text as plain text, never loads images, and opens a source in
   your browser only after you confirm its full address.
+- **One SandSeek at a time.** The sandbox has one owner. `start` first takes a
+  lock, the file `lock` in `~/Library/Application Support/SandSeek/sandbox`, and
+  keeps it for as long as the sandbox runs: the app, the `sandseek` command's
+  scripts and a second copy of the app share it. A second `start` fails with
+  "Another SandSeek is using the web sandbox. Close it first." and touches
+  nothing of the first one's. The lock is an operating system lock (`flock`),
+  held by a small `perl` process (Apple's `/usr/bin/perl`) that `start` leaves
+  running, because the script ends as soon as the VM is up and macOS has no
+  `flock` command; the file holds that process's pid and start time. The
+  system drops the lock when that process ends, however it ends, so a crash
+  leaves no stale lock; a lock file that names a dead process is simply taken
+  over. If the process is alive but its VM is gone (older than five minutes and
+  not in `container list`), the next start ends it and takes over. `stop` ends
+  it too. Each start picks a free port on 127.0.0.1 (bind to port 0, read it
+  back, let go; a start that finds the port taken tries again, up to three
+  times), publishes only that port, and records it in the file `port` beside
+  the secret, with the VM's name in `vm-name`, both mode 0600. The app, the
+  command and the scripts read them as strictly as the secret (a plain file
+  of yours, nothing but the value, a port from 1024 to 65535). Inside the VM
+  the server and the firewall keep port 9100. `SANDSEEK_SANDBOX_PORT` still
+  fixes the port, for tests. Each VM is called `sandseek-sandbox-` and eight
+  random hex digits. Under the lock, a start removes every VM with that name
+  form (and the plain `sandseek-sandbox` of 0.1.0) and the secret, port, name
+  and address files that a run that did not end normally left; nothing is
+  removed before the lock is held, so a live owner's VM is never touched. A
+  VM someone started by hand under another name is left alone. `stop` removes
+  exactly the VM the start recorded.
 - **The app checks before every question.** It reads the firewall rules (the
   outbound chain, the Mac's blocked sets and the inbound chain: policy drop,
   and port 9100 accepted from one IPv4 address only) and the
@@ -251,7 +279,7 @@ These hold as long as the design is intact and the VM boundary holds.
   port, so a program that answers there cannot make a valid signature, an old
   answer does not fit a new nonce, and a genuine answer to one request does not
   fit another method, path or request. Without a valid signature the check
-  fails with "the answer on 127.0.0.1:9100 is not signed by the SandSeek
+  fails with "the answer on 127.0.0.1:<port> is not signed by the SandSeek
   sandbox; another program may be using the port". Fixed examples that the
   sandbox's tests and the Swift tests both reproduce are in
   `Sandbox/test-vectors/signing.json`.
@@ -349,7 +377,7 @@ time-limit `container` itself; the app's limit on the script covers that.
   packages and the base image are pinned by hash and digest, and `nftables`
   comes from a fixed Debian snapshot date (snapshot.debian.org), so a rebuild
   installs the same version.
-- **Any program running as you can call the sandbox** on 127.0.0.1:9100 and
+- **Any program running as you can call the sandbox** on its 127.0.0.1 port and
   have public pages fetched through it. It needs the secret file for that,
   which only your Mac user can read, so another Mac user, a browser page (Host
   check, JSON only) or a program that cannot read your files cannot. A program
@@ -373,7 +401,7 @@ time-limit `container` itself; the app's limit on the script covers that.
   Mac so far. If `start` says the server is listening but did not answer, a
   connection from another source was dropped before the server saw it, so
   `/proc/net/tcp` shows nothing. To check, add a temporary counter in the VM
-  (`container exec sandseek-sandbox nft insert rule inet sandseek_sandbox
+  (`container exec $(cat "$HOME/Library/Application Support/SandSeek/sandbox/vm-name") nft insert rule inet sandseek_sandbox
   input tcp dport 9100 ip saddr != GATEWAY counter`, with the gateway from the
   log), repeat the request and run `nft list chain inet sandseek_sandbox
   input`: packets counted there came from another address. The rule goes away
@@ -462,7 +490,8 @@ does not control.
 
   It lists this Mac's own non-loopback addresses and tries a plain TCP connect
   to each one on the server's port. The command also tries the sandbox's port
-  (9100); the app's Check tries the model server's port only. No data is sent.
+  (the one the last start recorded, else 9100); the app's Check tries the model
+  server's port only. No data is sent.
   Each address comes out as *accepted* (something listens), *refused* (the Mac's
   own network stack answers at once that nothing listens) or *not known* (a
   timeout or any other failure, for example macOS Local Network privacy or a

@@ -251,7 +251,8 @@ rounds the model may take (default 8). `sandseek --help` lists all options.
 | A note that SandSeek started a model server (so a later launch can find it) | `~/Library/Application Support/SandSeek/State/model-server-started-by-app.json` |
 | The log of the model server SandSeek started | `~/Library/Application Support/SandSeek/Logs/model-server.log` |
 | The app's settings (server choice, addresses, the chosen server program, model and models folder, presets, last question) | the app's preferences file in `~/Library/Preferences` (its name contains `sandseek`) |
-| The sandbox image and VM | Apple `container`: image `sandseek-sandbox:latest`, VM `sandseek-sandbox` |
+| The sandbox image and VM | Apple `container`: image `sandseek-sandbox:latest`, VM `sandseek-sandbox-<random>` (a new one at each start; `container list | grep sandseek`) |
+| The sandbox's port, VM name and lock | `port`, `vm-name` and `lock` in `~/Library/Application Support/SandSeek/sandbox`, beside the secret |
 | The built app and command | `build/SandSeek.app`, `.build/release/sandseek` in your checkout |
 
 Reports from TUFF's research screen (in `~/Library/Application Support/TUFF/Research
@@ -320,9 +321,14 @@ them with a command**, so you can still get them back.
 - **The sandbox does not become Ready, or "Not verified"**: stop it and start it
   again. If it stays red, run `Scripts/research_sandbox.sh selftest` and read the
   `FAIL` lines.
+- **"Another SandSeek is using the web sandbox. Close it first."**: another
+  copy of the app, or `Scripts/research_sandbox.sh start`, has the sandbox. Stop
+  it there (**Stop Sandbox**, or `Scripts/research_sandbox.sh stop`) and start
+  again. A crash leaves no lock behind; the next start also removes the VM it
+  left.
 - **The model server card says "Not running"**: start the server (see above) and
-  press **Check**. The address must be on 127.0.0.1 with a port, and not 9100,
-  which is the sandbox's.
+  press **Check**. The address must be on 127.0.0.1 with a port, and not the
+  sandbox's.
 - **llama.cpp: "refused the key"**: the server was started without the key file
   the app made. Start it again with the command on the card.
 - **A question is very slow**: a 16 GB Mac holds one model at a time. Quit other
