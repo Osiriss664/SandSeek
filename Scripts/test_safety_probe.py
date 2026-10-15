@@ -64,6 +64,8 @@ def vms():
     return [name] + (env("FAKE_EXTRA_VM", "").split(",") if env("FAKE_EXTRA_VM") else [])
 
 if a[:1] == ["list"]:
+    if env("FAKE_LIST_FAIL") and os.path.exists(env("FAKE_LIST_FAIL")):
+        sys.stderr.write("container list failed\n"); sys.exit(1)
     print("\n".join(vms()))
     sys.exit(0)
 if a[:1] == ["inspect"]:
@@ -80,6 +82,8 @@ if rest[0] == "python3" and rest[1] == "/app/default_gateway.py":
     print("192.168.64.1"); sys.exit(0)
 if rest[0] == "python3" and rest[1] == "-c":
     code, args = rest[2], rest[3:]
+    if env("FAKE_FAIL_PROBE") and ("probe:" + env("FAKE_FAIL_PROBE")) in code:
+        sys.stderr.write("exec failed\n"); sys.exit(1)
     if "probe:connect" in code:
         key = args[0] + ":" + args[1]
         if key in env("FAKE_REACHABLE", "").split(","):
@@ -93,11 +97,13 @@ if rest[0] == "python3" and rest[1] == "-c":
     elif "probe:privileges" in code:
         print(env("FAKE_PRIV", "10001 none 1"))
     elif "probe:processes" in code:
-        print("1 10001 python3 /app/server.py")
+        if not env("FAKE_NO_PROCS"):
+            print("1 10001 python3 /app/server.py")
         if env("FAKE_ROOT"):
             print("7 0 " + env("FAKE_ROOT"))
     elif "probe:ipv6" in code:
-        pass
+        if env("FAKE_IPV6"):
+            print(env("FAKE_IPV6"))
     elif "probe:scan" in code:
         print(env("FAKE_OPEN", "") + "|65535")
     sys.exit(0)
@@ -118,9 +124,11 @@ if rest[0] == "nft":
                   '\t\toifname "lo" accept\n\t\tct state 0x2,0x4 accept\n'
                   "\t\tip daddr 192.168.64.1 tcp dport 53 accept\n\t\tip daddr 192.168.64.1 udp dport 53 accept\n"
                   + ("\t\tip daddr 10.9.9.9 tcp dport 8080 accept\n" if env("FAKE_EXTRA_ACCEPT") else "")
+                  + ("\t\tmeta nfproto 2 accept\n" if env("FAKE_ACCEPT_EARLY") else "")
                   + "".join(f"\t\tmeta nfproto {f} ip{'6' if f == 'ipv6' else ''} daddr @{s} reject\n"
                            for f, s in (("ipv4", "blocked4"), ("ipv6", "blocked6"), ("ipv4", "private4"), ("ipv6", "refused6")))
-                  + "\t\tmeta nfproto 2 accept\n\t\tmeta nfproto 10 ip6 daddr 2000::/3 accept\n\t\treject\n\t}\n}")
+                  + ("" if env("FAKE_ACCEPT_EARLY") else "\t\tmeta nfproto 2 accept\n")
+                  + "\t\tmeta nfproto 10 ip6 daddr 2000::/3 accept\n\t\treject\n\t}\n}")
         sys.exit(0)
     if words[:2] == ["get", "element"]:
         s, addr = words[4], words[5].strip("{} ")
@@ -134,7 +142,9 @@ if rest[0] == "awk":
 if rest[0] == "sh":
     text = rest[2]
     if "unshare" in text:
-        print("exit=1"); sys.exit(0)
+        print("exit=" + env("FAKE_UNSHARE_RC", "1")); sys.exit(0)
+    if "/tmp/probe-write" in text:
+        sys.exit(1 if env("FAKE_NO_TMP") else 0)
     if "/app/probe-write" in text:
         sys.exit(0 if env("FAKE_APP_WRITABLE") else 1)
     sys.exit(0)
@@ -246,6 +256,8 @@ class Fixture:
     def env(self, **extra):
         env = {
             "PATH": self.bin + os.pathsep + os.environ["PATH"],
+            "SAFETY_LSOF": f"{self.bin}/lsof",
+            "SAFETY_IFCONFIG": f"{self.bin}/ifconfig",
             "HOME": self.root,
             "SAFETY_SECRET_FOLDER": self.folder,
             "SAFETY_CONTAINER": f"{self.bin}/container",
@@ -351,6 +363,45 @@ class ProbeTests(unittest.TestCase):
         found = self.fx.run(FAKE_OPEN="8021 53")
         self.assertIn("FAIL  the VM can reach these TCP ports on the Mac: 8021", found.stdout)
 
+    def test_root_check_fails_on_an_empty_listing_or_failed_exec(self):
+        for extra in ({"FAKE_NO_PROCS": "1"}, {"FAKE_FAIL_PROBE": "processes"}):
+            result = self.fx.run(**extra)
+            self.assertEqual(result.returncode, 1, result.stdout)
+            self.assertIn("FAIL  root processes: the process listing", result.stdout)
+            self.assertNotIn("PASS  no root process", result.stdout)
+
+    def test_ipv6_check_fails_when_the_exec_fails_and_ula_is_not_global(self):
+        result = self.fx.run(FAKE_FAIL_PROBE="ipv6")
+        self.assertIn("FAIL  could not read the VM's IPv6 addresses", result.stdout)
+        self.assertNotIn("PASS  the VM has no global IPv6", result.stdout)
+        result = self.fx.run(FAKE_IPV6="fd00:0000:0000:0000:0000:0000:0000:0005 eth0")
+        self.assertIn("NOTE  the VM has a unique-local IPv6 address", result.stdout)
+        self.assertNotIn("global IPv6 address (", result.stdout)
+        self.assertIn("PASS  the VM has no global IPv6", result.stdout)
+
+    def test_cors_check_fails_when_curl_cannot_connect(self):
+        self.fx.server.shutdown()
+        self.fx.server.server_close()
+        self.fx.server = None
+        result = self.fx.run()
+        self.assertIn("FAIL  CORS headers: curl could not get an answer", result.stdout)
+        self.assertNotIn("PASS  no CORS header", result.stdout)
+
+    def test_app_write_check_needs_a_working_control(self):
+        result = self.fx.run(FAKE_NO_TMP="1")
+        self.assertIn("FAIL  control: the server's user cannot write to /tmp", result.stdout)
+        self.assertNotIn("PASS  the server's user cannot write under /app", result.stdout)
+
+    def test_unshare_missing_is_not_a_pass(self):
+        for code in ("126", "127"):
+            result = self.fx.run(FAKE_UNSHARE_RC=code)
+            self.assertIn("SKIP  the user-namespace flush attempt: unshare is not available", result.stdout)
+            self.assertNotIn("PASS  the firewall table is still in place", result.stdout)
+
+    def test_the_ipv4_accept_must_come_after_the_private4_reject(self):
+        result = self.fx.run(FAKE_ACCEPT_EARLY="1")
+        self.assertIn("FAIL  output: the IPv4 accept", result.stdout)
+
     def test_listener_on_more_than_loopback_is_a_fail(self):
         result = self.fx.run(FAKE_LSOF=f"p1\ncx\nn*:{self.fx.port}")
         self.assertIn("is open on more than 127.0.0.1", result.stdout)
@@ -411,6 +462,7 @@ case "$1" in
     echo "$! 1" > "$folder/lock"
     echo "web research sandbox ready" ;;
   stop)
+    [ -n "$STUB_LIST_BREAKS" ] && : > "$FAKE_LIST_FAIL"
     if read -r pid _ < "$folder/lock" 2>/dev/null; then
       kill "$pid" 2>/dev/null
       for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
@@ -420,7 +472,14 @@ case "$1" in
       done
     fi
     : > "$FAKE_VMS"
-    rm -f "$folder/secret" "$folder/port" "$folder/vm-name" "$folder/blocked-addresses"
+    if [ -n "$STUB_LEFTOVER_FORWARDER" ]; then   # the old forwarder still holds the port
+      python3 -c 'import socket, sys, time
+s = socket.socket(); s.bind(("127.0.0.1", int(sys.argv[1]))); s.listen(5); time.sleep(600)' \
+        "$(cat "$folder/port")" sandseek-leftover-forwarder </dev/null >/dev/null 2>&1 &
+      sleep 0.5
+    fi
+    rm -f "$folder/port" "$folder/vm-name" "$folder/blocked-addresses"
+    [ -n "$STUB_LEFTOVER_SECRET" ] || rm -f "$folder/secret"
     echo "web research sandbox stopped" ;;
   status) [ -f "$folder/vm-name" ] && echo answers || exit 1 ;;
 esac
@@ -429,6 +488,8 @@ esac
 STUB_SANDSEEK = r'''#!__PYTHON__
 import hmac, http.client, os, sys
 sys.path.insert(0, "__HERE__")
+if os.environ.get("STUB_NO_CONTACT"):
+    sys.stderr.write("error: no secret\n"); sys.exit(1)
 import verify_sandbox_signature as signing
 url = sys.argv[sys.argv.index("--sandbox") + 1]
 port = int(url.rsplit(":", 1)[1])
@@ -440,6 +501,9 @@ r = c.getresponse(); body = r.read(); tag = r.getheader("X-Sandbox-Auth")
 ok = tag and hmac.compare_digest(tag, signing.response_auth(secret, "GET", "/health", nonce, r.status, body))
 if not ok and os.environ.get("STUB_BELIEVES"):
     print("the capital is Canberra"); sys.exit(0)
+if os.environ.get("STUB_HANG"):
+    open(os.environ["STUB_HANG"], "w").close()
+    import time; time.sleep(4)
 sys.stderr.write("error: the answer on 127.0.0.1:%d is not signed by the SandSeek sandbox; another program may be using the port\n" % port)
 sys.exit(1)
 '''
@@ -459,6 +523,7 @@ class LifecycleTests(unittest.TestCase):
 
     def kill_holders(self):
         subprocess.run(["pkill", "-f", f"sandseek-lock-holder {self.fx.folder}"], capture_output=True)
+        subprocess.run(["pkill", "-f", "sandseek-leftover-forwarder"], capture_output=True)
 
     def run_it(self, *args, **extra):
         return self.fx.run("safety_lifecycle.sh", *args, timeout=180, **{**self.extra, **extra})
@@ -467,7 +532,7 @@ class LifecycleTests(unittest.TestCase):
         result = self.run_it()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(result.stdout.rstrip().splitlines()[-1].split(": ")[1].split(",")[1].strip(), "0 fail")
-        for expected in ("fake sandbox (unsigned): refused", "fake sandbox (wrongkey): refused",
+        for expected in ("fake sandbox (unsigned): reached the fake (GET /health), refused", "fake sandbox (wrongkey): reached the fake (GET /health), refused",
                          "a second start was refused with exit code 75", "the first sandbox is untouched",
                          "exactly one VM", "was removed; the new one is", "zero sandseek VMs remain",
                          "no secret, port, vm-name or blocked-addresses file remains",
@@ -499,6 +564,77 @@ class LifecycleTests(unittest.TestCase):
         self.assertIn("does not run on one it did not start", result.stderr)
         self.assertNotIn("Result:", result.stdout)
         self.assertTrue(os.path.exists(os.path.join(self.fx.folder, "secret")))
+
+    def test_the_fake_check_does_not_pass_when_it_never_reached_the_fake(self):
+        result = self.run_it(STUB_NO_CONTACT="1")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("FAIL  fake sandbox (unsigned): the command never reached the fake (no GET /health", result.stdout)
+        self.assertNotIn("PASS  fake sandbox (unsigned)", result.stdout)
+
+    def test_a_leftover_secret_is_a_fail_and_is_not_overwritten(self):
+        result = self.run_it(STUB_LEFTOVER_SECRET="1")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("FAIL  fake sandbox: could not write the throwaway secret file", result.stdout)
+        self.assertNotIn("PASS  fake sandbox (", result.stdout)
+
+    def test_a_port_held_by_an_old_forwarder_is_a_fail(self):
+        result = self.run_it(STUB_LEFTOVER_FORWARDER="1")
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("FAIL  fake sandbox: port", result.stdout)
+        self.assertIn("already in use before the fake started", result.stdout)
+        self.assertNotIn("PASS  fake sandbox (", result.stdout)
+
+    def test_a_failed_container_list_is_never_zero_vms(self):
+        result = self.run_it(STUB_LIST_BREAKS="1", FAKE_LIST_FAIL=os.path.join(self.fx.root, "list-fails"))
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("FAIL  the VM list could not be read", result.stdout)
+        self.assertNotIn("PASS  zero sandseek VMs remain", result.stdout)
+        self.assertNotIn("PASS  the sandbox started again", result.stdout)
+
+    def test_a_listing_failure_before_the_start_is_refused(self):
+        marker = os.path.join(self.fx.root, "list-fails")
+        open(marker, "w").close()
+        result = self.run_it(FAKE_LIST_FAIL=marker)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("could not list the VMs", result.stderr)
+
+    def test_term_removes_the_throwaway_secret_and_stops_the_sandbox(self):
+        hang = os.path.join(self.fx.root, "hang-started")
+        process = subprocess.Popen(
+            ["bash", os.path.join(HERE, "safety_lifecycle.sh")], env=self.fx.env(**self.extra, STUB_HANG=hang),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, stdin=subprocess.DEVNULL)
+        self.addCleanup(process.kill)
+        deadline = time.time() + 60
+        while not os.path.exists(hang) and time.time() < deadline:
+            time.sleep(0.1)
+        self.assertTrue(os.path.exists(hang), "the command stub never ran")
+        secret = os.path.join(self.fx.folder, "secret")
+        self.assertTrue(os.path.exists(secret), "the throwaway secret should exist while the fake runs")
+        process.send_signal(signal.SIGTERM)
+        process.communicate(timeout=60)
+        self.assertEqual(process.returncode, 143)
+        self.assertFalse(os.path.exists(secret), "the throwaway secret was left behind")
+        with open(self.vms) as handle:
+            self.assertEqual(handle.read().strip(), "", "the sandbox the script started was left running")
+        self.assertEqual(os.listdir(self.fx.folder), ["lock"])
+
+    def test_cleanup_leaves_a_secret_that_is_not_the_throwaway(self):
+        # The throwaway is only removed while it still holds what was written.
+        hang = os.path.join(self.fx.root, "hang-started")
+        process = subprocess.Popen(
+            ["bash", os.path.join(HERE, "safety_lifecycle.sh")], env=self.fx.env(**self.extra, STUB_HANG=hang),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, stdin=subprocess.DEVNULL)
+        self.addCleanup(process.kill)
+        deadline = time.time() + 60
+        while not os.path.exists(hang) and time.time() < deadline:
+            time.sleep(0.1)
+        secret = os.path.join(self.fx.folder, "secret")
+        with open(secret, "w") as handle:
+            handle.write("someone-elses")
+        process.send_signal(signal.SIGTERM)
+        process.communicate(timeout=60)
+        with open(secret) as handle:
+            self.assertEqual(handle.read(), "someone-elses")
 
     def test_running_without_a_sandbox_is_refused(self):
         result = self.run_it("--running")

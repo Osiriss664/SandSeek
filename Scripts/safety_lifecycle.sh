@@ -9,7 +9,10 @@
 # when a sandbox, lock holder or secret already exists, because it stops and
 # restarts the sandbox and must never do that to the app's. --running says the
 # sandbox that runs now belongs to the caller (Scripts/full_test.sh passes it
-# for the one it started). The run ends with the sandbox stopped.
+# for the one it started). The run ends with the sandbox stopped. Without
+# --running the sandbox the script started is also stopped on any exit
+# (including INT and TERM), and its throwaway secret file is removed then, but
+# only while the file still holds what the script wrote.
 #
 # In this order:
 #   1. fake sandbox  stops the sandbox, answers on its port with a program that
@@ -19,7 +22,10 @@
 #                    send no question; then the sandbox is started again.
 #                    `sandseek --server-type llamacpp` checks the sandbox
 #                    before it contacts a model server, so no model server is
-#                    needed. SKIP when the command is not built.
+#                    needed. SKIP when the command is not built. FAIL, never
+#                    PASS, when the fake could not take the port, the throwaway
+#                    secret could not be written, or the fake's log shows no
+#                    GET /health from the command.
 #   2. second starter  a second `start` while one runs is refused with the busy
 #                    message and leaves the first alone.
 #   3. crash         `kill -9` on the lock holder (identified by its command
@@ -31,7 +37,8 @@
 #
 # Environment (all optional):
 #   SKIP_FAKE_SANDBOX=1      skip part 1
-#   SKIP_LIFECYCLE=1         skip parts 2 to 4 (the sandbox is then left running)
+#   SKIP_LIFECYCLE=1         skip parts 2 to 4 (without --running the sandbox the
+#                            script started is still stopped when it ends)
 #   SAFETY_SANDSEEK_BIN      the sandseek command (default .build/debug/sandseek,
 #                            else .build/release/sandseek, in the checkout)
 #   SAFETY_SANDBOX_SCRIPT    the start/stop script (default Scripts/research_sandbox.sh)
@@ -84,9 +91,15 @@ fi
 
 work="$(mktemp -d "${TMPDIR:-/tmp}/sandseek-lifecycle.XXXXXX")" || exit 2
 fake_pid=""
+throwaway_hash=""        # set once the throwaway secret file is written (a hash, not the secret)
+sandbox_started=0        # 1 while a sandbox this script started may be running
 finish() {
-  trap - EXIT
-  if [ -n "$fake_pid" ]; then kill "$fake_pid" 2>/dev/null; wait "$fake_pid" 2>/dev/null; fi
+  trap - EXIT INT TERM
+  stop_fake
+  remove_throwaway
+  if [ "$running_given" = 0 ] && [ "$sandbox_started" = 1 ]; then
+    sandbox 180 stop >/dev/null 2>&1 </dev/null
+  fi
   rm -rf "$work"
 }
 trap finish EXIT
@@ -112,8 +125,18 @@ except subprocess.TimeoutExpired:
 
 sandbox() { limited "$1" /bin/bash "$sandbox_sh" "${@:2}"; }   # sandbox SECONDS ARGS...
 
-sandseek_vms() { limited 60 "$CONTAINER" list --all --quiet 2>/dev/null | grep '^sandseek' || true; }
-vm_count() { sandseek_vms | grep -c . || true; }
+# A failed `container list` is a failure here (non-zero, nothing printed), never an empty list.
+sandseek_vms() {
+  local listing
+  listing="$(limited 60 "$CONTAINER" list --all --quiet 2>/dev/null </dev/null)" || return 1
+  printf '%s\n' "$listing" | grep '^sandseek' || true
+}
+# Prints the number of sandseek VMs; prints ? and fails when the list failed.
+vm_count() {
+  local vms
+  vms="$(sandseek_vms)" || { printf '?'; return 1; }
+  printf '%s\n' "$vms" | grep -c . || true
+}
 recorded_name() { head -c 64 "$secret_folder/vm-name" 2>/dev/null | tr -d '\n'; }
 recorded_port() { head -c 16 "$secret_folder/port" 2>/dev/null | tr -d '\n'; }
 holder_pid() { local pid _rest; read -r pid _rest <"$secret_folder/lock" 2>/dev/null || true; printf '%s' "${pid:-}"; }
@@ -130,10 +153,47 @@ import socket, sys
 s = socket.socket(); s.settimeout(2)
 sys.exit(0 if s.connect_ex(("127.0.0.1", int(sys.argv[1]))) == 0 else 1)' "$1" 2>/dev/null; }
 
+# Stops the fake, with a time limit: SIGTERM, then kill -9 after 5 s.
+stop_fake() {
+  [ -n "$fake_pid" ] || return 0
+  local waited=0
+  kill "$fake_pid" 2>/dev/null
+  while alive "$fake_pid" && [ "$waited" -lt 50 ]; do sleep 0.1; waited=$((waited + 1)); done
+  if alive "$fake_pid"; then kill -9 "$fake_pid" 2>/dev/null; fi
+  wait "$fake_pid" 2>/dev/null
+  fake_pid=""
+}
+
+# Writes a throwaway secret file with O_EXCL (never over an existing file) and
+# prints a hash of it, not the secret. Fails when the file exists already.
+write_throwaway() {
+  "$PY" -c '
+import hashlib, os, sys
+descriptor = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+data = os.urandom(32).hex().encode()
+with os.fdopen(descriptor, "wb") as handle:
+    handle.write(data)
+print(hashlib.sha256(data).hexdigest())' "$secret_file" 2>"$work/throwaway.err"
+}
+# Removes the secret file only when it still holds what write_throwaway wrote.
+remove_throwaway() {
+  [ -n "$throwaway_hash" ] || return 0
+  "$PY" -c '
+import hashlib, os, sys
+try:
+    data = open(sys.argv[1], "rb").read()
+except OSError:
+    sys.exit(0)
+if hashlib.sha256(data).hexdigest() == sys.argv[2]:
+    os.unlink(sys.argv[1])' "$secret_file" "$throwaway_hash" 2>/dev/null
+  throwaway_hash=""
+}
+
 # Starts the sandbox; prints nothing on success. A failure is reported with the
 # start script's last lines.
 start_sandbox() { # LABEL
   local out rc
+  sandbox_started=1      # even a failed start may leave a VM behind
   out="$(sandbox 300 start 2>&1)"; rc=$?
   if [ "$rc" -ne 0 ]; then
     fail "$1: start failed with exit code $rc: $(cut_ "$(printf '%s' "$out" | tail -n 3 | tr '\n' ' ')")"
@@ -160,7 +220,11 @@ if [ "$running_given" = 1 ]; then
     exit 2
   fi
 else
-  if [ -n "$(state_files_left)" ] || [ "$(vm_count)" != 0 ] || [ "$(holders_running)" != 0 ]; then
+  if ! initial_count="$(vm_count)"; then
+    echo "could not list the VMs (container list failed), so it is not known whether a sandbox exists; not starting one" >&2
+    exit 2
+  fi
+  if [ -n "$(state_files_left)" ] || [ "$initial_count" != 0 ] || [ "$(holders_running)" != 0 ]; then
     echo "a sandbox, lock holder or secret exists already (the app's?). This test stops and restarts the sandbox, so it does not run on one it did not start. Stop it first (Scripts/research_sandbox.sh stop), or pass --running if it is yours." >&2
     exit 2
   fi
@@ -187,25 +251,36 @@ else
   elif ! sandbox 180 stop >"$work/stop.out" 2>&1; then
     fail "fake sandbox: stopping the sandbox failed: $(cut_ "$(tail -n 2 "$work/stop.out" | tr '\n' ' ')")"
   else
+    sandbox_started=0
     pass "the sandbox was stopped through its script; the fake takes its port $fake_port"
     # A secret of its own for this test: `stop` deleted the real one, and
     # without a secret file the command stops before it asks anything. The fake
-    # does not know it, as a program that took over the port would not.
-    "$PY" -c '
-import os, sys
-path = sys.argv[1]
-temporary = path + ".fake"
-descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-with os.fdopen(descriptor, "w") as handle:
-    handle.write(os.urandom(32).hex())
-os.rename(temporary, path)' "$secret_file" 2>/dev/null || fail "fake sandbox: could not write a test secret file"
+    # does not know it, as a program that took over the port would not. It is
+    # created with O_EXCL, so a real secret is never overwritten; when that
+    # fails the command's "no secret" error would look like a refusal, so the
+    # checks do not run.
+    fake_ready=1
+    if throwaway_hash="$(write_throwaway)" && [ -n "$throwaway_hash" ]; then
+      :
+    else
+      throwaway_hash=""
+      fake_ready=0
+      fail "fake sandbox: could not write the throwaway secret file (it exists already or the folder is not writable: $(cut_ "$(tr '\n' ' ' <"$work/throwaway.err")")); the checks that need it did not run"
+    fi
+    if [ "$fake_ready" = 1 ] && port_open "$fake_port"; then
+      fake_ready=0
+      fail "fake sandbox: port $fake_port is already in use before the fake started (a forwarder of the old sandbox?); the checks did not run"
+    fi
     for mode in unsigned wrongkey; do
+      [ "$fake_ready" = 1 ] || break
       : >"$work/fake.log"
       "$PY" "$here/safety_fake_sandbox.py" "$fake_port" "$mode" "$work/fake.log" </dev/null >"$work/fake.out" 2>&1 &
       fake_pid=$!
       waited=0
       while ! port_open "$fake_port" && alive "$fake_pid" && [ "$waited" -lt 50 ]; do sleep 0.2; waited=$((waited + 1)); done
-      if ! port_open "$fake_port"; then
+      if ! alive "$fake_pid"; then
+        fail "fake sandbox ($mode): the fake could not start or bind port $fake_port: $(cut_ "$(tail -n 2 "$work/fake.out" | tr '\n' ' ')")"
+      elif ! port_open "$fake_port"; then
         fail "fake sandbox ($mode): the fake did not start: $(cut_ "$(tail -n 2 "$work/fake.out" | tr '\n' ' ')")"
       else
         limited 120 "$sandseek_bin" --server-type llamacpp --server http://127.0.0.1:1 \
@@ -219,22 +294,24 @@ os.rename(temporary, path)' "$secret_file" 2>/dev/null || fail "fake sandbox: co
           fail "fake sandbox ($mode): text of the fake reached the output"
         elif grep -qiE 'fatal error|traceback|swift runtime|illegal instruction|segmentation' "$work/cli.err" || [ "$rc" -gt 2 ]; then
           fail "fake sandbox ($mode): the command crashed (exit code $rc) instead of refusing: $(cut_ "$errors")"
+        elif ! grep -q '^GET /health' "$work/fake.log"; then
+          fail "fake sandbox ($mode): the command never reached the fake (no GET /health in its log), so its refusal proves nothing (exit code $rc): $(cut_ "$errors")"
         elif ! grep -q '^error:' "$work/cli.err"; then
           fail "fake sandbox ($mode): no plain error message (exit code $rc): $(cut_ "$errors")"
         elif grep -q '^POST' "$work/fake.log"; then
           fail "fake sandbox ($mode): the command sent a request to the fake before it was sure of it: $(tr '\n' ';' <"$work/fake.log")"
         else
-          pass "fake sandbox ($mode): refused (exit code $rc), no answer, no question sent; said: $(cut_ "$(grep '^error:' "$work/cli.err" | head -n 1)")"
+          pass "fake sandbox ($mode): reached the fake (GET /health), refused (exit code $rc), no answer, no question sent; said: $(cut_ "$(grep '^error:' "$work/cli.err" | head -n 1)")"
         fi
       fi
-      kill "$fake_pid" 2>/dev/null; wait "$fake_pid" 2>/dev/null; fake_pid=""
+      stop_fake
     done
-    rm -f "$secret_file" "$secret_file.fake"
+    remove_throwaway
     note "the sandseek command has no separate health-check option; the app's own check (a fake sandbox while the app is open) stays a click part, see docs/SAFETY_TEST.md"
     note "the command's run needs no model server here: with --server-type llamacpp it checks the sandbox first"
     if start_sandbox "restart after the fake"; then
       n="$(vm_count)"
-      if [ "$n" = 1 ]; then pass "the sandbox started again with exactly one VM ($(recorded_name))"; else fail "after the restart $n sandseek VMs exist (1 expected)"; fi
+      if [ "$n" = 1 ]; then pass "the sandbox started again with exactly one VM ($(recorded_name))"; else fail "after the restart the VM count is $n (1 expected; ? means container list failed)"; fi
     else
       skip "second starter, crash and stop: the sandbox did not come back"
       SKIP_LIFECYCLE=1
@@ -250,7 +327,7 @@ else
   head_ "a second starter"
   name_before="$(recorded_name)"; holder_before="$(holder_pid)"
   if [ -z "$name_before" ] || ! sandseek_vms | grep -qxF "$name_before"; then
-    fail "second starter: no sandbox runs to start a second one against"
+    fail "second starter: no sandbox runs to start a second one against (or the VM list failed)"
   else
     out="$(sandbox 120 start 2>&1)"; rc=$?
     if [ "$rc" = 75 ] && [[ "$out" == *"Another SandSeek is using the web sandbox"* ]]; then
@@ -280,15 +357,21 @@ else
     if alive "$old_holder"; then
       fail "crash: the lock holder $old_holder survived kill -9"
     else
-      if sandseek_vms | grep -qxF "$old_name"; then
+      if ! vms_after_crash="$(sandseek_vms)"; then
+        note "after the crash the VM list could not be read"
+      elif printf '%s\n' "$vms_after_crash" | grep -qxF "$old_name"; then
         note "after the crash the VM $old_name is still there, as a crash leaves it"
       else
         note "after the crash the VM $old_name was already gone"
       fi
       if start_sandbox "start after the crash"; then
         new_name="$(recorded_name)"; new_holder="$(holder_pid)"
-        [ "$(vm_count)" = 1 ] && pass "after the crash the next start came up with exactly one VM" || fail "after the crash $(vm_count) sandseek VMs exist: $(sandseek_vms | tr '\n' ' ')"
-        if [ -n "$new_name" ] && [ "$new_name" != "$old_name" ] && ! sandseek_vms | grep -qxF "$old_name"; then
+        if vms_now="$(sandseek_vms)" && [ "$(printf '%s\n' "$vms_now" | grep -c .)" = 1 ]; then
+          pass "after the crash the next start came up with exactly one VM"
+        else
+          fail "after the crash the VM list failed or does not hold exactly one VM: $(printf '%s' "${vms_now:-}" | tr '\n' ' ')"
+        fi
+        if [ -n "$new_name" ] && [ "$new_name" != "$old_name" ] && vms_now="$(sandseek_vms)" && ! printf '%s\n' "$vms_now" | grep -qxF "$old_name"; then
           pass "the VM the crash left ($old_name) was removed; the new one is $new_name"
         else
           fail "the VM the crash left ($old_name) is still there, or the name did not change (now $new_name)"
@@ -313,9 +396,15 @@ else
   head_ "stop"
   old_port="$(recorded_port)"; old_holder="$(holder_pid)"
   out="$(sandbox 180 stop 2>&1)"; rc=$?
-  if [ "$rc" = 0 ]; then pass "stop finished (exit code 0)"; else fail "stop gave exit code $rc: $(cut_ "$(printf '%s' "$out" | tail -n 2 | tr '\n' ' ')")"; fi
+  if [ "$rc" = 0 ]; then pass "stop finished (exit code 0)"; sandbox_started=0; else fail "stop gave exit code $rc: $(cut_ "$(printf '%s' "$out" | tail -n 2 | tr '\n' ' ')")"; fi
   n="$(vm_count)"
-  [ "$n" = 0 ] && pass "zero sandseek VMs remain" || fail "$n sandseek VM(s) remain: $(sandseek_vms | tr '\n' ' ')"
+  if [ "$n" = 0 ]; then
+    pass "zero sandseek VMs remain"
+  elif [ "$n" = "?" ]; then
+    fail "the VM list could not be read (container list failed), so it is not known whether VMs remain"
+  else
+    fail "$n sandseek VM(s) remain: $(sandseek_vms | tr '\n' ' ')"
+  fi
   left="$(state_files_left)"
   [ -z "$left" ] && pass "no secret, port, vm-name or blocked-addresses file remains" || fail "files remain after stop: $left"
   if [ "$(holders_running)" = 0 ] && ! alive "$old_holder"; then

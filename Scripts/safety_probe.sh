@@ -18,6 +18,9 @@
 #                           reaches it is reported as incomplete, not as a pass)
 #   SAFETY_SECRET_FOLDER    the folder with secret, port and vm-name
 #                           (default ~/Library/Application Support/SandSeek/sandbox)
+#   SAFETY_LSOF, SAFETY_IFCONFIG  other programs in place of /usr/sbin/lsof and
+#                           /sbin/ifconfig (for the tests; the real ones are used by
+#                           absolute path and are never looked up on PATH)
 #   SAFETY_CONTAINER        the container program (default /usr/local/bin/container
 #                           when it exists, else `container` on PATH)
 #   SAFETY_ROOT_ALLOW       an extended regular expression matched against the command line of
@@ -64,7 +67,9 @@ CONTAINER="${SAFETY_CONTAINER:-}"
 if [ -z "$CONTAINER" ]; then
   if [ -x /usr/local/bin/container ]; then CONTAINER=/usr/local/bin/container; else CONTAINER=container; fi
 fi
-for tool in "$CONTAINER" "$PY" curl lsof ifconfig awk sort stat ps; do
+lsof_bin="${SAFETY_LSOF:-/usr/sbin/lsof}"
+ifconfig_bin="${SAFETY_IFCONFIG:-/sbin/ifconfig}"
+for tool in "$CONTAINER" "$PY" "$lsof_bin" "$ifconfig_bin" curl awk sort stat ps; do
   command -v "$tool" >/dev/null 2>&1 || { echo "needs $tool" >&2; exit 99; }
 done
 
@@ -120,7 +125,7 @@ relay() {
 # Every IPv4 and IPv6 address of the Mac that is up, lower case, zone ids
 # removed, one per line, as the launcher collects them.
 mac_addresses() {
-  ifconfig 2>/dev/null | LC_ALL=C awk '
+  "$ifconfig_bin" 2>/dev/null | LC_ALL=C awk '
     NF >= 2 && ($1 == "inet" || $1 == "inet6") { a = $2; sub(/%.*/, "", a); print tolower(a) }' | sort -u
 }
 
@@ -249,7 +254,7 @@ else
   fail "$vm_count sandseek VMs exist ($(printf '%s' "$sandseek_vms" | tr '\n' ' ')); exactly one, $name, is expected"
 fi
 
-listing="$(limited 60 lsof -nP -iTCP:"$port" -sTCP:LISTEN -Fcn 2>/dev/null </dev/null || true)"
+listing="$(limited 60 "$lsof_bin" -nP -iTCP:"$port" -sTCP:LISTEN -Fcn 2>/dev/null </dev/null || true)"
 bound="$(printf '%s\n' "$listing" | grep '^n' | sort -u || true)"
 if [ -z "$bound" ]; then
   fail "nothing on the Mac listens on port $port"
@@ -277,12 +282,17 @@ case "$s" in
   401|403|405|501) pass "a CORS preflight is refused ($s)" ;;
   *) fail "a CORS preflight answered $s (401, 403, 405 or 501 expected)" ;;
 esac
-cors=""
+cors=""; cors_unreachable=""
 for request in "-X OPTIONS -H Origin:http://attacker.example" "-H Origin:http://attacker.example" ""; do
   # shellcheck disable=SC2086
-  cors="$cors$(curl -s --noproxy '*' -D - -o /dev/null --max-time 10 $request "$base/health" </dev/null 2>/dev/null | grep -i '^access-control-' || true)"
+  headers="$(curl -s --noproxy '*' -D - -o /dev/null --max-time 10 $request "$base/health" </dev/null 2>/dev/null)"
+  curl_rc=$?
+  if [ "$curl_rc" != 0 ]; then cors_unreachable="$cors_unreachable [curl exit code $curl_rc]"; continue; fi
+  cors="$cors$(printf '%s\n' "$headers" | grep -i '^access-control-' || true)"
 done
-if [ -z "$cors" ]; then
+if [ -n "$cors_unreachable" ]; then
+  fail "CORS headers: curl could not get an answer from $base/health:$cors_unreachable; nothing was checked"
+elif [ -z "$cors" ]; then
   pass "no CORS header (Access-Control-*) is ever sent"
 else
   fail "a CORS header is sent: $(cut_ "$cors")"
@@ -378,13 +388,23 @@ if [ "$dns_servers" = "$resolvers" ] && [ -z "$stray_dns" ] && [ "$dns_rule_coun
 else
   fail "the DNS exception does not match resolv.conf: rules for [$dns_servers] ($dns_rule_count rules), resolv.conf names [$resolvers]${stray_dns:+; other port-53 accept: $(cut_ "$stray_dns")}"
 fi
-# No other accept rule: loopback, replies, the DNS rules above, public IPv4 and global IPv6.
-extra="$(printf '%s\n' "$normalised_output" | grep 'accept' \
-  | grep -vE '^oifname "lo" accept$|^ct state [^ ]+ accept$|^accept$|^ip6 daddr 2000::/3 accept$|^ip6? daddr [^ ]+ (udp|tcp) dport 53 accept$' || true)"
-if [ -z "$extra" ]; then
-  pass "no accept rule besides loopback, replies, DNS to the name servers, public IPv4 and global IPv6"
-else
+# No other accept rule: loopback, replies, the DNS rules above, public IPv4 and
+# global IPv6. The one IPv4 accept is `meta nfproto ipv4 accept` (nft 1.0.9; `meta
+# nfproto 2 accept` in numeric form) and it must come after the private4 reject,
+# or the private ranges would be accepted before they are refused.
+rule_lines="$(printf '%s\n' "$output_rules" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+v4_accept_line="$(printf '%s\n' "$rule_lines" | grep -nE '^meta nfproto (ipv4|2) accept$' | cut -d: -f1 | tr '\n' ' ' | sed 's/ $//')"
+private4_reject_line="$(printf '%s\n' "$rule_lines" | grep -n 'daddr @private4' | grep reject | cut -d: -f1 | tail -n 1)"
+extra="$(printf '%s\n' "$rule_lines" | grep -vE '^meta nfproto (ipv4|2) accept$' | sed -E 's/^meta nfproto (ipv4|2) //; s/^meta nfproto (ipv6|10) //' | grep 'accept' \
+  | grep -vE '^oifname "lo" accept$|^ct state [^ ]+ accept$|^ip6 daddr 2000::/3 accept$|^ip6? daddr [^ ]+ (udp|tcp) dport 53 accept$' || true)"
+if [ -n "$extra" ]; then
   fail "unexpected accept rule(s): $(cut_ "$(printf '%s' "$extra" | tr '\n' ';')") (only expected with SEARXNG_URL set)"
+elif [ -z "$v4_accept_line" ] || [ "${v4_accept_line#* }" != "$v4_accept_line" ]; then
+  fail "output: expected exactly one 'meta nfproto ipv4 accept' rule, found at line(s): ${v4_accept_line:-none}"
+elif [ -z "$private4_reject_line" ] || [ "$v4_accept_line" -lt "$private4_reject_line" ]; then
+  fail "output: the IPv4 accept (line $v4_accept_line) does not come after the private4 reject (line ${private4_reject_line:-none})"
+else
+  pass "no accept rule besides loopback, replies, DNS to the name servers, public IPv4 (after the private4 reject) and global IPv6"
 fi
 
 # --- blocked sets against the Mac now --------------------------------------------------------
@@ -427,11 +447,19 @@ sys.exit(0 if a not in ipaddress.ip_network("2000::/3") else 1)' "$address" 2>/d
     fail "Mac addresses in neither blocked set nor a refused range:$absent. If the Mac gained them after the sandbox started (a rotated temporary IPv6 address, a VPN), this is the documented limit (docs/SECURITY.md): stop and start the sandbox and run the probe again. A FAIL that stays is real"
   fi
 fi
-v6="$(py_root "$ipv6_py" || true)"
-if [ -n "$v6" ]; then
-  note "the VM has a global IPv6 address ($(printf '%s' "$v6" | tr '\n' ';')): a LAN host with a global IPv6 address is reachable (documented limit)"
+v6="$(py_root "$ipv6_py")"; v6_rc=$?
+if [ "$v6_rc" != 0 ]; then
+  fail "could not read the VM's IPv6 addresses (exec exit code $v6_rc); nothing was checked"
 else
-  pass "the VM has no global IPv6 address"
+  # fc00::/7 (unique local) is not global, whatever the kernel's scope says.
+  v6_global="$(printf '%s\n' "$v6" | grep -viE '^f[cd][0-9a-f]{2}:' | grep . || true)"
+  v6_ula="$(printf '%s\n' "$v6" | grep -iE '^f[cd][0-9a-f]{2}:' || true)"
+  [ -z "$v6_ula" ] || note "the VM has a unique-local IPv6 address (fc00::/7, not global): $(printf '%s' "$v6_ula" | tr '\n' ';')"
+  if [ -n "$v6_global" ]; then
+    note "the VM has a global IPv6 address ($(printf '%s' "$v6_global" | tr '\n' ';')): a LAN host with a global IPv6 address is reachable (documented limit)"
+  else
+    pass "the VM has no global IPv6 address"
+  fi
 fi
 
 # --- reachability, as the server's user ------------------------------------------------------
@@ -525,7 +553,7 @@ case "$p" in
   "10001 none 1") pass "server.py runs as user 10001 with no capabilities and NoNewPrivs 1" ;;
   *) fail "server.py user, capabilities and NoNewPrivs: '${p:-not found}' (10001 none 1 expected)" ;;
 esac
-procs="$(py_root "$processes_py" || true)"
+procs="$(py_root "$processes_py")"; procs_rc=$?
 note "processes in the VM (pid uid command): $(printf '%s' "$procs" | tr '\n' ';' | cut -c1-400)"
 roots="$(printf '%s\n' "$procs" | awk '$2 == "0"' || true)"
 if [ -n "${SAFETY_ROOT_ALLOW:-}" ]; then
@@ -534,7 +562,9 @@ if [ -n "${SAFETY_ROOT_ALLOW:-}" ]; then
     printf '%s\n' "${line#* * }" | grep -qE "$SAFETY_ROOT_ALLOW" || printf '%s\n' "$line"
   done)"
 fi
-if [ -z "$roots" ]; then
+if [ "$procs_rc" != 0 ] || ! printf '%s\n' "$procs" | grep -qF '/app/server.py'; then
+  fail "root processes: the process listing of the VM is empty or does not contain /app/server.py (exec exit code $procs_rc), so nothing was checked"
+elif [ -z "$roots" ]; then
   pass "no root process runs in the VM besides what the image needs"
 else
   fail "root process(es) in the VM: $(cut_ "$(printf '%s' "$roots" | tr '\n' ';')")"
@@ -548,16 +578,24 @@ else
   fail "nft as the server's user gave an unclear answer: $(cut_ "$out")"
 fi
 out="$(as_user sh -c 'unshare -Urn sh -c "nft flush ruleset" 2>&1; echo "exit=$?"' 2>&1 || true)"
-if in_vm nft list table inet $table >/dev/null 2>&1; then
-  pass "the firewall table is still in place after a user-namespace flush attempt ($(cut_ "$(printf '%s' "$out" | tail -n 1)"))"
+unshare_rc="$(printf '%s\n' "$out" | tail -n 1 | sed -n 's/^exit=\([0-9]*\)$/\1/p')"
+if [ -z "$unshare_rc" ]; then
+  fail "the user-namespace flush attempt did not run (no exit code): $(cut_ "$out")"
+elif [ "$unshare_rc" = 126 ] || [ "$unshare_rc" = 127 ]; then
+  skip "the user-namespace flush attempt: unshare is not available in the VM (exit code $unshare_rc), so nothing was tried"
+elif in_vm nft list table inet $table >/dev/null 2>&1; then
+  pass "the firewall table is still in place after a user-namespace flush attempt (exit code $unshare_rc)"
 else
   fail "the firewall table is GONE after a user-namespace flush attempt as the server's user"
 fi
-if as_user sh -c 'echo x > /app/probe-write' >/dev/null 2>&1; then
+# Control first: the same user can write to /tmp, so a refusal under /app means something.
+if ! as_user sh -c 'echo x > /tmp/probe-write-control && rm -f /tmp/probe-write-control' >/dev/null 2>&1; then
+  fail "control: the server's user cannot write to /tmp either, so the /app write check would prove nothing"
+elif as_user sh -c 'echo x > /app/probe-write' >/dev/null 2>&1; then
   fail "the server's user can write under /app"
   in_vm rm -f /app/probe-write >/dev/null 2>&1 || true
 else
-  pass "the server's user cannot write under /app"
+  pass "the server's user cannot write under /app (control: /tmp is writable)"
 fi
 if as_user sh -c 'test -r /run/sandseek-sandbox/secret' >/dev/null 2>&1; then
   note "the secret is readable by the server's user inside the VM (documented: it protects against other programs on the Mac, not against code taken over in the VM)"

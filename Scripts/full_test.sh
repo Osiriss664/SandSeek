@@ -67,7 +67,7 @@
 #                    docs/SAFETY_TEST.md
 #   --injection-base-url URL
 #                    public URL of Sandbox/fixtures/injection for step 7
-#   --time-limit M   limit of the whole run in minutes (default 60); when it is
+#   --time-limit M   limit of the whole run in minutes (default 60, 120 with --safety); when it is
 #                    reached the cleanup runs and the run fails (exit 124)
 #
 # Expected run time on an M-series Mac: debug build 1 to 5 min, swift test 1 to
@@ -98,6 +98,7 @@ api_key_file="${SANDSEEK_API_KEY_FILE:-}"
 model_name="${SANDSEEK_FULL_TEST_MODEL:-}"
 take_over=0 start_server="" models_folder="" injection_base="${FT_INJECTION_BASE_URL:-}"
 time_limit_minutes=60
+time_limit_given=0
 safety=0
 
 usage() { sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//' | head -n 80; }
@@ -114,7 +115,7 @@ while [[ $# -gt 0 ]]; do
     --start-server) start_server="${2:?--start-server needs a path}"; shift ;;
     --models) models_folder="${2:?--models needs a folder}"; shift ;;
     --injection-base-url) injection_base="${2:?needs a URL}"; shift ;;
-    --time-limit) time_limit_minutes="${2:?--time-limit needs minutes}"; shift ;;
+    --time-limit) time_limit_minutes="${2:?--time-limit needs minutes}"; time_limit_given=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
   esac
@@ -128,6 +129,7 @@ if [[ -n "$model_name" && ( "$model_name" == -* || "$model_name" == *[[:cntrl:]]
   echo "--model needs a model name, not an option or control characters" >&2; exit 2
 fi
 [[ "$time_limit_minutes" =~ ^[0-9]+$ ]] || { echo "--time-limit must be a number of minutes" >&2; exit 2; }
+[[ $safety -eq 1 && $time_limit_given -eq 0 ]] && time_limit_minutes=120
 total_limit="${FULL_TEST_TIME_LIMIT_SECONDS:-$((time_limit_minutes * 60))}"
 
 SWIFT="${FT_SWIFT:-swift}"
