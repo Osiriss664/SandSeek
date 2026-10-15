@@ -7,8 +7,10 @@
   Not yet tested on a Mac. You start Ollama yourself; SandSeek never starts or
   stops it. The model must support tool calls and run on this Mac: Ollama cloud
   models are refused. The context is 32,768 tokens (or the model's maximum if
-  smaller); `--context-tokens N` changes it. The exposure check advises
-  `OLLAMA_HOST=127.0.0.1:11434`.
+  smaller; `--context-tokens N` changes it, up to the model's maximum). With
+  Ollama, `think` is sent only to models that can think, and then always as
+  true or false. `--server-type ollama` defaults to port 11434. The exposure
+  check advises `OLLAMA_HOST=127.0.0.1:11434`.
 - `Scripts/full_test.sh` takes `--server-type tuff|llamacpp|ollama|auto`.
 
 ## 0.2.0 (15 October 2026)

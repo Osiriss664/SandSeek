@@ -192,6 +192,9 @@ class Fixture:
             "SANDSEEK_FULL_TEST_MODEL": "",
             "SANDSEEK_SANDBOX_PORT": "49321",
             "SANDSEEK_MODEL_SERVER": "http://127.0.0.1:1",
+            # Nothing that runs on the test machine may count: the address
+            # where the script looks for Ollama is a port nobody listens on.
+            "FT_OLLAMA_URL": "http://127.0.0.1:1",
             "FT_SERVER_WAIT": "20",
         }
         env.update(extra)
@@ -251,12 +254,16 @@ class ModelListHandler(BaseHTTPRequestHandler):
 
 
 class OllamaHandler(BaseHTTPRequestHandler):
-    """A server that answers like Ollama: /api/version only."""
+    """A server that answers like Ollama: /api/version, and /api/ps with the
+    models in `loaded` (none by default)."""
+    loaded = []
+
     def do_GET(self):
-        ok = self.path == "/api/version"
+        bodies = {"/api/version": {"version": "0.0.0"}, "/api/ps": {"models": self.loaded}}
+        ok = self.path in bodies
         self.send_response(200 if ok else 404)
         self.end_headers()
-        self.wfile.write(b'{"version":"0.0.0"}' if ok else b"{}")
+        self.wfile.write(json.dumps(bodies.get(self.path, {})).encode())
 
     def log_message(self, *args):
         pass
@@ -648,8 +655,9 @@ class ModelServer(FullTestCase):
 
 
 class OllamaServer(FullTestCase):
-    def serve_ollama(self):
-        server = HTTPServer(("127.0.0.1", 0), OllamaHandler)
+    def serve_ollama(self, loaded=()):
+        handler = type("H", (OllamaHandler,), {"loaded": list(loaded)})
+        server = HTTPServer(("127.0.0.1", 0), handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
@@ -674,12 +682,42 @@ class OllamaServer(FullTestCase):
                 self.fx.run("--server", self.serve_ollama(), "--server-type", kind)
                 self.assertIn(f"--server-type {kind}", self.fx.calls().replace("\n", " "))
 
-    def test_ollama_default_address_is_port_11434(self):
+    def test_ollama_default_address_is_the_ollama_address(self):
         process = self.fx.run("--server-type", "ollama", "--model", "qwen3:8b",
-                              SANDSEEK_MODEL_SERVER="")
+                              SANDSEEK_MODEL_SERVER="", FT_OLLAMA_URL="http://127.0.0.1:2")
         _, steps, _ = self.fx.results(process)
         self.assertEqual(steps["6.1"]["result"], "SKIP")
-        self.assertIn("http://127.0.0.1:11434", steps["6.1"]["note"])
+        self.assertIn("http://127.0.0.1:2", steps["6.1"]["note"])
+
+    def test_the_built_in_ollama_address_is_port_11434(self):
+        with open(os.path.join(os.path.dirname(__file__), "full_test.sh")) as handle:
+            self.assertIn("${FT_OLLAMA_URL:-http://127.0.0.1:11434}", handle.read())
+
+    def test_a_running_ollama_with_no_loaded_model_does_not_block_start_server(self):
+        process = self.fx.run("--start-server", f"{self.fx.repo}/server/TUFFServer",
+                              FT_OLLAMA_URL=self.serve_ollama())
+        _, steps, _ = self.fx.results(process)
+        self.assertEqual(steps["6.0"]["result"], "PASS", process.stdout)
+
+    def test_an_ollama_with_a_loaded_model_blocks_start_server(self):
+        process = self.fx.run("--start-server", f"{self.fx.repo}/server/TUFFServer",
+                              FT_OLLAMA_URL=self.serve_ollama(loaded=[{"name": "qwen3:8b"}]))
+        _, steps, _ = self.fx.results(process)
+        self.assertEqual(steps["6.0"]["result"], "FAIL")
+        self.assertIn("already answers", steps["6.0"]["note"])
+        self.assertIn("loaded", steps["6.0"]["note"])
+
+    def test_a_key_file_from_the_environment_is_ignored_with_a_note(self):
+        key = os.path.join(self.fx.root, "key")
+        write(key, "secret-key\n")
+        process = self.fx.run("--server", self.serve_ollama(), "--server-type", "ollama",
+                              "--model", "qwen3:8b", SANDSEEK_API_KEY_FILE=key)
+        report, steps, directory = self.fx.results(process)
+        self.assertEqual(steps["6.1"]["result"], "PASS", process.stdout)
+        self.assertNotIn("--api-key-file", self.fx.calls())
+        self.assertTrue(any("SANDSEEK_API_KEY_FILE is ignored" in n for n in report["notes"]))
+        with open(os.path.join(directory, "report.md")) as handle:
+            self.assertIn("SANDSEEK_API_KEY_FILE is ignored", handle.read())
 
     def test_an_explicit_server_wins_over_the_ollama_default(self):
         process = self.fx.run("--server-type", "ollama", "--model", "qwen3:8b",
@@ -902,6 +940,15 @@ class Usage(FullTestCase):
                               "--start-server", f"{self.fx.repo}/server/TUFFServer")
         self.assertEqual(process.returncode, 2)
         self.assertIn("TUFFServer only", process.stderr)
+        self.assertNotIn("FULL_TEST_REPORT", process.stdout)
+
+    def test_an_explicit_key_file_with_ollama_is_a_usage_error(self):
+        key = os.path.join(self.fx.root, "key")
+        write(key, "secret-key\n")
+        process = self.fx.run("--server-type", "ollama", "--model", "qwen3:8b",
+                              "--api-key-file", key)
+        self.assertEqual(process.returncode, 2)
+        self.assertIn("--api-key-file", process.stderr)
         self.assertNotIn("FULL_TEST_REPORT", process.stdout)
 
     def test_ollama_needs_a_model(self):

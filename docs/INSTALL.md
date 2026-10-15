@@ -138,7 +138,8 @@ not been tested on a Mac yet.
 1. Install Ollama. Two ways, which differ in updates: the app from
    ollama.com updates itself; `brew install ollama` does **not** update itself,
    so run `brew upgrade ollama` now and then.
-2. Start it yourself: `ollama serve` (the app starts it for you). To make sure
+2. Start it yourself: the Ollama menu-bar app starts the server by itself;
+   with Homebrew run `ollama serve`. To make sure
    it listens on this Mac only, start it as
    `OLLAMA_HOST=127.0.0.1:11434 ollama serve`. SandSeek never starts or stops
    Ollama; the **Start server** button is not offered for it.
@@ -148,7 +149,8 @@ not been tested on a Mac yet.
    forwards to ollama.com) are refused too: SandSeek keeps your question on
    this Mac.
 4. Choose **Ollama** on the model server card, or use the command line:
-   `sandseek "question" --server-type ollama --model qwen3:8b`. Ollama has no
+   `sandseek "question" --server-type ollama --model qwen3:8b` (the server
+   address defaults to `http://127.0.0.1:11434` for Ollama). Ollama has no
    default model, so the model must be named.
 5. Context size: SandSeek asks Ollama for 32,768 tokens, or the model's
    maximum if it is smaller (Ollama's own default is much smaller and would

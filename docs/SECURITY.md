@@ -491,11 +491,16 @@ does not control.
   when you are not researching.
 - **Ollama** (experimental) is used on 127.0.0.1:11434, with no key. The
   app and the command refuse Ollama cloud models (names ending in `:cloud` or
-  `-cloud`, and models whose details name a remote host), so a question and
-  the pages read for it never leave this Mac through Ollama. Start Ollama with
-  `OLLAMA_HOST=127.0.0.1:11434`; the exposure check says so when it finds
-  Ollama listening beyond loopback. Not tested on a Mac, and not measured
-  against the injection pages.
+  `-cloud`, read the way Ollama itself reads them, and models whose details
+  name a remote host), so a question and the pages read for it are not sent to
+  ollama.com by SandSeek. This is a check at the start of a run, not a lock: a
+  model that is swapped for a cloud model of the same name afterwards would not
+  be noticed. For a second lock, start Ollama with `OLLAMA_NO_CLOUD=1`, which
+  makes Ollama itself refuse remote models. Start Ollama with
+  `OLLAMA_HOST=127.0.0.1:11434` too; the exposure check says so when it finds
+  Ollama listening beyond loopback. Ollama checks the `Host` header of requests
+  that arrive on loopback, which answers DNS rebinding. Not tested on a Mac, and
+  not measured against the injection pages.
 - **llama.cpp** is used only with `--host 127.0.0.1` and `--api-key-file`. The
   key makes rebinding useless (the page does not have it). The app makes the
   key itself, keeps it in a file only you can read (mode 0600 in a folder with

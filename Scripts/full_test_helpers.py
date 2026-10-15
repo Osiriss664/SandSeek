@@ -125,6 +125,18 @@ def http_code(url):
         return "000"
 
 
+def ollama_loaded(url):
+    """True when Ollama at <url> lists a loaded model in GET /api/ps. A
+    server that does not answer, or answers something else, has none."""
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(url.rstrip("/") + "/api/ps", timeout=5) as answer:
+            data = json.loads(answer.read(1 << 20).decode("utf-8", "replace"))
+        return bool(data["models"])
+    except Exception:
+        return False
+
+
 def models_check(url, key_file=""):
     """Reads GET <url>/v1/models. Prints nothing and returns 0 when the list
     is fine or cannot be judged (no answer, no JSON, no default named).
@@ -266,13 +278,18 @@ def report(run_dir, overall, reason):
             model = mask(handle.read().strip()) or "(server default)"
     except OSError:
         model = "(server default)"
+    try:
+        with open(os.path.join(run_dir, "run-notes.txt"), encoding="utf-8") as handle:
+            notes = [mask(line.strip()) for line in handle if line.strip()]
+    except OSError:
+        notes = []
     counts = {key: sum(1 for row in rows if row["result"] == key) for key in ("PASS", "FAIL", "SKIP")}
     for row in rows:
         row["log_tail"] = tail(row["log"]) if row["result"] == "FAIL" and row["log"] else ""
     total = sum(row["seconds"] for row in rows)
     lines = [f"# SandSeek full test: {overall}", "",
              f"Run folder: `{run_dir}`", "",
-             f"Model: {model}", "",
+             f"Model: {model}", ""] + [f"Note: {note}" for note in notes] + ([""] if notes else []) + [
              f"{counts['PASS']} passed, {counts['FAIL']} failed, {counts['SKIP']} skipped, "
              f"{total} s in steps." + (f" Stopped early: {reason}." if reason else ""), "",
              "| Step | Result | Time | Note |", "|---|---|---|---|"]
@@ -293,6 +310,7 @@ def report(run_dir, overall, reason):
     with open(os.path.join(run_dir, "report.md"), "w", encoding="utf-8") as handle:
         handle.write(text)
     data = {"overall": overall, "reason": reason, "run_folder": run_dir, "model": model,
+            "notes": notes,
             "counts": counts, "safety": safety, "seconds": total,
             "steps": [{"id": row["id"], "name": row["name"], "result": row["result"],
                        "seconds": row["seconds"], "note": row["note"],
@@ -332,6 +350,8 @@ def main(argv):
     if command == "http-code" and len(argv) == 3:
         print(http_code(argv[2]))
         return 0
+    if command == "ollama-loaded" and len(argv) == 3:
+        return 0 if ollama_loaded(argv[2]) else 1
     if command == "listening" and len(argv) == 3:
         return 0 if listening(argv[2]) else 1
     if command == "free-port":

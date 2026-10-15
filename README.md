@@ -153,7 +153,8 @@ and a model server SandSeek started.
   tool support); LM Studio is listed as "later". The address can be edited but
   must be on this Mac's loopback interface, with a port (not the sandbox's,
   which each start picks and records). A ready server is asked only its status route every ten seconds
-  (TUFF `/tuff/v1/status`, llama.cpp `/health`); the model list (`/v1/models`)
+  (TUFF `/tuff/v1/status`, llama.cpp `/health`, Ollama `/api/version`); the
+  model list (`/v1/models`, for Ollama `/api/tags`)
   is fetched on Check, when the status changes, and from the reload button
   beside the model picker. The type, address and Check are locked while a
   question runs. For llama.cpp the card identifies the server with `/props`

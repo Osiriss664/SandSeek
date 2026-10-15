@@ -37,7 +37,9 @@
 #                    passed to sandseek as --server-type T. Without it
 #                    sandseek decides on its own, as it always did. With
 #                    ollama, --server defaults to http://127.0.0.1:11434 and
-#                    --model is needed (Ollama has no default model).
+#                    --model is needed (Ollama has no default model), and
+#                    --api-key-file is a usage error (a key file named by
+#                    SANDSEEK_API_KEY_FILE is ignored, with a note in the report).
 #                    Ollama support is experimental. --start-server starts
 #                    TUFFServer only and is a usage error with ollama; start
 #                    Ollama yourself (`ollama serve`).
@@ -104,6 +106,10 @@ PY="${FT_PYTHON:-python3}"
 quick=0 no_sandbox=0 thorough=0
 model_server="${SANDSEEK_MODEL_SERVER:-http://127.0.0.1:8080}"
 server_given=0
+api_key_given=0
+# Where Ollama is expected when --server-type ollama has no --server (the
+# tests point this at a port nothing listens on).
+ollama_url="${FT_OLLAMA_URL:-http://127.0.0.1:11434}"
 [[ -z "${SANDSEEK_MODEL_SERVER:-}" ]] || server_given=1
 server_type=""
 api_key_file="${SANDSEEK_API_KEY_FILE:-}"
@@ -123,7 +129,7 @@ while [[ $# -gt 0 ]]; do
     --safety) safety=1 ;;
     --server) model_server="${2:?--server needs a URL}"; server_given=1; shift ;;
     --server-type) server_type="${2:?--server-type needs tuff, llamacpp, ollama or auto}"; shift ;;
-    --api-key-file) api_key_file="${2:?--api-key-file needs a path}"; shift ;;
+    --api-key-file) api_key_file="${2:?--api-key-file needs a path}"; api_key_given=1; shift ;;
     --model) model_name="${2:?--model needs a name}"; shift ;;
     --start-server) start_server="${2:?--start-server needs a path}"; shift ;;
     --models) models_folder="${2:?--models needs a folder}"; shift ;;
@@ -141,7 +147,8 @@ esac
 if [[ "$server_type" == ollama ]]; then
   [[ -z "$start_server" ]] || { echo "--start-server starts TUFFServer only; start Ollama yourself (ollama serve) and use --server-type ollama" >&2; exit 2; }
   [[ -n "$model_name" ]] || { echo "--server-type ollama needs --model NAME (Ollama has no default model)" >&2; exit 2; }
-  [[ $server_given -eq 1 ]] || model_server="http://127.0.0.1:11434"
+  [[ $server_given -eq 1 ]] || model_server="$ollama_url"
+  [[ $api_key_given -eq 0 ]] || { echo "--api-key-file cannot be used with --server-type ollama: Ollama on this Mac has no key" >&2; exit 2; }
 fi
 if [[ -n "$models_folder" ]]; then
   [[ -n "$start_server" ]] || { echo "--models needs --start-server" >&2; exit 2; }
@@ -177,6 +184,12 @@ while [[ -e "$RUN" ]]; do RUN="$ROOT/build/full-test/$stamp-$n"; n=$((n + 1)); d
 mkdir -p "$RUN/logs" || exit 2
 : > "$RUN/results.tsv"
 printf '%s\n' "${model_name:-(server default)}" > "$RUN/model.txt"
+: > "$RUN/run-notes.txt"
+if [[ "$server_type" == ollama && -n "$api_key_file" ]]; then
+  # Only the environment variable can get here (the flag was refused above).
+  printf '%s\n' "SANDSEEK_API_KEY_FILE is ignored: Ollama on this Mac takes no key" >> "$RUN/run-notes.txt"
+  api_key_file=""
+fi
 FT_NOTE_FILE="$RUN/note.txt"
 FT_MASK_FILES="$secret_file${api_key_file:+:$api_key_file}"
 export ROOT RUN PORT SWIFT CONTAINER CODESIGN CURL GIT SANDBOX_SH FT_NOTE_FILE FT_MASK_FILES \
@@ -276,12 +289,17 @@ start_model_server() { # records step 6.0
   local begin=$SECONDS port home tmp args wait_limit="${FT_SERVER_WAIT:-180}" code
   # One model at a time on a 16 GB Mac: never start a second server.
   local busy="" url
-  for url in "$model_server" "http://127.0.0.1:8080" "http://127.0.0.1:11434"; do
+  for url in "$model_server" "http://127.0.0.1:8080"; do
     if server_answers "$url"; then busy="a model server already answers at $url"; break; fi
   done
+  # A resident Ollama with no model loaded takes no memory worth speaking of:
+  # it counts as busy only when /api/ps lists a loaded model.
+  if [[ -z "$busy" ]] && "$PY" "$helpers" ollama-loaded "$ollama_url"; then
+    busy="a model server already answers at $ollama_url (Ollama has a model loaded)"
+  fi
   if [[ -z "$busy" ]]; then
     local program
-    for program in TUFFServer llama-server ollama; do
+    for program in TUFFServer llama-server; do
       if "$PGREP" -x "$program" >/dev/null 2>&1 </dev/null; then busy="a $program process is already running"; break; fi
     done
   fi
