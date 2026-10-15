@@ -732,7 +732,8 @@ public final class ResearchSandboxController {
             let result = try await runner.run(
                 executable: URL(fileURLWithPath: "/bin/bash"),
                 arguments: [script.path, "selftest"],
-                environment: environment, timeout: 300)
+                environment: environment, timeout: 300,
+                killGrace: ResearchProcessGrace.script)
             selfTest = ResearchSelfTestResult.parse(result.output, status: result.status)
         } catch {
             selfTest = ResearchSelfTestResult(
@@ -747,7 +748,7 @@ public final class ResearchSandboxController {
     public func stopWhenQuitting() {
         guard startedByApp, let script = prepareFiles(reportFailure: false)?.script else { return }
         guard Self.runAndWait("/bin/bash", [script.path, "stop"],
-                              environment: environment, timeout: 10)?.status == 0
+                              environment: environment, timeout: 20)?.status == 0
         else { return }
         // The list is read only with a tool that passed the check earlier in
         // this session (the quit path cannot wait for the check); without one
@@ -798,7 +799,8 @@ public final class ResearchSandboxController {
             return try await runner.run(
                 executable: URL(fileURLWithPath: "/bin/bash"),
                 arguments: [script.path, command],
-                environment: environment, timeout: timeout)
+                environment: environment, timeout: timeout,
+                killGrace: ResearchProcessGrace.script)
         } catch {
             state = .failed("Could not run the sandbox script: \(error.localizedDescription)")
             return nil

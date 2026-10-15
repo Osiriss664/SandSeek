@@ -91,6 +91,16 @@ class ContainerCheckTests(unittest.TestCase):
         path = self.make("tool", 0o777)
         self.assertNotEqual(bash(f'chain_is_closed "{path}"').returncode, 0)
 
+    def test_the_failing_path_is_reported(self):
+        os.chmod(self.folder, 0o777)
+        path = self.make("tool", 0o755)
+        result = bash(f'chain_is_closed "{path}" || true; echo "[$untrusted_path]"')
+        self.assertIn(f"[{self.folder}]", result.stdout)
+        os.chmod(self.folder, 0o755)
+        path = self.make("tool2", 0o777)
+        result = bash(f'chain_is_closed "{path}" || true; echo "[$untrusted_path]"')
+        self.assertIn(f"[{path}]", result.stdout)
+
     def test_a_group_writable_file_is_rejected(self):
         path = self.make("tool", 0o775)
         self.assertNotEqual(bash(f'chain_is_closed "{path}"').returncode, 0)

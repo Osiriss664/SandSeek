@@ -140,12 +140,14 @@ owned_by_root_and_closed() {
 }
 
 # Succeeds when the absolute path $1 and every folder above it, up to /, are
-# owned by root and closed to group and others.
+# owned by root and closed to group and others. If not, sets $untrusted_path
+# to the first one that is not (a global, since the caller needs it).
+untrusted_path=""
 chain_is_closed() {
   local path="$1"
-  [[ "$path" == /* ]] || return 1
+  [[ "$path" == /* ]] || { untrusted_path="$path"; return 1; }
   while :; do
-    owned_by_root_and_closed "$path" || return 1
+    owned_by_root_and_closed "$path" || { untrusted_path="$path"; return 1; }
     [[ "$path" == / ]] && return 0
     path="${path%/*}"
     [[ -n "$path" ]] || path=/
@@ -201,9 +203,16 @@ require_container() {
     exit 1
   fi
   resolved="$(resolve_path "$container_bin")" || resolved=""
-  if [[ -z "$resolved" || ! -f "$resolved" || ! -x "$resolved" ]] \
-      || ! chain_is_closed "$container_bin" || ! chain_is_closed "$resolved"; then
-    echo "$container_bin is not a program only root can change (it, or a folder above it, can be changed by you or by others), so it is not run. Reinstall Apple container with Apple's installer: https://github.com/apple/container" >&2
+  if [[ -z "$resolved" || ! -f "$resolved" || ! -x "$resolved" ]]; then
+    echo "$container_bin is not an executable file, so it is not run. Reinstall Apple container with Apple's installer: https://github.com/apple/container" >&2
+    exit 1
+  fi
+  if ! chain_is_closed "$container_bin" || ! chain_is_closed "$resolved"; then
+    if [[ "$untrusted_path" == "$container_bin" || "$untrusted_path" == "$resolved" ]]; then
+      echo "$untrusted_path can be changed by you or by others, so it is not run. Reinstall Apple container with Apple's installer: https://github.com/apple/container" >&2
+    else
+      echo "The folder $untrusted_path above $container_bin can be changed by you or by others, so it is not run. Apple's installer does not change this folder. To let SandSeek trust it, make it belong to root: sudo chown root:wheel $untrusted_path && sudo chmod 755 $untrusted_path (this affects an Intel Homebrew installed in /usr/local)." >&2
+    fi
     exit 1
   fi
   if ! /usr/bin/codesign --verify --strict -R="$container_requirement" "$resolved" >/dev/null 2>&1; then

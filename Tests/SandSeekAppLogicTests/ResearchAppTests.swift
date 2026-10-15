@@ -993,12 +993,14 @@ private final class SlowStartRunner: ResearchProcessRunning, @unchecked Sendable
     init(_ inner: FakeProcessRunner) { self.inner = inner }
 
     func run(executable: URL, arguments: [String], environment: [String: String],
-             timeout: TimeInterval) async throws -> ResearchProcessResult {
+             timeout: TimeInterval,
+             killGrace: TimeInterval) async throws -> ResearchProcessResult {
         if slowStart.value, arguments.last == "start" {
             try await Task.sleep(for: .milliseconds(400))
         }
         return try await inner.run(executable: executable, arguments: arguments,
-                                   environment: environment, timeout: timeout)
+                                   environment: environment, timeout: timeout,
+                                   killGrace: killGrace)
     }
 }
 

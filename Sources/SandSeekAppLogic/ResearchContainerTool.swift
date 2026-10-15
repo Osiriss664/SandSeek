@@ -28,13 +28,28 @@ public struct ResearchContainerVersion: Comparable, Equatable, Sendable, CustomS
     }
 }
 
+/// The file or folder that stopped the ownership check: it is not owned by
+/// root, or group or others can write to it, or (for the file) it is not an
+/// executable regular file.
+public struct ResearchUntrustedPath: Equatable, Sendable {
+    public let path: String
+    /// True for a folder above the tool, false for the tool file itself.
+    public let isFolder: Bool
+
+    public init(path: String, isFolder: Bool) {
+        self.path = path
+        self.isFolder = isFolder
+    }
+}
+
 /// Why SandSeek will not run the `container` tool, in plain words. The text
 /// is what the sandbox card shows.
 public enum ResearchContainerError: Error, Equatable, CustomStringConvertible, Sendable {
     case notInstalled
     /// Installed, but the file or a folder above it could be changed by the
-    /// user, their group or anyone else but root.
-    case notTrusted
+    /// user, their group or anyone else but root. `ResearchUntrustedPath` says
+    /// which one.
+    case notTrusted(ResearchUntrustedPath)
     /// The code signature is missing, broken, or not Apple's. `reason` is a
     /// short phrase or the tail of what `codesign` said.
     case notSigned(reason: String)
@@ -47,10 +62,17 @@ public enum ResearchContainerError: Error, Equatable, CustomStringConvertible, S
         case .notInstalled:
             return "Apple container is not installed at \(path). Install it with Apple's "
                 + "installer from https://github.com/apple/container and try again."
-        case .notTrusted:
-            return "Apple container is at \(path), but you or another user could change that file "
-                + "or a folder above it, so SandSeek will not run it. Reinstall it with Apple's "
-                + "installer (https://github.com/apple/container), which makes it belong to root alone."
+        case .notTrusted(let untrusted) where untrusted.isFolder:
+            return "Apple container is at \(path), but the folder \(untrusted.path) above it can be "
+                + "changed by you or another user, so SandSeek will not run it. Apple's installer "
+                + "does not change this folder. To let SandSeek trust it, make it belong to root: "
+                + "sudo chown root:wheel \(untrusted.path) && sudo chmod 755 \(untrusted.path) "
+                + "(this affects an Intel Homebrew installed in /usr/local)."
+        case .notTrusted(let untrusted):
+            return "Apple container is at \(path), but the file \(untrusted.path) is not an "
+                + "executable file that only root can change, so SandSeek will not run it. "
+                + "Reinstall it with Apple's installer (https://github.com/apple/container), "
+                + "which makes it belong to root alone."
         case .notSigned(let reason):
             let detail = reason.isEmpty ? "" : " (\(reason))"
             return "The program at \(path) is not signed by Apple\(detail), so SandSeek will not "
@@ -92,7 +114,8 @@ public struct ResearchContainerTool: Sendable {
     private let runner: any ResearchProcessRunning
     public let path: String
     private let environment: [String: String]
-    private let isTrusted: @Sendable (String) -> Bool
+    /// Nil when the file at the path is trusted, otherwise what failed.
+    private let untrustedPath: @Sendable (String) -> ResearchUntrustedPath?
     /// Whether an executable file is there at all, trusted or not: it tells
     /// "not installed" from "installed, but not run because someone besides
     /// root could replace it".
@@ -102,7 +125,8 @@ public struct ResearchContainerTool: Sendable {
     public init(runner: any ResearchProcessRunning = FoundationProcessRunner(),
                 path: String = ResearchContainerTool.installedPath,
                 environment: [String: String] = ResearchCommandEnvironment.environment(),
-                isTrusted: @escaping @Sendable (String) -> Bool = ResearchContainerTool.isTrustedFile,
+                untrustedPath: @escaping @Sendable (String) -> ResearchUntrustedPath? =
+                    ResearchContainerTool.firstUntrustedPath,
                 fileExists: @escaping @Sendable (String) -> Bool = {
                     FileManager.default.isExecutableFile(atPath: $0)
                 },
@@ -110,7 +134,7 @@ public struct ResearchContainerTool: Sendable {
         self.runner = runner
         self.path = path
         self.environment = environment
-        self.isTrusted = isTrusted
+        self.untrustedPath = untrustedPath
         self.fileExists = fileExists
         self.identity = identity
     }
@@ -122,51 +146,68 @@ public struct ResearchContainerTool: Sendable {
     /// same file number, size and change time. Nil if it cannot be read.
     public func currentIdentity() -> String? { identity(path) }
 
-    /// An executable file that only root can change. The real file and every
-    /// folder above it belong to root and cannot be written by group or
-    /// others. Both the path as given and the file it resolves to are
+    /// Nil for an executable regular file that only root can change: the real
+    /// file and every folder above it belong to root and cannot be written by
+    /// group or others. Both the path as given and the file it resolves to are
     /// checked, so a link placed in a folder the user can write does not help.
-    @Sendable public static func isTrustedFile(_ path: String) -> Bool {
-        guard FileManager.default.isExecutableFile(atPath: path) else { return false }
+    /// Otherwise the first file or folder that fails.
+    @Sendable public static func firstUntrustedPath(_ path: String) -> ResearchUntrustedPath? {
         let given = URL(fileURLWithPath: path)
-        return ownedByRootAndClosed(from: given)
-            && ownedByRootAndClosed(from: given.resolvingSymlinksInPath())
+        let resolved = given.resolvingSymlinksInPath()
+        guard FileManager.default.isExecutableFile(atPath: path),
+              let kind = try? FileManager.default.attributesOfItem(atPath: resolved.path)[.type]
+                as? FileAttributeType,
+              kind == .typeRegular
+        else { return ResearchUntrustedPath(path: resolved.path, isFolder: false) }
+        return firstOpenPath(from: given) ?? firstOpenPath(from: resolved)
     }
 
-    /// `start` and each folder above it, up to `/`.
-    private static func ownedByRootAndClosed(from start: URL) -> Bool {
+    /// Whether the file is trusted; see `firstUntrustedPath`.
+    @Sendable public static func isTrustedFile(_ path: String) -> Bool {
+        firstUntrustedPath(path) == nil
+    }
+
+    /// `start` and each folder above it, up to `/`: the first that is not
+    /// owned by root or can be written by group or others.
+    private static func firstOpenPath(from start: URL) -> ResearchUntrustedPath? {
         var url = start
         while true {
             guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
                   (attributes[.ownerAccountID] as? NSNumber)?.intValue == 0,
                   let permissions = (attributes[.posixPermissions] as? NSNumber)?.intValue,
-                  permissions & 0o022 == 0 else { return false }
+                  permissions & 0o022 == 0
+            else { return ResearchUntrustedPath(path: url.path, isFolder: url.path != start.path) }
             let parent = url.deletingLastPathComponent()
-            if parent.path == url.path || url.path == "/" { return true }
+            if parent.path == url.path || url.path == "/" { return nil }
             url = parent
         }
     }
 
-    /// Which file is at `path`: its file number, size and time of last change.
+    /// Which file is at `path`: its device, file number, size and times of
+    /// last modification and last change (the change time cannot be set
+    /// back). Nil if it cannot be read.
     @Sendable public static func fileIdentity(_ path: String) -> String? {
         let resolved = URL(fileURLWithPath: path).resolvingSymlinksInPath().path
-        guard let attributes = try? FileManager.default.attributesOfItem(atPath: resolved),
-              let number = (attributes[.systemFileNumber] as? NSNumber)?.uint64Value,
-              let size = (attributes[.size] as? NSNumber)?.uint64Value,
-              let changed = (attributes[.modificationDate] as? Date)?.timeIntervalSince1970
-        else { return nil }
-        return "\(number)-\(size)-\(changed)"
+        var info = stat()
+        guard stat(resolved, &info) == 0 else { return nil }
+        #if canImport(Darwin)
+        let modified = info.st_mtimespec, changed = info.st_ctimespec
+        #else
+        let modified = info.st_mtim, changed = info.st_ctim
+        #endif
+        return "\(info.st_dev)-\(info.st_ino)-\(info.st_size)"
+            + "-\(modified.tv_sec).\(modified.tv_nsec)-\(changed.tv_sec).\(changed.tv_nsec)"
     }
 
     /// Checks that the tool is installed, belongs to root alone, is signed by
     /// Apple and is recent enough. Every command has a time limit.
     @discardableResult
     public func verify() async throws -> ResearchContainerVersion {
-        guard isTrusted(path) else {
+        if let untrusted = untrustedPath(path) {
             // Installed but changeable by someone else is a different problem
             // from not installed, and installing again is not the fix.
             throw fileExists(path)
-                ? ResearchContainerError.notTrusted : ResearchContainerError.notInstalled
+                ? ResearchContainerError.notTrusted(untrusted) : ResearchContainerError.notInstalled
         }
         let codesign = URL(fileURLWithPath: "/usr/bin/codesign")
         let signature = await run(codesign, [

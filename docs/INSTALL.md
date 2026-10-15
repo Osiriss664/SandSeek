@@ -20,6 +20,9 @@ For what the security design does and does not promise, read
   the folders above it must belong to root and not be writable by you or your
   group, its code signature must be Apple's, and its version must be 1.5.0 or
   newer. (A copy that Homebrew or another installer put elsewhere is not used.)
+  SandSeek does not pass proxy variables (`HTTP_PROXY` and the like) to
+  `container`; if image downloads must go through a proxy, set it system-wide,
+  for example in System Settings > Network.
   After the installer has run, `container system start` starts its background
   service (SandSeek's scripts do this when it is not running).
 - A **Swift 6.2 toolchain** to build: Xcode 26, or the command line tools that
@@ -298,12 +301,18 @@ them with a command**, so you can still get them back.
 - **"Apple container is not installed"**: install it with Apple's installer
   from the releases page above. SandSeek looks only at
   `/usr/local/bin/container`.
-- **"... could change that file or a folder above it"**: something at
-  `/usr/local/bin/container` or in `/usr`, `/usr/local` or `/usr/local/bin`
-  belongs to you or is writable by a group, which can happen when another
-  installer changed those folders. Reinstall Apple container with Apple's
-  installer, or in Terminal: `ls -ld /usr/local /usr/local/bin
-  /usr/local/bin/container` shows who owns them.
+- **"... can be changed by you or another user"**: the message names the path
+  that failed.
+  - If it is a **folder** (typically `/usr/local/bin` or `/usr/local`, owned by
+    you or writable by a group after an Intel/Rosetta Homebrew was installed
+    there), Apple's installer does not change it. To let SandSeek trust it, make
+    it belong to root: `sudo chown root:wheel <folder> && sudo chmod 755
+    <folder>` (this affects an Intel Homebrew installed in `/usr/local`).
+  - If it is the **file** `/usr/local/bin/container` itself, reinstall Apple
+    container with Apple's installer.
+
+  `ls -ld /usr /usr/local /usr/local/bin /usr/local/bin/container` shows who
+  owns each.
 - **"... is not signed by Apple"**: the file at `/usr/local/bin/container` is
   not Apple's release (a build you made yourself is signed ad hoc and is not
   accepted). Install Apple's package.

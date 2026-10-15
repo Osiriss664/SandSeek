@@ -76,7 +76,8 @@ private final class GatedRunner: ResearchProcessRunning, @unchecked Sendable {
     init(_ inner: FakeProcessRunner) { self.inner = inner }
 
     func run(executable: URL, arguments: [String], environment: [String: String],
-             timeout: TimeInterval) async throws -> ResearchProcessResult {
+             timeout: TimeInterval,
+             killGrace: TimeInterval) async throws -> ResearchProcessResult {
         if arguments.last == "start" {
             while holdStart.value { try await Task.sleep(for: .milliseconds(10)) }
         }
@@ -87,7 +88,8 @@ private final class GatedRunner: ResearchProcessRunning, @unchecked Sendable {
             while holdFirewallLook.value { try await Task.sleep(for: .milliseconds(10)) }
         }
         return try await inner.run(executable: executable, arguments: arguments,
-                                   environment: environment, timeout: timeout)
+                                   environment: environment, timeout: timeout,
+                                   killGrace: killGrace)
     }
 }
 

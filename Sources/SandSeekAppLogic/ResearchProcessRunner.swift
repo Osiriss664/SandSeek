@@ -25,23 +25,44 @@ public struct ResearchProcessResult: Equatable, Sendable {
 /// app uses `FoundationProcessRunner`.
 public protocol ResearchProcessRunning: Sendable {
     /// Ends the process with SIGTERM if it is still running after `timeout`
-    /// seconds, and with SIGKILL three seconds later if it ignores that, so a
-    /// hung `container` command cannot block the screen. Only the last
+    /// seconds, and with SIGKILL `killGrace` seconds later if it ignores that,
+    /// so a hung `container` command cannot block the screen. The grace lets
+    /// a script run its cleanup (an EXIT trap) after SIGTERM. Only the last
     /// `FoundationProcessRunner.maximumOutputBytes` bytes of its output are
     /// returned.
     func run(executable: URL,
              arguments: [String],
              environment: [String: String],
-             timeout: TimeInterval) async throws -> ResearchProcessResult
+             timeout: TimeInterval,
+             killGrace: TimeInterval) async throws -> ResearchProcessResult
+}
+
+public enum ResearchProcessGrace {
+    /// Seconds between SIGTERM and SIGKILL for a direct `container` or
+    /// `codesign` call.
+    public static let direct: TimeInterval = 3
+    /// The same for a run of the sandbox script, whose EXIT trap needs time to
+    /// stop and remove the container. Only the script's own process (bash)
+    /// is signalled, not a process group: Foundation's `Process` cannot start
+    /// a child in a new group.
+    public static let script: TimeInterval = 30
+}
+
+extension ResearchProcessRunning {
+    /// Runs with the grace for a direct `container` or `codesign` call.
+    public func run(executable: URL,
+                    arguments: [String],
+                    environment: [String: String],
+                    timeout: TimeInterval) async throws -> ResearchProcessResult {
+        try await run(executable: executable, arguments: arguments, environment: environment,
+                      timeout: timeout, killGrace: ResearchProcessGrace.direct)
+    }
 }
 
 public struct FoundationProcessRunner: ResearchProcessRunning {
     /// The most output a command gives back: its last 1 MiB. The end of a
     /// long build or start log is where the error is.
     public static let maximumOutputBytes = 1_048_576
-    /// How long a command that ignored SIGTERM may live before SIGKILL.
-    static let killGrace: TimeInterval = 3
-
     public init() {}
 
     /// Output goes to a temporary file rather than a pipe. `container system
@@ -50,7 +71,8 @@ public struct FoundationProcessRunner: ResearchProcessRunning {
     public func run(executable: URL,
                     arguments: [String],
                     environment: [String: String],
-                    timeout: TimeInterval) async throws -> ResearchProcessResult {
+                    timeout: TimeInterval,
+                    killGrace: TimeInterval) async throws -> ResearchProcessResult {
         let log = FileManager.default.temporaryDirectory
             .appendingPathComponent("sandseek-research-\(UUID().uuidString).log")
         guard FileManager.default.createFile(atPath: log.path, contents: nil) else {
@@ -81,7 +103,7 @@ public struct FoundationProcessRunner: ResearchProcessRunning {
                     // The flag keeps a reused process id from being signalled.
                     guard progress.markTimedOutIfRunning() else { return }
                     kill(pid, SIGTERM)
-                    DispatchQueue.global().asyncAfter(deadline: .now() + Self.killGrace) {
+                    DispatchQueue.global().asyncAfter(deadline: .now() + killGrace) {
                         if !progress.isFinished { kill(pid, SIGKILL) }
                     }
                 }

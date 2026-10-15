@@ -267,7 +267,8 @@ final class FakeProcessRunner: ResearchProcessRunning, @unchecked Sendable {
     func run(executable: URL,
              arguments: [String],
              environment: [String: String],
-             timeout: TimeInterval) async throws -> ResearchProcessResult {
+             timeout: TimeInterval,
+             killGrace: TimeInterval) async throws -> ResearchProcessResult {
         let command = [executable.lastPathComponent] + arguments
         lock.withLock {
             recorded.append(command)
@@ -524,6 +525,6 @@ extension ResearchContainerTool {
     static func trustedForTests(runner: (any ResearchProcessRunning)? = nil) -> ResearchContainerTool {
         ResearchContainerTool(
             runner: runner ?? FakeProcessRunner(), environment: [:],
-            isTrusted: { _ in true }, fileExists: { _ in true }, identity: { _ in "test" })
+            untrustedPath: { _ in nil }, fileExists: { _ in true }, identity: { _ in "test" })
     }
 }

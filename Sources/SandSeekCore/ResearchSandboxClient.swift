@@ -99,12 +99,19 @@ public struct ResearchSandboxClient: Sendable {
     static let identityMaxAge: TimeInterval = 5
     /// How long each kind of call may take, in seconds, from sending the
     /// request to the end of the answer. A sandbox that hangs must not hold
-    /// the research run for the transport's own limit (half an hour). The
-    /// fetch limit matches the sandbox's own limit for a page and its
-    /// redirects (`FETCH_TOTAL_DEADLINE`).
+    /// the research run for the transport's own limit (half an hour), but the
+    /// limits must outlast the sandbox's own (Sandbox/server.py), or a slow
+    /// answer would be cut off here just before it arrives.
+    ///
+    /// Search: one attempt may take `FETCH_DEADLINE` (45 s), and a dropped
+    /// connection or stall is retried once after `SEARCH_RETRY_DELAY` (1 s),
+    /// so up to 91 s. Fetch: the whole page and its redirects may take
+    /// `FETCH_TOTAL_DEADLINE` (90 s), then reading the text takes up to
+    /// `EXTRACT_TIMEOUT` (15 s) plus `FALLBACK_TIMEOUT` (10 s), and a PDF up to
+    /// about 35 s more (`PDF_BUSY_WAIT` 20 s + `PDF_TIMEOUT` 15 s).
     static let healthTimeout: TimeInterval = 10
-    static let searchTimeout: TimeInterval = 60
-    static let fetchTimeout: TimeInterval = 90
+    static let searchTimeout: TimeInterval = 100
+    static let fetchTimeout: TimeInterval = 140
 
     public let baseURL: URL
     private let transport: any ResearchHTTPTransport

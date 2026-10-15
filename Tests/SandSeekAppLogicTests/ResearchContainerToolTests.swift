@@ -38,7 +38,13 @@ import Testing
     }
 }
 
+enum ResearchContainerToolTestPaths {
+    static let untrusted = ResearchUntrustedPath(path: "/usr/local/bin", isFolder: true)
+}
+
 @Suite struct ResearchContainerVerifyTests {
+    static let untrusted = ResearchContainerToolTestPaths.untrusted
+
     /// A tool whose file checks answer as given and whose `codesign` and
     /// `--version` commands are answered by `reply`.
     private func make(
@@ -48,7 +54,7 @@ import Testing
         let runner = FakeProcessRunner(reply: reply)
         let tool = ResearchContainerTool(
             runner: runner, environment: ["PATH": "/usr/bin"],
-            isTrusted: { _ in trusted }, fileExists: { _ in exists }, identity: { _ in "x" })
+            untrustedPath: { _ in trusted ? nil : Self.untrusted }, fileExists: { _ in exists }, identity: { _ in "x" })
         return (tool, runner)
     }
 
@@ -87,7 +93,7 @@ import Testing
 
     @Test func aToolSomeoneElseCouldChangeIsNotTrustedAndNeverRun() async {
         let (tool, runner) = make(trusted: false, exists: true)
-        #expect(await failure(of: tool) == .notTrusted)
+        #expect(await failure(of: tool) == .notTrusted(Self.untrusted))
         #expect(runner.commands.isEmpty)
     }
 
@@ -169,7 +175,15 @@ import Testing
         let installed = ResearchContainerError.notInstalled.description
         #expect(installed.contains("Apple container is not installed"))
         #expect(installed.contains("https://github.com/apple/container"))
-        #expect(ResearchContainerError.notTrusted.description.contains("could change"))
+        #expect(ResearchContainerError.notTrusted(ResearchContainerToolTestPaths.untrusted).description.contains("can be changed"))
+        let folder = ResearchContainerError.notTrusted(
+            ResearchUntrustedPath(path: "/usr/local/bin", isFolder: true)).description
+        #expect(folder.contains("sudo chown root:wheel /usr/local/bin && sudo chmod 755 /usr/local/bin"))
+        #expect(folder.contains("Apple's installer does not change this folder"))
+        let file = ResearchContainerError.notTrusted(
+            ResearchUntrustedPath(path: "/usr/local/bin/container", isFolder: false)).description
+        #expect(file.contains("Reinstall it with Apple's installer"))
+        #expect(!file.contains("sudo"))
         #expect(ResearchContainerError.notSigned(reason: "the signer is not Apple's").description
             .contains("not signed by Apple"))
         let old = ResearchContainerError.tooOld(found: "1.4.2", minimum: "1.5.0").description
@@ -187,6 +201,9 @@ import Testing
         // Owned by the user running the tests (or world-writable), in a
         // folder under the temporary directory: never root's alone.
         #expect(!ResearchContainerTool.isTrustedFile(file.path))
+        // The report names the first path that fails: here the file itself.
+        #expect(ResearchContainerTool.firstUntrustedPath(file.path)
+            == ResearchUntrustedPath(path: file.resolvingSymlinksInPath().path, isFolder: false))
         #expect(!ResearchContainerTool.isTrustedFile(folder.appendingPathComponent("missing").path))
         // A link in such a folder to a system program does not help.
         let link = folder.appendingPathComponent("link")
@@ -196,6 +213,24 @@ import Testing
 
     @Test func aSystemProgramOfRootIsTrusted() {
         #expect(ResearchContainerTool.isTrustedFile("/usr/bin/true"))
+    }
+
+    @Test func aFolderIsNotATrustedFile() {
+        // Root's and closed, but not a regular file.
+        #expect(!ResearchContainerTool.isTrustedFile("/usr/bin"))
+    }
+
+    @Test func theIdentityChangesWithTheFileAndIsNilWithoutOne() throws {
+        let folder = temporaryDirectory()
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let file = folder.appendingPathComponent("tool")
+        try Data("a".utf8).write(to: file)
+        let before = try #require(ResearchContainerTool.fileIdentity(file.path))
+        try Data("bb".utf8).write(to: file)
+        let after = try #require(ResearchContainerTool.fileIdentity(file.path))
+        #expect(before != after)
+        #expect(ResearchContainerTool.fileIdentity(folder.appendingPathComponent("none").path) == nil)
     }
 }
 
@@ -247,11 +282,11 @@ private final class LockedText: @unchecked Sendable {
         let runner = FakeProcessRunner()
         let tool = ResearchContainerTool(
             runner: runner, environment: [:],
-            isTrusted: { _ in false }, fileExists: { _ in true }, identity: { _ in "x" })
+            untrustedPath: { _ in ResearchContainerToolTestPaths.untrusted }, fileExists: { _ in true }, identity: { _ in "x" })
         let sandbox = try make(runner: runner, tool: tool)
         await sandbox.start()
         // The reason is the card's message.
-        #expect(sandbox.state == .failed(ResearchContainerError.notTrusted.description))
+        #expect(sandbox.state == .failed(ResearchContainerError.notTrusted(ResearchContainerToolTestPaths.untrusted).description))
         #expect(runner.commands.isEmpty)
         #expect(!sandbox.startedByApp)
     }
@@ -260,7 +295,7 @@ private final class LockedText: @unchecked Sendable {
         let runner = FakeProcessRunner()
         let tool = ResearchContainerTool(
             runner: runner, environment: [:],
-            isTrusted: { _ in false }, fileExists: { _ in false }, identity: { _ in nil })
+            untrustedPath: { _ in ResearchContainerToolTestPaths.untrusted }, fileExists: { _ in false }, identity: { _ in nil })
         let sandbox = try make(runner: runner, tool: tool)
         await sandbox.start()
         guard case .failed(let message) = sandbox.state else {
@@ -294,7 +329,7 @@ private final class LockedText: @unchecked Sendable {
         let identity = LockedText("file-1")
         let tool = ResearchContainerTool(
             runner: runner, environment: [:],
-            isTrusted: { _ in true }, fileExists: { _ in true }, identity: { _ in identity.value })
+            untrustedPath: { _ in nil }, fileExists: { _ in true }, identity: { _ in identity.value })
         let sandbox = try make(runner: runner, tool: tool)
         func checks() -> Int {
             runner.commands.filter { $0.first == "codesign" && $0.contains("--verify") }.count
@@ -319,7 +354,7 @@ private final class LockedText: @unchecked Sendable {
         let identity = LockedText("file-1")
         let tool = ResearchContainerTool(
             runner: runner, environment: [:],
-            isTrusted: { _ in trusted.value }, fileExists: { _ in true }, identity: { _ in identity.value })
+            untrustedPath: { _ in trusted.value ? nil : ResearchContainerToolTestPaths.untrusted }, fileExists: { _ in true }, identity: { _ in identity.value })
         let sandbox = try make(runner: runner, tool: tool)
         await sandbox.start()
         #expect(sandbox.protection == .verified)
@@ -329,7 +364,7 @@ private final class LockedText: @unchecked Sendable {
         trusted.value = false
         identity.value = "file-2"
         await sandbox.recheckProtection()
-        #expect(sandbox.protection == .notVerified(ResearchContainerError.notTrusted.description))
+        #expect(sandbox.protection == .notVerified(ResearchContainerError.notTrusted(ResearchContainerToolTestPaths.untrusted).description))
         #expect(runner.commands.filter { $0.first == "container" }.count == before)
     }
 
@@ -348,7 +383,7 @@ private final class LockedText: @unchecked Sendable {
         // environment without the script's settings.
         let tool = ResearchContainerTool(
             runner: runner, environment: ResearchCommandEnvironment.environment(base: shell),
-            isTrusted: { _ in true }, fileExists: { _ in true }, identity: { _ in "x" })
+            untrustedPath: { _ in nil }, fileExists: { _ in true }, identity: { _ in "x" })
         let sandbox = try make(runner: runner, tool: tool, environment: shell)
         await sandbox.start()
         let fixed: Set<String> = ["PATH", "LANG", "HOME", "USER", "LOGNAME", "TMPDIR"]
@@ -393,6 +428,18 @@ private final class LockedText: @unchecked Sendable {
         #expect(result.status != 0)
         // SIGTERM at 0.5 s was ignored; SIGKILL follows 3 s later.
         #expect(ContinuousClock.now - started < .seconds(15))
+    }
+
+    @Test func aLongGraceLetsCleanupAfterTerminateFinish() async throws {
+        // On SIGTERM the command takes a second to clean up, then exits; a
+        // grace longer than that means it is not killed halfway.
+        let result = try await FoundationProcessRunner().run(
+            executable: URL(fileURLWithPath: "/bin/sh"),
+            arguments: ["-c", "trap 'sleep 1; echo cleaned; exit 7' TERM; while true; do sleep 0.1; done"],
+            environment: ["PATH": "/usr/bin:/bin"], timeout: 0.5, killGrace: 10)
+        #expect(result.timedOut)
+        #expect(result.status == 7)
+        #expect(result.output.contains("cleaned"))
     }
 
     @Test func aCommandThatEndsInTimeDidNotTimeOut() async throws {
