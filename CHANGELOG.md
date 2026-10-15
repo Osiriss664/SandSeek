@@ -14,6 +14,9 @@
   check advises `OLLAMA_HOST=127.0.0.1:11434`.
 - The command's progress line for Ollama ends with `thinking on` or `thinking off`.
 - `Scripts/full_test.sh` takes `--server-type tuff|llamacpp|ollama|auto`.
+- `web_search` accepts a list of queries and searches the first one, telling
+  the model so. Gemma 4 through Ollama sent the query as a list in 3 of 7 test
+  runs and then got only errors until the step budget ran out.
 
 ## 0.2.0 (15 October 2026)
 

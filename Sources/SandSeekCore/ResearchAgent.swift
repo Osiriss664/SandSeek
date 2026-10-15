@@ -2203,6 +2203,23 @@ public struct ResearchAgent: Sendable {
         return text.isEmpty ? nil : text
     }
 
+    /// The query of a `web_search` call: a string, or the first non-empty
+    /// string of a list of strings. `others` counts the further non-empty
+    /// strings of a list, which are not searched.
+    static func searchQuery(_ value: ResearchJSON?) -> (query: String?, others: Int) {
+        func cleaned(_ value: ResearchJSON) -> String? {
+            guard let text = value.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !text.isEmpty else { return nil }
+            return text
+        }
+        guard let value else { return (nil, 0) }
+        if let list = value.arrayValue {
+            let queries = list.compactMap(cleaned)
+            return (queries.first, max(0, queries.count - 1))
+        }
+        return (cleaned(value), 0)
+    }
+
     static func isJSONObject(_ text: String) -> Bool {
         (try? ResearchJSON.decode(Data(text.utf8)))?.objectValue != nil
     }
@@ -2215,18 +2232,23 @@ public struct ResearchAgent: Sendable {
         do {
             switch call.name {
             case "web_search":
-                guard let query = arguments["query"]?.stringValue?
-                        .trimmingCharacters(in: .whitespacesAndNewlines),
-                      !query.isEmpty else {
+                let (found, others) = Self.searchQuery(arguments["query"])
+                guard let query = found else {
                     return "Tool error: web_search needs a non-empty query."
                 }
+                // Some models (Gemma 4 through Ollama) now and then send the
+                // query as a list. The first one is searched, and the model
+                // is told so, also when that query was searched before: it
+                // would otherwise send the same list again.
+                let listNote: String = others == 0 ? "" : "\n\nweb_search takes one query string per "
+                    + "call; only the first query of a list is used."
                 // A repeated query would only bring the same results, and
                 // sends one more request to the search engine for nothing.
                 if state.hasSearched(query) {
                     state.refusedRepeats += 1
                     onEvent(.repeatedSearchRefused(ResearchText.oneLine(query, limit: 200)))
                     return "You already searched for \(Self.quoted(query, markers: state.markers)). "
-                        + "Search with different words, or open a page from the results."
+                        + "Search with different words, or open a page from the results." + listNote
                 }
                 onEvent(.searching(ResearchText.oneLine(query, limit: 200)))
                 let results = try await sandbox.search(
@@ -2236,6 +2258,7 @@ public struct ResearchAgent: Sendable {
                 state.shownQueries.append(ResearchText.oneLine(query, limit: 200))
                 state.resultURLs.append(results.map(\.url))
                 return Self.formatSearch(query: query, results: results, markers: state.markers)
+                    + listNote
             case "open_page":
                 let requested = arguments["url"]?.stringValue?
                     .trimmingCharacters(in: .whitespacesAndNewlines)

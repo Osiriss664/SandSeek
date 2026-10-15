@@ -2340,7 +2340,41 @@ struct ResearchAgentTests {
     }
 #endif
 
+    @Test func aQueryListSearchesItsFirstString() throws {
+        // Gemma 4 through Ollama sometimes sends {"query": ["a", "b"]}.
+        let list = try ResearchJSON.decode(Data(#"[" ", "capital of Australia", "Canberra"]"#.utf8))
+        let fromList = ResearchAgent.searchQuery(list)
+        #expect(fromList.query == "capital of Australia")
+        #expect(fromList.others == 1)
+        let single = ResearchAgent.searchQuery(.string("  Canberra "))
+        #expect(single.query == "Canberra")
+        #expect(single.others == 0)
+        let empty = try ResearchJSON.decode(Data(#"[]"#.utf8))
+        #expect(ResearchAgent.searchQuery(empty).query == nil)
+        #expect(ResearchAgent.searchQuery(.integer(3)).query == nil)
+        #expect(ResearchAgent.searchQuery(nil).query == nil)
+    }
+
 #if canImport(CryptoKit)
+    @Test func aQueryListIsSearchedAndTheModelIsTold() async throws {
+        let services = FakeServices(modelReplies: [
+            FakeServices.calls([("a", "web_search", #"{"query":["apple container","container vm"]}"#)]),
+            FakeServices.calls([
+                ("c", "open_page", #"{"url":"https://a.example/"}"#),
+                ("d", "open_page", #"{"url":"https://b.example/"}"#),
+            ]),
+            FakeServices.answer("Done [1][2]."),
+            FakeServices.answer("Done [1][2]."),
+        ])
+        let report = try await agent(services).run(question: "q")
+        #expect(services.requests.filter { $0.url.path == "/v1/search" }.count == 1)
+        #expect(report.searchQueries == ["apple container"])
+        let result = messages(services.modelRequests[1])
+            .first { $0["tool_call_id"] == .string("a") }?["content"]?.stringValue ?? ""
+        #expect(result.contains("only the first query of a list is used."))
+        #expect(!result.contains("needs a non-empty query"))
+    }
+
     @Test func repeatedQueriesDoNotReachTheSearchEngine() async throws {
         let services = FakeServices(modelReplies: [
             FakeServices.calls([("a", "web_search", #"{"query":"Apple  Container"}"#)]),
