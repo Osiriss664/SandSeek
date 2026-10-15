@@ -121,10 +121,19 @@ public final class ResearchSandboxController {
 
     public private(set) var state: State = .off {
         didSet {
-            if state != .ready { protection = .unknown }
+            if state != .ready {
+                protection = .unknown
+                lastSignedCheck = nil
+            }
         }
     }
     public private(set) var protection: Protection = .unknown
+    /// When the sandbox last answered a signed health check with a signed
+    /// answer (the check that decides "running"). Nil while it is not running.
+    public private(set) var lastSignedCheck: Date?
+    /// Why a sandbox that was running stopped passing the signed health check,
+    /// in plain words; nil otherwise. The next passing check clears it.
+    public private(set) var lastCheckFailure: String?
     /// True when a sandbox this app started was still running from an
     /// earlier session that did not quit normally.
     public private(set) var adoptedFromLastRun = false
@@ -155,6 +164,8 @@ public final class ResearchSandboxController {
     /// The health check is signed with it; the app uses the default, and the
     /// tests give each controller a file of their own.
     private let secretFile: URL
+    /// The clock for `lastSignedCheck`; tests pass a fixed one.
+    private let now: @Sendable () -> Date
 
     public init(baseURL: URL = ResearchSandboxController.defaultURL,
                 runner: any ResearchProcessRunning = FoundationProcessRunner(),
@@ -163,9 +174,11 @@ public final class ResearchSandboxController {
                 environment: [String: String] = ResearchCommandEnvironment.environment(),
                 resources: SandboxResources = SandboxResources(),
                 stateDirectory: URL = ResearchSandboxController.defaultStateDirectory(),
-                secretFile: URL = ResearchSandboxSecret.defaultFileURL) {
+                secretFile: URL = ResearchSandboxSecret.defaultFileURL,
+                now: @escaping @Sendable () -> Date = { Date() }) {
         self.baseURL = baseURL
         self.secretFile = secretFile
+        self.now = now
         self.stateDirectory = stateDirectory
         self.runner = runner
         self.transport = transport
@@ -231,13 +244,16 @@ public final class ResearchSandboxController {
     /// progress, and a failure message, alone.
     public func refresh() async {
         guard !state.isBusy else { return }
-        let healthy = await isHealthy()
+        let problem = await healthProblem()
         guard !state.isBusy else { return }
-        if healthy {
+        if problem == nil {
             state = .ready
             if protection == .unknown { await verifyProtection() }
         } else {
-            if state == .ready { state = .off }
+            if state == .ready {
+                state = .off
+                lastCheckFailure = Self.checkFailureText(problem)
+            }
             if adoptedFromLastRun {
                 // The marker outlived the VM; nothing is left to stop.
                 adoptedFromLastRun = false
@@ -427,8 +443,24 @@ public final class ResearchSandboxController {
         break
     """
 
-    private func isHealthy() async -> Bool {
-        await healthProblem() == nil
+    /// What the card says when a running sandbox stops passing the check.
+    static func checkFailureText(_ problem: ResearchError?) -> String {
+        guard let problem else { return "The sandbox stopped passing its signed check." }
+        let reason = problem.description
+        return "The sandbox stopped passing its signed check. "
+            + reason.prefix(1).uppercased() + reason.dropFirst()
+    }
+
+    /// "checked 14:05": the time of a passing signed health check, as the card
+    /// shows it.
+    public nonisolated static func checkedLabel(
+        for date: Date, timeZone: TimeZone = .current
+    ) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "HH:mm"
+        return "checked " + formatter.string(from: date)
     }
 
     /// Why the sandbox does not count as running: nil when it answers a signed
@@ -439,6 +471,8 @@ public final class ResearchSandboxController {
         do {
             try await ResearchSandboxClient(
                 baseURL: baseURL, transport: transport, secretFile: secretFile).checkHealth()
+            lastSignedCheck = now()
+            lastCheckFailure = nil
             return nil
         } catch let error as ResearchError {
             return error
@@ -465,6 +499,7 @@ public final class ResearchSandboxController {
         guard let files = prepareFiles(reportFailure: true) else { return }
         let script = files.script
         selfTest = nil
+        lastCheckFailure = nil
         let fingerprint = Self.fingerprint(of: files.sandboxFolder)
         if await needsBuild(fingerprint: fingerprint) {
             state = .preparing
