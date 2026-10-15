@@ -470,7 +470,7 @@ public final class ResearchServerController {
         exposure = .checking
         let report = await probe(port)
         guard mine == exposureGeneration else { return }
-        if let warning = report.warning(for: serverType.kind) {
+        if let warning = report.warningText(for: serverType.kind) {
             exposure = .reachable(warning)
         } else if let note = report.unknownNote {
             exposure = .unclear(note)

@@ -340,13 +340,13 @@ public struct ResearchExposureReport: Equatable, Sendable {
     /// The warning the app and the command show, or nil when nothing
     /// answered on the network. It names no flag for every server type: TUFF
     /// has none, and listens on 127.0.0.1 only by itself.
-    public var warning: String? { warning(for: nil) }
+    public var warning: String? { warningText(for: nil) }
 
     /// The same warning with the way out for a known kind of server. Ollama
     /// listens where `OLLAMA_HOST` says, so its advice names that variable
     /// (never `0.0.0.0`, which is every network address). Without a kind the
     /// advice is the llama.cpp flag.
-    public func warning(for kind: ResearchServerKind?) -> String? {
+    public func warningText(for kind: ResearchServerKind?) -> String? {
         guard isExposed else { return nil }
         let lead = "Something answers at \(reachableText). "
             + "Other machines on that network can reach it. "
@@ -519,7 +519,7 @@ public enum ResearchExposureCommand {
         let exitCode: Int32
         if server.isExposed || sandbox.isExposed {
             exitCode = exitExposed
-            if let warning = server.warning(for: serverKind) {
+            if let warning = server.warningText(for: serverKind) {
                 lines.append("RESULT: " + warning)
             }
             if sandbox.isExposed {
