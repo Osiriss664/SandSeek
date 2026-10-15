@@ -85,7 +85,7 @@ do {
 let sandboxTransport = URLSessionResearchTransport()
 let quiet = arguments.quiet
 
-// Which server this is decides how it is asked (Abschnitt 2a: TUFF, with
+// Which server this is decides how it is asked (TUFF, with
 // streaming). A server that is not recognised is refused before any research
 // runs. A model server that does not answer ends the run with exit code 1, as
 // it always did (it is now found before the sandbox check, not after); a

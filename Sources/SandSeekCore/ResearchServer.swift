@@ -66,7 +66,7 @@ public struct ResearchServerConnection: Equatable, Sendable {
         case .tuff:
             line += streaming ? ", streaming" : ", no streaming"
         case .llamacpp:
-            line += ", no streaming (the llama.cpp connector comes in Abschnitt 2b)"
+            line += ", no streaming (llama.cpp gets plain requests)"
         }
         return line
     }
@@ -107,8 +107,8 @@ public struct ResearchServerConnection: Equatable, Sendable {
     /// Decides which server this is and whether to stream.
     ///
     /// - `auto`: TUFF when the status route says so. Anything else is
-    ///   refused, with the way out: llama.cpp must be named, because its
-    ///   connector (Abschnitt 2b) is not detected yet.
+    ///   refused, with the way out: llama.cpp must be named, because it
+    ///   is not detected.
     /// - `tuff`: used as named. The status route is asked once, to record the
     ///   version. A server that does not answer at all is an error, as for
     ///   `auto`. Every TUFF 8.3.1 server has the route (the Background API and
@@ -164,16 +164,14 @@ public struct ResearchServerConnection: Equatable, Sendable {
     }
 
     static let streamingNeedsConnectorMessage =
-        "--stream on needs a server connector with streaming. The llama.cpp connector "
-        + "comes in Abschnitt 2b; until then --server-type llamacpp sends the plain "
-        + "non-streaming request."
+        "--stream on needs a server with streaming. --server-type llamacpp is "
+        + "experimental and sends plain (non-streaming) requests."
 
     static func notTUFFMessage(serverURL: URL, status: Int) -> String {
         "the server at \(serverURL.absoluteString) did not answer TUFF's /tuff/v1/status "
             + "(HTTP \(status)), so it is not recognised as TUFF. For a llama.cpp server "
-            + "(llama-server) pass --server-type llamacpp: its connector comes in "
-            + "Abschnitt 2b, and until then it gets today's non-streaming request "
-            + "unchanged. For TUFF, start its Background API (or `tuff serve`), which "
+            + "(llama-server) pass --server-type llamacpp: it is experimental and gets "
+            + "plain (non-streaming) requests. For TUFF, start its Background API (or `tuff serve`), which "
             + "has the status route, or pass --server-type tuff."
     }
 }
