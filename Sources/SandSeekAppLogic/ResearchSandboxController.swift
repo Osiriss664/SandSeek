@@ -225,10 +225,13 @@ public final class ResearchSandboxController {
         self.defaults = defaults
         self.environment = Self.scriptEnvironment(environment)
         self.resources = resources
-        // Set directly: didSet observers do not run in an initializer.
-        startedByApp = FileManager.default.fileExists(atPath: markerURL.path)
-        ownedHolderPid = startedByApp ? Self.markerPid(at: markerURL) : nil
-        adoptedFromLastRun = startedByApp
+        // Both are read before either is set: with @Observable the didSet
+        // observers may run here, and the first one rewrites the marker.
+        let markerExists = FileManager.default.fileExists(atPath: markerURL.path)
+        let markerHolder = markerExists ? Self.markerPid(at: markerURL) : nil
+        startedByApp = markerExists
+        ownedHolderPid = markerHolder
+        adoptedFromLastRun = markerExists
     }
 
     /// Where the app keeps small state files about what it started.

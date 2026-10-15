@@ -620,7 +620,8 @@ lock_holder_is_orphan() {
 # instant, is given a moment (up to three tries) before the lock counts as busy.
 take_lock() {
   local attempt reply reply_file waited held_pid held_stamp took_over=0
-  for attempt in 1 2 3; do
+  # Four passes: three for a short-lived holder, plus one after a take-over.
+  for attempt in 1 2 3 4; do
     reply_file="$(umask 077 && mktemp -- "$secret_folder/.lock-reply.XXXXXX")" || return 1
     "$perl_bin" -e "$lock_helper_code" -- "$lock_marker" "$lock_file" "$(/bin/date +%s)" \
       >"$reply_file" 2>&1 </dev/null &
@@ -924,6 +925,12 @@ case "${1:-}" in
         if ! running="$("$container_bin" list --quiet 2>/dev/null)"; then
           list_failed=1
         elif grep -qxF "$name" <<<"$running"; then
+          # A `stop` run meanwhile (by hand or by another SandSeek) ended the
+          # holder: a sandbox with no lock must not be reported ready.
+          if ! process_alive "$lock_pid"; then
+            echo "the sandbox was stopped while it started" >&2
+            exit 1
+          fi
           trap - EXIT
           echo "web research sandbox ready at http://127.0.0.1:$port"
           exit 0
