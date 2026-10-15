@@ -387,7 +387,7 @@ private final class LockedText: @unchecked Sendable {
         let sandbox = try make(runner: runner, tool: tool, environment: shell)
         await sandbox.start()
         let fixed: Set<String> = ["PATH", "LANG", "HOME", "USER", "LOGNAME", "TMPDIR"]
-        let forScript = fixed.union(["SANDSEEK_DNS", "SEARXNG_URL", "SANDSEEK_SANDBOX_PORT"])
+        let forScript = fixed.union(["SANDSEEK_DNS", "SEARXNG_URL"])
         #expect(runner.commands.count == runner.environments.count)
         #expect(!runner.environments.isEmpty)
         for (command, environment) in zip(runner.commands, runner.environments) {
@@ -397,18 +397,17 @@ private final class LockedText: @unchecked Sendable {
             #expect(environment["LANG"] == "en_US.UTF-8")
             #expect(environment["HOME"] == "/Users/someone")
             if !isToolCheck {
-                #expect(environment["SANDSEEK_SANDBOX_PORT"] == "9100")
+                #expect(environment["SANDSEEK_SANDBOX_PORT"] == nil)
                 #expect(environment["SANDSEEK_DNS"] == "1.1.1.1")
                 #expect(environment["SEARXNG_URL"] == "http://127.0.0.1:8080")
             }
         }
     }
 
-    @Test func anEmptyEnvironmentGetsOnlyThePathLanguageAndPort() {
+    @Test func anEmptyEnvironmentGetsOnlyThePathAndLanguage() {
         let environment = ResearchSandboxController.scriptEnvironment([:])
         #expect(environment == [
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "LANG": "en_US.UTF-8",
-            "SANDSEEK_SANDBOX_PORT": "9100",
         ])
         // The tool's own commands (codesign, --version) run with no more.
         #expect(ResearchCommandEnvironment.environment(base: [:]) == [

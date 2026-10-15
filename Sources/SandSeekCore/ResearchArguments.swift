@@ -8,7 +8,11 @@ public struct ResearchArguments: Equatable, Sendable {
     /// reads it and sends it as a Bearer token to the server, which is on
     /// loopback.
     public var apiKeyFile: String?
-    public var sandboxURL: URL = URL(string: "http://127.0.0.1:9100")!
+    /// The sandbox's address. Without `--sandbox`, `sandboxGiven` is false and
+    /// the command finds the sandbox through `resolvedSandboxURL` instead
+    /// (this is the address of last resort).
+    public var sandboxURL: URL = ResearchSandboxFiles.url(port: ResearchSandboxFiles.fallbackPort)
+    public var sandboxGiven = false
     /// Which kind of model server `serverURL` is; `auto` asks it.
     public var serverType: ResearchServerChoice = .auto
     /// Whether to read model replies as a stream. Nil is the default for the
@@ -35,6 +39,17 @@ public struct ResearchArguments: Equatable, Sendable {
     /// `--version`: print `SandSeekVersion.text` and stop; no question needed.
     public var showVersion = false
     public var options = ResearchOptions()
+
+    /// Where the sandbox is: `--sandbox` when it was given, else the port in
+    /// `SANDSEEK_SANDBOX_PORT` (for tests), else the one the sandbox's start
+    /// recorded in `folder`, else port 9100.
+    public func resolvedSandboxURL(
+        folder: URL = ResearchSandboxFiles.defaultFolder,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> URL {
+        sandboxGiven ? sandboxURL
+            : ResearchSandboxFiles.sandboxURL(folder: folder, environment: environment)
+    }
 
     public static let usage = """
     usage: sandseek <question> [options]
@@ -71,7 +86,9 @@ public struct ResearchArguments: Equatable, Sendable {
                                limits make TUFF stop generating; with off,
                                TUFF finishes an abandoned reply anyway. Not
                                available for llamacpp yet.
-      --sandbox <url>          Web sandbox (default: http://127.0.0.1:9100).
+      --sandbox <url>          Web sandbox (default: the port the sandbox's start
+                               recorded, or SANDSEEK_SANDBOX_PORT if set; else
+                               http://127.0.0.1:9100).
       --max-steps <1...100>    Model turns that may use tools (default 8).
       --max-tokens <n>         Completion tokens per model turn, 64...32768
                                (default 2048, or 8192 with reasoning on).
@@ -242,6 +259,7 @@ public struct ResearchArguments: Equatable, Sendable {
                 parsed.stream = try onOff(argument)
             case "--sandbox":
                 parsed.sandboxURL = try ResearchEndpoint.loopbackURL(try value(argument), flag: argument)
+                parsed.sandboxGiven = true
             case "--max-steps":
                 parsed.options.maxSteps = try integer(argument, ResearchOptions.maxStepsRange)
             case "--max-tokens":

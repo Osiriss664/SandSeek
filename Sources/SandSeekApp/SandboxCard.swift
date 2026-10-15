@@ -144,7 +144,7 @@ struct SandboxCard: View {
                 ? " It was left running when SandSeek last closed unexpectedly; it stops when SandSeek quits." : ""
             switch sandbox.protection {
             case .verified:
-                return "Ready on 127.0.0.1:\(ResearchSandboxController.port), with no Mac folders."
+                return "Ready on 127.0.0.1:\(sandbox.baseURL.port ?? ResearchSandboxController.port), with no Mac folders."
                     + leftOver
             case .checking, .unknown:
                 return "Checking the sandbox\u{2019}s firewall and privileges\u{2026}" + leftOver

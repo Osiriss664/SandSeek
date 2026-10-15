@@ -53,7 +53,7 @@ if let path = arguments.replayFiguresPath {
 if arguments.checkExposure {
     let result = await ResearchExposureCommand.run(
         serverPort: arguments.serverURL.port ?? 80,
-        sandboxPort: arguments.sandboxURL.port ?? 80)
+        sandboxPort: arguments.resolvedSandboxURL().port ?? 80)
     print(result.text)
     exit(result.exitCode)
 }
@@ -113,7 +113,7 @@ let agent = ResearchAgent(
         authorization: authorization,
         transport: transport),
     sandbox: ResearchSandboxClient(
-        baseURL: arguments.sandboxURL, transport: sandboxTransport,
+        baseURL: arguments.resolvedSandboxURL(), transport: sandboxTransport,
         secretFile: ResearchSandboxSecret.defaultFileURL),
     options: arguments.options,
     onEvent: { event in

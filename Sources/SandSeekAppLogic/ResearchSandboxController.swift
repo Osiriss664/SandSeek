@@ -112,11 +112,18 @@ public final class ResearchSandboxController {
     }
 
     public static let imageName = "sandseek-sandbox:latest"
-    public static let containerName = "sandseek-sandbox"
+    /// The first part of every VM's name. Each start makes a new VM called
+    /// `sandseek-sandbox-<8 hex digits>` and records the name (see
+    /// `ResearchSandboxFiles`); plain `sandseek-sandbox` is the name SandSeek
+    /// 0.1.0 used, which the next start still removes.
+    public static let containerName = ResearchSandboxFiles.namePrefix
     /// The nft table `firewall.nft` loads inside the VM.
     public static let firewallTable = "sandseek_sandbox"
-    public static let port = 9100
-    public static let defaultURL = URL(string: "http://127.0.0.1:9100")!
+    /// The port the server and the firewall use inside the VM. On the Mac the
+    /// sandbox is on a free port that each start picks and records; this is
+    /// also the port assumed when none is recorded.
+    public static let port = ResearchSandboxFiles.fallbackPort
+    public static let defaultURL = ResearchSandboxFiles.url(port: port)
     static let fingerprintKey = "ResearchSandboxImageFingerprint"
     static let markerName = "sandbox-started-by-app"
 
@@ -153,7 +160,14 @@ public final class ResearchSandboxController {
     /// What the card says while `restart` builds or starts the VM for the
     /// next question; nil otherwise.
     public private(set) var restartNote: String?
-    public let baseURL: URL
+    /// Where the sandbox answers: `baseURL` when one was given (tests), else
+    /// the port the last start recorded, read now, else port 9100.
+    public var baseURL: URL {
+        fixedBaseURL ?? ResearchSandboxFiles.sandboxURL(folder: sandboxFolder, environment: [:])
+    }
+    private let fixedBaseURL: URL?
+    /// The folder with the secret and what the start records beside it.
+    private let sandboxFolder: URL
     private let stateDirectory: URL
 
     private let runner: any ResearchProcessRunning
@@ -174,7 +188,7 @@ public final class ResearchSandboxController {
     /// The clock for `lastSignedCheck`; tests pass a fixed one.
     private let now: @Sendable () -> Date
 
-    public init(baseURL: URL = ResearchSandboxController.defaultURL,
+    public init(baseURL: URL? = nil,
                 runner: any ResearchProcessRunning = FoundationProcessRunner(),
                 containerTool: ResearchContainerTool? = nil,
                 transport: any ResearchHTTPTransport = URLSessionResearchTransport(timeout: 3),
@@ -184,8 +198,9 @@ public final class ResearchSandboxController {
                 stateDirectory: URL = ResearchSandboxController.defaultStateDirectory(),
                 secretFile: URL = ResearchSandboxSecret.defaultFileURL,
                 now: @escaping @Sendable () -> Date = { Date() }) {
-        self.baseURL = baseURL
+        self.fixedBaseURL = baseURL
         self.secretFile = secretFile
+        self.sandboxFolder = ResearchSandboxFiles.folder(ofSecretFile: secretFile)
         self.now = now
         self.stateDirectory = stateDirectory
         self.runner = runner
@@ -211,20 +226,28 @@ public final class ResearchSandboxController {
     /// `ResearchCommandEnvironment` (a short PATH of system folders, the home
     /// and temporary folders, the language) plus the few settings the script
     /// reads, `SANDSEEK_DNS` and `SEARXNG_URL`, when `base` has them. Nothing
-    /// else of `base` is passed on. The script takes its port from
-    /// `SANDSEEK_SANDBOX_PORT`; the app looks for the sandbox on `port` and
-    /// checks the VM by name, so a value exported for command line work must
-    /// not move the VM to another port. The port is therefore always `port`,
-    /// and the source folder override (which the app resolves itself) never
-    /// reaches the script.
+    /// else of `base` is passed on. In particular `SANDSEEK_SANDBOX_PORT`, which
+    /// fixes the script's port for tests, never reaches it: the app lets each
+    /// start pick a free port and reads it back from the file the start
+    /// writes, so a value exported for command line work must not pin the
+    /// app's VM to one port. The source folder override (which the app
+    /// resolves itself) never reaches the script either.
     static func scriptEnvironment(_ base: [String: String]) -> [String: String] {
         var environment = ResearchCommandEnvironment.environment(base: base)
         for name in ResearchCommandEnvironment.sandboxScriptNames {
             if let value = base[name], !value.isEmpty { environment[name] = value }
         }
-        environment["SANDSEEK_SANDBOX_PORT"] = String(port)
         return environment
     }
+
+    /// The name of the VM to talk to: the one the last start recorded, else
+    /// the plain name SandSeek 0.1.0 used.
+    private func vmName() -> String {
+        let recorded = try? ResearchSandboxFiles.readName(in: sandboxFolder)
+        return recorded ?? Self.containerName
+    }
+
+    private var lockFile: URL { ResearchSandboxFiles.lockFile(in: sandboxFolder) }
 
     /// The `container` program to run, after checking it. The check is made
     /// once per session and again only if the file at its path is not the one
@@ -292,7 +315,7 @@ public final class ResearchSandboxController {
     /// Checks from outside the VM that its firewall is loaded and that the
     /// web server runs as the unprivileged user with no capabilities. The
     /// screen only allows questions once this passes, whatever the folder's
-    /// script did, and it also shows that port 9100 really is this sandbox.
+    /// script did, and it also shows that the recorded port really is this sandbox.
     public func verifyProtection() async {
         guard state == .ready, protection != .checking else { return }
         protection = .checking
@@ -304,9 +327,10 @@ public final class ResearchSandboxController {
             protection = .notVerified(String(describing: error))
             return
         }
+        let vm = vmName()
         let firewall = try? await runner.run(
             executable: container,
-            arguments: ["exec", Self.containerName,
+            arguments: ["exec", vm,
                         "nft", "list", "table", "inet", Self.firewallTable],
             environment: environment, timeout: 30)
         guard state == .ready else { return }
@@ -322,7 +346,7 @@ public final class ResearchSandboxController {
         }
         let privileges = try? await runner.run(
             executable: container,
-            arguments: ["exec", Self.containerName,
+            arguments: ["exec", vm,
                         "python3", "-c", Self.privilegeCheck],
             environment: environment, timeout: 30)
         guard state == .ready else { return }
@@ -454,7 +478,8 @@ public final class ResearchSandboxController {
     }
 
     /// The input chain `firewall.nft` writes: policy drop, loopback and
-    /// replies accepted, and new connections accepted on port 9100 from one
+    /// replies accepted, and new connections accepted on port 9100 (the port
+    /// inside the VM, whatever port the Mac publishes it on) from one
     /// IPv4 address only, the VM's default gateway (the address the published
     /// port connects from). nft may print port 9100 by its service name. Any
     /// other rule, or none for port 9100, is a
@@ -616,6 +641,15 @@ public final class ResearchSandboxController {
         let script = files.script
         selfTest = nil
         lastCheckFailure = nil
+        // One SandSeek at a time. If another one holds the sandbox's lock, say
+        // so now instead of building an image first. (The script takes the
+        // lock itself and decides again; this only saves the wait.)
+        // (A sandbox this app started earlier and that no longer answers may
+        // still hold it: that one is the app's own to replace.)
+        if !startedByApp, case .held = ResearchSandboxLock.status(of: lockFile) {
+            state = .failed(ResearchSandboxLock.busyMessage)
+            return
+        }
         // Before anything is built or started: only Apple's tool is run.
         state = .preparing
         let container: URL
@@ -636,7 +670,7 @@ public final class ResearchSandboxController {
             defaults.save(fingerprint, forKey: Self.fingerprintKey)
         }
         state = .starting
-        guard let started = await runScript(script, "start") else { return }
+        guard let started = await runScript(script, "start", replacing: startedByApp) else { return }
         guard started.status == 0 else {
             state = .failed(Self.message(for: started, doing: "start the sandbox"))
             return
@@ -659,7 +693,9 @@ public final class ResearchSandboxController {
     /// marker file would be gone, so a crash during the start would leave the
     /// VM running with nobody to stop it. Here the state goes straight to
     /// `.starting`, `startedByApp` and the marker stay, and `start` of the
-    /// script (which stops and deletes the old VM itself) does the work. It
+    /// script does the work: told that the running sandbox is this app's own
+    /// (`SANDSEEK_SANDBOX_REPLACE`), it ends that one's hold on the lock,
+    /// removes its VM and makes a new VM with a new name and port. It
     /// rebuilds the image first when the sandbox's files changed. On any
     /// failure the state is `.failed` and no question may start. Does nothing
     /// for a sandbox the app did not start.
@@ -693,7 +729,9 @@ public final class ResearchSandboxController {
             defaults.save(fingerprint, forKey: Self.fingerprintKey)
             state = .starting
         }
-        guard let started = await runScript(script, "start") else { return false }
+        // The VM that holds the lock is this app's own, so the script may end
+        // it and take the lock itself in the same call.
+        guard let started = await runScript(script, "start", replacing: true) else { return false }
         guard started.status == 0 else {
             state = .failed(Self.message(for: started, doing: "restart the sandbox"))
             return false
@@ -726,6 +764,8 @@ public final class ResearchSandboxController {
         }
         state = .stopping
         selfTest = nil
+        // The script deletes the record of the VM's name, so read it first.
+        let vm = vmName()
         guard let stopped = await runScript(script, "stop") else { return }
         guard stopped.status == 0 else {
             state = .failed(Self.message(for: stopped, doing: "stop the sandbox"))
@@ -733,7 +773,7 @@ public final class ResearchSandboxController {
         }
         // The script ignores errors from `container stop` and `delete`, so
         // check that the container is really gone before saying "Off".
-        if let problem = await containerLeftOver() {
+        if let problem = await containerLeftOver(named: vm) {
             state = .failed(problem)
             return
         }
@@ -742,9 +782,10 @@ public final class ResearchSandboxController {
         state = .off
     }
 
-    /// Nil when no container named `sandseek-sandbox` exists, running or
-    /// stopped; otherwise what to tell the user.
-    private func containerLeftOver() async -> String? {
+    /// Nil when no container called `name` (the VM this app stopped) exists,
+    /// running or stopped; otherwise what to tell the user. Other sandbox VMs
+    /// are not looked at: they belong to another SandSeek.
+    private func containerLeftOver(named name: String) async -> String? {
         let container: URL
         do {
             container = try await trustedContainer()
@@ -763,21 +804,39 @@ public final class ResearchSandboxController {
                 return "The sandbox was stopped, but SandSeek could not check that its container is "
                     + "gone. Run `container list --all` in Terminal to look."
             }
-            guard Self.listsContainer(listed.output) else { return nil }
+            guard Self.listsContainer(listed.output, named: name) else { return nil }
             if attempt < 5 { try? await Task.sleep(for: .milliseconds(500)) }
         }
         return "The sandbox's container is still there after stopping. Click Stop again, or run "
-            + "`container stop \(Self.containerName)` and `container delete \(Self.containerName)` in Terminal."
+            + "`container stop \(name)` and `container delete \(name)` in Terminal."
     }
 
-    /// Whether `container list --all` output has a row whose first column,
-    /// the container's ID, is the sandbox's name. Apple's `container list`
-    /// prints the ID first; if that ever changes, this finds nothing and the
-    /// tests in ResearchAppTests should be updated with the new layout.
+    /// Whether `name` is a name `start` gives a sandbox VM: `sandseek-sandbox-`
+    /// and 8 lower-case hex digits, or the plain `sandseek-sandbox` of 0.1.0.
+    /// A container someone started by hand under another name is not one.
+    static func isSandboxContainer(_ name: String) -> Bool {
+        name == containerName || ResearchSandboxFiles.parseName(name) != nil
+    }
+
+    /// The IDs in `container list --all` output (the first column of each row;
+    /// Apple's `container list` prints the ID first, and if that ever changes
+    /// the tests in ResearchAppTests should be updated with the new layout)
+    /// that are sandbox VMs. These are the ones the script removes, under the
+    /// lock, at the next start.
+    static func sandboxContainers(in output: String) -> [String] {
+        output.split(whereSeparator: \.isNewline).compactMap { line in
+            line.split(whereSeparator: { $0.isWhitespace }).first.map(String.init)
+        }.filter(isSandboxContainer)
+    }
+
+    /// Whether the output lists a sandbox VM at all.
     static func listsContainer(_ output: String) -> Bool {
-        output.split(whereSeparator: \.isNewline).contains { line in
-            line.split(whereSeparator: { $0.isWhitespace }).first.map(String.init) == containerName
-        }
+        !sandboxContainers(in: output).isEmpty
+    }
+
+    /// Whether the output lists the VM called `name`.
+    static func listsContainer(_ output: String, named name: String) -> Bool {
+        sandboxContainers(in: output).contains(name)
     }
 
     public func runSelfTest() async {
@@ -805,6 +864,7 @@ public final class ResearchSandboxController {
     /// the next launch can still take over anything left running.
     public func stopWhenQuitting() {
         guard startedByApp, let script = prepareFiles(reportFailure: false)?.script else { return }
+        let vm = vmName()
         guard Self.runAndWait("/bin/bash", [script.path, "stop"],
                               environment: environment, timeout: 20)?.status == 0
         else { return }
@@ -818,7 +878,7 @@ public final class ResearchSandboxController {
         for attempt in 1...3 {
             if let listed = Self.runAndWait(containerTool.path, ["list", "--all"],
                                             environment: environment, timeout: 2),
-               listed.status == 0, !Self.listsContainer(listed.output) {
+               listed.status == 0, !Self.listsContainer(listed.output, named: vm) {
                 startedByApp = false
                 adoptedFromLastRun = false
                 return
@@ -850,9 +910,12 @@ public final class ResearchSandboxController {
                                      output: String(decoding: data, as: UTF8.self))
     }
 
-    private func runScript(_ script: URL, _ command: String) async -> ResearchProcessResult? {
+    private func runScript(_ script: URL, _ command: String,
+                           replacing: Bool = false) async -> ResearchProcessResult? {
         // A first image build downloads Python and its packages.
         let timeout: TimeInterval = command == "build" ? 1_800 : 180
+        var environment = self.environment
+        if replacing { environment["SANDSEEK_SANDBOX_REPLACE"] = "1" }
         do {
             return try await runner.run(
                 executable: URL(fileURLWithPath: "/bin/bash"),
@@ -878,6 +941,10 @@ public final class ResearchSandboxController {
         let output = ResearchText.terminalSafe(result.output)
         if result.status == 127 || output.contains("Apple container is not installed") {
             return ResearchContainerError.notInstalled.description
+        }
+        // The script exits with 75 when another SandSeek holds the sandbox.
+        if result.status == 75 || output.contains(ResearchSandboxLock.busyMessage) {
+            return ResearchSandboxLock.busyMessage
         }
         let tail = ResearchText.terminalSafe(result.tail())
         return tail.isEmpty ? "Could not \(action) (exit \(result.status))."

@@ -1042,7 +1042,7 @@ private struct UnsignedServices: ResearchHTTPTransport {
         })
     }
 
-    @Test func theScriptAlwaysGetsTheFixedPortAndNoSourceFolder() async throws {
+    @Test func theScriptNeverGetsAFixedPortOrASourceFolder() async throws {
         let runner = FakeProcessRunner()
         let sandbox = ResearchSandboxController(
             runner: runner, containerTool: .trustedForTests(), transport: FakeResearchServices(), defaults: defaults(),
@@ -1054,7 +1054,8 @@ private struct UnsignedServices: ResearchHTTPTransport {
         let environments = runner.environments
         #expect(!environments.isEmpty)
         for environment in environments {
-            #expect(environment["SANDSEEK_SANDBOX_PORT"] == "9100")
+            // Each start picks a free port; an exported one must not pin it.
+            #expect(environment["SANDSEEK_SANDBOX_PORT"] == nil)
             #expect(environment["SANDSEEK_SANDBOX_NAME"] == nil)
             #expect(environment["SANDSEEK_SOURCE_DIR"] == nil)
             // Other settings the script reads are left alone.
