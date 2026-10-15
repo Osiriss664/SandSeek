@@ -93,10 +93,15 @@ struct ReportFoldSection<Content: View>: View {
 
     var body: some View {
         DisclosureGroup(isExpanded: $isExpanded) {
-            content.padding(.top, 4)
+            // A macOS disclosure group centres narrow content; keep it at the
+            // leading edge, under the title.
+            content
+                .padding(.top, 4)
+                .frame(maxWidth: .infinity, alignment: .leading)
         } label: {
             Text(title).font(.caption).foregroundStyle(.orange)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
