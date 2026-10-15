@@ -39,11 +39,13 @@ addresses go to the internet. More in [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.m
 ## Quick start
 
 1. Install [Apple `container`](https://github.com/apple/container) and a local
-   model server. SandSeek 0.2.0 works with two:
+   model server. SandSeek works with three:
    - **TUFF** 8.3.1 or newer (tested with Qwen3.6 35B).
-   - **llama.cpp** (`llama-server`), experimental in 0.2.0.
+   - **llama.cpp** (`llama-server`), experimental.
+   - **Ollama**, experimental (not yet tested on a Mac): `ollama serve` and a
+     model with tool support. See [docs/INSTALL.md](docs/INSTALL.md).
 
-   Ollama and LM Studio are planned; other servers are not supported yet.
+   LM Studio is planned; other servers are not supported yet.
 2. Get the app, in one of two ways:
    - **Download:** `SandSeek-0.2.0.zip` from the release page, unzip it and
      move SandSeek to Applications. It is not notarized: on first launch
@@ -96,8 +98,8 @@ above all test reports.
 - Apple silicon, macOS 26 (needed by Apple `container`)
 - [Apple `container`](https://github.com/apple/container) 1.5.0 or newer, installed with
   Apple's installer (SandSeek runs only `/usr/local/bin/container`)
-- A local model server on 127.0.0.1: TUFF 8.3.1 or newer, or llama.cpp
-  (experimental, see below). Streaming is on by
+- A local model server on 127.0.0.1: TUFF 8.3.1 or newer, or llama.cpp or
+  Ollama (both experimental, see below). Streaming is on by
   default for TUFF, so that Stop and the time limits make it stop generating.
   llama.cpp (`llama-server`) is experimental in 0.2.0: it works through
   `--server-type llamacpp` with plain requests (no streaming), the app's
@@ -106,6 +108,13 @@ above all test reports.
   server that runs on 127.0.0.1, and can also start `TUFFServer` or
   `llama-server` itself (**Start server** on the model server card). It stops
   only a server it started, when you quit it normally.
+  Ollama (experimental, `--server-type ollama`) uses Ollama's own `/api/chat`
+  with streaming. You start it yourself (`ollama serve`): SandSeek never
+  starts or stops Ollama. The model needs tool support; Ollama cloud models
+  (names ending in `:cloud` or `-cloud`) are refused, because they run on
+  ollama.com. SandSeek asks for a 32,768-token context (or the model's
+  maximum if that is smaller); `--context-tokens N` changes it. Ollama has no
+  default model, so name one with `--model`.
 - A Swift 6.2 toolchain to build
 
 ## Build
@@ -139,8 +148,9 @@ exported with **Export as PDF…**. When the sandbox is verified, its card shows
 "Signed · checked HH:MM". **Stop everything** stops the question, the sandbox
 and a model server SandSeek started.
 
-- **Model server.** Pick TUFF (127.0.0.1:8080) or llama.cpp (127.0.0.1:8081);
-  Ollama and LM Studio are listed as "later". The address can be edited but
+- **Model server.** Pick TUFF (127.0.0.1:8080), llama.cpp (127.0.0.1:8081) or Ollama
+  (127.0.0.1:11434, experimental; the model list shows only local models with
+  tool support); LM Studio is listed as "later". The address can be edited but
   must be on this Mac's loopback interface, with a port (not the sandbox's,
   which each start picks and records). A ready server is asked only its status route every ten seconds
   (TUFF `/tuff/v1/status`, llama.cpp `/health`); the model list (`/v1/models`)
@@ -252,8 +262,10 @@ To record real streams from a running server for test fixtures, use
 - llama.cpp is experimental: plain (non-streaming) requests, and the
   thinking setting is sent where llama.cpp ignores it (it reads only
   `chat_template_kwargs.enable_thinking`). The probe on a Mac confirmed the
-  key file, `/props`, `/health`, tool calls and the context window. Ollama and
-  LM Studio come later.
+  key file, `/props`, `/health`, tool calls and the context window.
+- Ollama support is experimental and has not been tested on a Mac yet: the
+  requests follow Ollama's documented API and a hand-written test server, not
+  a recorded session. LM Studio comes later.
 - Thorough preset values are a first guess; they will be adjusted after
   measuring.
 - The pre-question check does not yet verify mounts or that the recorded port

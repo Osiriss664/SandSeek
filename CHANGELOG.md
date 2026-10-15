@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Experimental Ollama support (`--server-type ollama`, or the Ollama choice on
+  the model server card), through Ollama's native `/api/chat` with streaming.
+  Not yet tested on a Mac. You start Ollama yourself; SandSeek never starts or
+  stops it. The model must support tool calls and run on this Mac: Ollama cloud
+  models are refused. The context is 32,768 tokens (or the model's maximum if
+  smaller); `--context-tokens N` changes it. The exposure check advises
+  `OLLAMA_HOST=127.0.0.1:11434`.
+- `Scripts/full_test.sh` takes `--server-type tuff|llamacpp|ollama|auto`.
+
 ## 0.2.0 (15 October 2026)
 
 The sandbox image must be rebuilt: the app does it by itself on the first Start;

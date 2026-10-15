@@ -34,8 +34,9 @@ For what the security design does and does not promise, read
     project probed it with Bonsai). llama.cpp is experimental in 0.2.0: no
     streaming, the Thinking switch has no effect on it yet, and no research
     run was measured with it; see [SECURITY.md](SECURITY.md).
-  - Ollama and LM Studio are planned (the picker shows them as "later");
-    other servers are not supported yet.
+  - **Ollama**, experimental (not yet tested on a Mac). See "Ollama" below.
+  - LM Studio is planned (the picker shows it as "later"); other servers are
+    not supported yet.
 - Research makes many long prompts, so model speed matters. Qwen3.6 35B-A3B on
   TUFF gives good answers and takes a few minutes per question; Gemma 4 E4B is
   faster and weaker. A model that has to stream far more than the installed
@@ -128,6 +129,31 @@ An answer with a version number means it runs. TUFF 8.3.1 has no check of the
 [SECURITY.md](SECURITY.md)). If you start it with the button, it is easy to
 leave it running for hours with the window open: click **Stop server** when you
 are done.
+
+### Ollama (experimental)
+
+SandSeek talks to Ollama's own API (`/api/chat`) on `127.0.0.1:11434`. It has
+not been tested on a Mac yet.
+
+1. Install Ollama. Two ways, which differ in updates: the app from
+   ollama.com updates itself; `brew install ollama` does **not** update itself,
+   so run `brew upgrade ollama` now and then.
+2. Start it yourself: `ollama serve` (the app starts it for you). To make sure
+   it listens on this Mac only, start it as
+   `OLLAMA_HOST=127.0.0.1:11434 ollama serve`. SandSeek never starts or stops
+   Ollama; the **Start server** button is not offered for it.
+3. Pull a model that supports tool calls, for example `ollama pull qwen3:8b`.
+   `ollama show <model>` lists "tools" under Capabilities. Models without it
+   are refused. Cloud models (`:cloud`, `-cloud`, or a model that Ollama
+   forwards to ollama.com) are refused too: SandSeek keeps your question on
+   this Mac.
+4. Choose **Ollama** on the model server card, or use the command line:
+   `sandseek "question" --server-type ollama --model qwen3:8b`. Ollama has no
+   default model, so the model must be named.
+5. Context size: SandSeek asks Ollama for 32,768 tokens, or the model's
+   maximum if it is smaller (Ollama's own default is much smaller and would
+   cut the research short). A larger context uses more memory. Change it with
+   `--context-tokens N` (4096 to 262144).
 
 ### llama.cpp
 
