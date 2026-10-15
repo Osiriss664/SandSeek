@@ -619,7 +619,7 @@ private struct UnsignedServices: ResearchHTTPTransport {
                             stateDirectory: URL = temporaryDirectory()) throws
         -> ResearchSandboxController {
         ResearchSandboxController(
-            runner: runner, transport: services, defaults: defaults(),
+            runner: runner, containerTool: .trustedForTests(), transport: services, defaults: defaults(),
             environment: [:], resources: try testResources(bundle: bundle),
             stateDirectory: stateDirectory, secretFile: TestSandboxSecret.file)
     }
@@ -630,7 +630,7 @@ private struct UnsignedServices: ResearchHTTPTransport {
         let services = FakeResearchServices()
         let missing = temporaryDirectory().appendingPathComponent("secret")
         let sandbox = ResearchSandboxController(
-            runner: FakeProcessRunner(), transport: services, defaults: defaults(),
+            runner: FakeProcessRunner(), containerTool: .trustedForTests(), transport: services, defaults: defaults(),
             environment: [:], resources: try testResources(),
             stateDirectory: temporaryDirectory(), secretFile: missing)
         await sandbox.refresh()
@@ -649,7 +649,7 @@ private struct UnsignedServices: ResearchHTTPTransport {
     @Test func aSandboxThatAnswersUnsignedIsNotRunning() async throws {
         // Something else on the port: it answers /health, but not signed.
         let sandbox = ResearchSandboxController(
-            runner: FakeProcessRunner(), transport: UnsignedServices(), defaults: defaults(),
+            runner: FakeProcessRunner(), containerTool: .trustedForTests(), transport: UnsignedServices(), defaults: defaults(),
             environment: [:], resources: try testResources(),
             stateDirectory: temporaryDirectory(), secretFile: TestSandboxSecret.file)
         await sandbox.refresh()
@@ -686,7 +686,7 @@ private struct UnsignedServices: ResearchHTTPTransport {
         #expect(sandbox.startedByApp)
         #expect(runner.scriptCommands == ["build", "start"])
         #expect(runner.commands.contains {
-            $0.starts(with: ["env", "container", "exec", "sandseek-sandbox", "nft",
+            $0.starts(with: ["container", "exec", "sandseek-sandbox", "nft",
                              "list", "table", "inet", "sandseek_sandbox"])
         })
 
@@ -728,7 +728,7 @@ private struct UnsignedServices: ResearchHTTPTransport {
         await sandbox.stop()
         #expect(sandbox.state == .off)
         #expect(!sandbox.startedByApp)
-        #expect(runner.commands.contains(["env", "container", "list", "--all"]))
+        #expect(runner.commands.contains(["container", "list", "--all"]))
     }
 
     @Test func onlyTheIDColumnCountsAsTheSandbox() {
@@ -920,7 +920,7 @@ private struct UnsignedServices: ResearchHTTPTransport {
     @Test func withoutSandboxFilesInTheAppItSaysHowToGetThem() async {
         let runner = FakeProcessRunner()
         let sandbox = ResearchSandboxController(
-            runner: runner, transport: FakeResearchServices(sandboxHealthy: false),
+            runner: runner, containerTool: .trustedForTests(), transport: FakeResearchServices(sandboxHealthy: false),
             defaults: defaults(), environment: [:],
             resources: SandboxResources(bundledRoot: nil, environment: [:], allowsOverride: false),
             stateDirectory: temporaryDirectory(), secretFile: TestSandboxSecret.file)
@@ -937,7 +937,7 @@ private struct UnsignedServices: ResearchHTTPTransport {
         let checkout = try fakeSandboxBundle()
         let runner = FakeProcessRunner()
         let sandbox = ResearchSandboxController(
-            runner: runner, transport: FakeResearchServices(), defaults: defaults(),
+            runner: runner, containerTool: .trustedForTests(), transport: FakeResearchServices(), defaults: defaults(),
             environment: [:],
             resources: SandboxResources(
                 bundledRoot: nil,
@@ -955,7 +955,7 @@ private struct UnsignedServices: ResearchHTTPTransport {
     @Test func theScriptAlwaysGetsTheFixedPortAndNoSourceFolder() async throws {
         let runner = FakeProcessRunner()
         let sandbox = ResearchSandboxController(
-            runner: runner, transport: FakeResearchServices(), defaults: defaults(),
+            runner: runner, containerTool: .trustedForTests(), transport: FakeResearchServices(), defaults: defaults(),
             environment: ["PATH": "/usr/bin", "SANDSEEK_SANDBOX_PORT": "9555",
                           "SANDSEEK_SANDBOX_NAME": "other", "SANDSEEK_SOURCE_DIR": "/tmp/x",
                           "SANDSEEK_DNS": "1.1.1.1"],
@@ -969,16 +969,9 @@ private struct UnsignedServices: ResearchHTTPTransport {
             #expect(environment["SANDSEEK_SOURCE_DIR"] == nil)
             // Other settings the script reads are left alone.
             #expect(environment["SANDSEEK_DNS"] == "1.1.1.1")
-            #expect(environment["PATH"] == "/usr/bin")
+            // The shell's PATH does not count; the fixed one does.
+            #expect(environment["PATH"] == "/usr/bin:/bin:/usr/sbin:/sbin")
         }
-    }
-
-    @Test func pathIncludesWhereContainerInstalls() {
-        let environment = ResearchCommandEnvironment.environment(base: ["PATH": "/usr/bin:/bin"])
-        let path = environment["PATH"]?.split(separator: ":").map(String.init) ?? []
-        #expect(path.contains("/usr/local/bin"))
-        #expect(path.contains("/opt/homebrew/bin"))
-        #expect(Set(path).count == path.count)
     }
 
     @Test func aHungCommandIsEnded() async throws {
@@ -1023,7 +1016,7 @@ private final class SlowStartRunner: ResearchProcessRunning, @unchecked Sendable
         let stateDirectory = temporaryDirectory()
         let bundle = try fakeSandboxBundle()
         let sandbox = ResearchSandboxController(
-            runner: runner, transport: FakeResearchServices(), defaults: MemorySettings(),
+            runner: runner, containerTool: .trustedForTests(), transport: FakeResearchServices(), defaults: MemorySettings(),
             environment: [:], resources: try testResources(bundle: bundle),
             stateDirectory: stateDirectory, secretFile: TestSandboxSecret.file)
         let server = ResearchServerController(

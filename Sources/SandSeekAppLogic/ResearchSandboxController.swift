@@ -157,6 +157,12 @@ public final class ResearchSandboxController {
     private let stateDirectory: URL
 
     private let runner: any ResearchProcessRunning
+    /// The one `container` program SandSeek runs (see `ResearchContainerTool`).
+    private let containerTool: ResearchContainerTool
+    /// Which tool file passed `verify()` this session; nil until it did. A
+    /// different file at the same path, or the same file changed, is checked
+    /// again before it is run.
+    private var verifiedToolIdentity: String?
     private let transport: any ResearchHTTPTransport
     private let defaults: any ResearchSettingsStore
     private let environment: [String: String]
@@ -170,9 +176,10 @@ public final class ResearchSandboxController {
 
     public init(baseURL: URL = ResearchSandboxController.defaultURL,
                 runner: any ResearchProcessRunning = FoundationProcessRunner(),
+                containerTool: ResearchContainerTool? = nil,
                 transport: any ResearchHTTPTransport = URLSessionResearchTransport(timeout: 3),
                 defaults: any ResearchSettingsStore = UserDefaults.standard,
-                environment: [String: String] = ResearchCommandEnvironment.environment(),
+                environment: [String: String] = ProcessInfo.processInfo.environment,
                 resources: SandboxResources = SandboxResources(),
                 stateDirectory: URL = ResearchSandboxController.defaultStateDirectory(),
                 secretFile: URL = ResearchSandboxSecret.defaultFileURL,
@@ -182,6 +189,7 @@ public final class ResearchSandboxController {
         self.now = now
         self.stateDirectory = stateDirectory
         self.runner = runner
+        self.containerTool = containerTool ?? ResearchContainerTool(runner: runner)
         self.transport = transport
         self.defaults = defaults
         self.environment = Self.scriptEnvironment(environment)
@@ -199,18 +207,36 @@ public final class ResearchSandboxController {
         return support.appendingPathComponent("SandSeek/State", isDirectory: true)
     }
 
-    /// The environment the script and `container` run with. The script takes
-    /// its port from `SANDSEEK_SANDBOX_PORT`; the app looks for the sandbox on
-    /// `port` and checks the VM by name, so a value exported for command line
-    /// work must not move the VM to another port. The port is therefore
-    /// pinned, and every other `SANDSEEK_SANDBOX_*` name and the source
-    /// folder override (which the app resolves itself) are removed.
+    /// The environment the script and `container` run with: the fixed one of
+    /// `ResearchCommandEnvironment` (a short PATH of system folders, the home
+    /// and temporary folders, the language) plus the few settings the script
+    /// reads, `SANDSEEK_DNS` and `SEARXNG_URL`, when `base` has them. Nothing
+    /// else of `base` is passed on. The script takes its port from
+    /// `SANDSEEK_SANDBOX_PORT`; the app looks for the sandbox on `port` and
+    /// checks the VM by name, so a value exported for command line work must
+    /// not move the VM to another port. The port is therefore always `port`,
+    /// and the source folder override (which the app resolves itself) never
+    /// reaches the script.
     static func scriptEnvironment(_ base: [String: String]) -> [String: String] {
-        var environment = base.filter {
-            !$0.key.hasPrefix("SANDSEEK_SANDBOX_") && $0.key != SandboxResources.overrideVariable
+        var environment = ResearchCommandEnvironment.environment(base: base)
+        for name in ResearchCommandEnvironment.sandboxScriptNames {
+            if let value = base[name], !value.isEmpty { environment[name] = value }
         }
         environment["SANDSEEK_SANDBOX_PORT"] = String(port)
         return environment
+    }
+
+    /// The `container` program to run, after checking it. The check is made
+    /// once per session and again only if the file at its path is not the one
+    /// that was checked. A failure is returned as the error to show.
+    private func trustedContainer() async throws -> URL {
+        if let verifiedToolIdentity, containerTool.currentIdentity() == verifiedToolIdentity {
+            return containerTool.url
+        }
+        verifiedToolIdentity = nil
+        try await containerTool.verify()
+        verifiedToolIdentity = containerTool.currentIdentity()
+        return containerTool.url
     }
 
     private var markerURL: URL { stateDirectory.appendingPathComponent(Self.markerName) }
@@ -270,9 +296,17 @@ public final class ResearchSandboxController {
     public func verifyProtection() async {
         guard state == .ready, protection != .checking else { return }
         protection = .checking
+        let container: URL
+        do {
+            container = try await trustedContainer()
+        } catch {
+            guard state == .ready else { return }
+            protection = .notVerified(String(describing: error))
+            return
+        }
         let firewall = try? await runner.run(
-            executable: URL(fileURLWithPath: "/usr/bin/env"),
-            arguments: ["container", "exec", Self.containerName,
+            executable: container,
+            arguments: ["exec", Self.containerName,
                         "nft", "list", "table", "inet", Self.firewallTable],
             environment: environment, timeout: 30)
         guard state == .ready else { return }
@@ -287,8 +321,8 @@ public final class ResearchSandboxController {
             return
         }
         let privileges = try? await runner.run(
-            executable: URL(fileURLWithPath: "/usr/bin/env"),
-            arguments: ["container", "exec", Self.containerName,
+            executable: container,
+            arguments: ["exec", Self.containerName,
                         "python3", "-c", Self.privilegeCheck],
             environment: environment, timeout: 30)
         guard state == .ready else { return }
@@ -524,8 +558,17 @@ public final class ResearchSandboxController {
         let script = files.script
         selfTest = nil
         lastCheckFailure = nil
+        // Before anything is built or started: only Apple's tool is run.
+        state = .preparing
+        let container: URL
+        do {
+            container = try await trustedContainer()
+        } catch {
+            state = .failed(String(describing: error))
+            return
+        }
         let fingerprint = Self.fingerprint(of: files.sandboxFolder)
-        if await needsBuild(fingerprint: fingerprint) {
+        if await needsBuild(fingerprint: fingerprint, container: container) {
             state = .preparing
             guard let built = await runScript(script, "build") else { return }
             guard built.status == 0 else {
@@ -573,8 +616,15 @@ public final class ResearchSandboxController {
         state = .starting
         restartNote = "Restarting the sandbox for this question"
         defer { restartNote = nil }
+        let container: URL
+        do {
+            container = try await trustedContainer()
+        } catch {
+            state = .failed(String(describing: error))
+            return false
+        }
         let fingerprint = Self.fingerprint(of: files.sandboxFolder)
-        if await needsBuild(fingerprint: fingerprint) {
+        if await needsBuild(fingerprint: fingerprint, container: container) {
             restartNote = "Rebuilding the sandbox"
             state = .preparing
             guard let built = await runScript(script, "build") else { return false }
@@ -637,12 +687,19 @@ public final class ResearchSandboxController {
     /// Nil when no container named `sandseek-sandbox` exists, running or
     /// stopped; otherwise what to tell the user.
     private func containerLeftOver() async -> String? {
+        let container: URL
+        do {
+            container = try await trustedContainer()
+        } catch {
+            return "The sandbox was stopped, but SandSeek could not check that its container is "
+                + "gone. \(error)"
+        }
         // `--rm` may still be removing the container just after it stopped,
         // so look a few times before calling it left over.
         for attempt in 1...5 {
             let listed = try? await runner.run(
-                executable: URL(fileURLWithPath: "/usr/bin/env"),
-                arguments: ["container", "list", "--all"],
+                executable: container,
+                arguments: ["list", "--all"],
                 environment: environment, timeout: 30)
             guard let listed, listed.status == 0 else {
                 return "The sandbox was stopped, but SandSeek could not check that its container is "
@@ -692,9 +749,15 @@ public final class ResearchSandboxController {
         guard Self.runAndWait("/bin/bash", [script.path, "stop"],
                               environment: environment, timeout: 10)?.status == 0
         else { return }
+        // The list is read only with a tool that passed the check earlier in
+        // this session (the quit path cannot wait for the check); without one
+        // the marker stays and the next launch looks again. The script's own
+        // `stop` above checked the tool itself.
+        guard let verifiedToolIdentity, containerTool.currentIdentity() == verifiedToolIdentity
+        else { return }
         // Three looks, since `--rm` may still be removing the container.
         for attempt in 1...3 {
-            if let listed = Self.runAndWait("/usr/bin/env", ["container", "list", "--all"],
+            if let listed = Self.runAndWait(containerTool.path, ["list", "--all"],
                                             environment: environment, timeout: 2),
                listed.status == 0, !Self.listsContainer(listed.output) {
                 startedByApp = false
@@ -742,11 +805,11 @@ public final class ResearchSandboxController {
         }
     }
 
-    private func needsBuild(fingerprint: String) async -> Bool {
+    private func needsBuild(fingerprint: String, container: URL) async -> Bool {
         guard defaults.savedString(forKey: Self.fingerprintKey) == fingerprint else { return true }
         let inspected = try? await runner.run(
-            executable: URL(fileURLWithPath: "/usr/bin/env"),
-            arguments: ["container", "image", "inspect", Self.imageName],
+            executable: container,
+            arguments: ["image", "inspect", Self.imageName],
             environment: environment, timeout: 60)
         return inspected?.status != 0
     }
@@ -754,7 +817,7 @@ public final class ResearchSandboxController {
     static func message(for result: ResearchProcessResult, doing action: String) -> String {
         let output = ResearchText.terminalSafe(result.output)
         if result.status == 127 || output.contains("Apple container is not installed") {
-            return "Apple container is not installed. Install it from github.com/apple/container/releases."
+            return ResearchContainerError.notInstalled.description
         }
         let tail = ResearchText.terminalSafe(result.tail())
         return tail.isEmpty ? "Could not \(action) (exit \(result.status))."

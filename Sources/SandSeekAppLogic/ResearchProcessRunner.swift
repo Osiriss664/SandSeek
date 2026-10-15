@@ -4,10 +4,14 @@ public struct ResearchProcessResult: Equatable, Sendable {
     public let status: Int32
     /// Standard output and standard error together.
     public let output: String
+    /// True when the command was still running at its time limit and was
+    /// ended by the runner.
+    public let timedOut: Bool
 
-    public init(status: Int32, output: String) {
+    public init(status: Int32, output: String, timedOut: Bool = false) {
         self.status = status
         self.output = output
+        self.timedOut = timedOut
     }
 
     /// The last non-empty lines, for an error message that fits on screen.
@@ -21,7 +25,10 @@ public struct ResearchProcessResult: Equatable, Sendable {
 /// app uses `FoundationProcessRunner`.
 public protocol ResearchProcessRunning: Sendable {
     /// Ends the process with SIGTERM if it is still running after `timeout`
-    /// seconds, so a hung `container` command cannot block the screen.
+    /// seconds, and with SIGKILL three seconds later if it ignores that, so a
+    /// hung `container` command cannot block the screen. Only the last
+    /// `FoundationProcessRunner.maximumOutputBytes` bytes of its output are
+    /// returned.
     func run(executable: URL,
              arguments: [String],
              environment: [String: String],
@@ -29,6 +36,12 @@ public protocol ResearchProcessRunning: Sendable {
 }
 
 public struct FoundationProcessRunner: ResearchProcessRunning {
+    /// The most output a command gives back: its last 1 MiB. The end of a
+    /// long build or start log is where the error is.
+    public static let maximumOutputBytes = 1_048_576
+    /// How long a command that ignored SIGTERM may live before SIGKILL.
+    static let killGrace: TimeInterval = 3
+
     public init() {}
 
     /// Output goes to a temporary file rather than a pipe. `container system
@@ -44,7 +57,7 @@ public struct FoundationProcessRunner: ResearchProcessRunning {
             throw CocoaError(.fileWriteUnknown)
         }
         let handle = try FileHandle(forWritingTo: log)
-        let finished = ProcessFinishedFlag()
+        let progress = ProcessProgress()
         return try await withCheckedThrowingContinuation { continuation in
             let process = Process()
             process.executableURL = executable
@@ -54,20 +67,23 @@ public struct FoundationProcessRunner: ResearchProcessRunning {
             process.standardOutput = handle
             process.standardError = handle
             process.terminationHandler = { ended in
-                finished.set()
+                progress.markFinished()
                 try? handle.close()
-                let data = (try? Data(contentsOf: log)) ?? Data()
-                try? FileManager.default.removeItem(at: log)
+                let output = Self.readTailAndDelete(log)
                 continuation.resume(returning: ResearchProcessResult(
-                    status: ended.terminationStatus,
-                    output: String(decoding: data, as: UTF8.self)))
+                    status: ended.terminationStatus, output: output,
+                    timedOut: progress.timedOut))
             }
             do {
                 try process.run()
                 let pid = process.processIdentifier
                 DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
                     // The flag keeps a reused process id from being signalled.
-                    if !finished.isSet { kill(pid, SIGTERM) }
+                    guard progress.markTimedOutIfRunning() else { return }
+                    kill(pid, SIGTERM)
+                    DispatchQueue.global().asyncAfter(deadline: .now() + Self.killGrace) {
+                        if !progress.isFinished { kill(pid, SIGKILL) }
+                    }
                 }
             } catch {
                 try? handle.close()
@@ -76,30 +92,70 @@ public struct FoundationProcessRunner: ResearchProcessRunning {
             }
         }
     }
+
+    /// The last `maximumOutputBytes` bytes of the log as text, and the log
+    /// file is deleted.
+    private static func readTailAndDelete(_ log: URL) -> String {
+        defer { try? FileManager.default.removeItem(at: log) }
+        guard let reader = try? FileHandle(forReadingFrom: log) else { return "" }
+        defer { try? reader.close() }
+        return tail(of: reader, limit: maximumOutputBytes)
+    }
+
+    /// The last `limit` bytes of what `reader` can read, decoded as UTF-8.
+    static func tail(of reader: FileHandle, limit: Int) -> String {
+        guard let size = try? reader.seekToEnd() else { return "" }
+        let start = size > UInt64(limit) ? size - UInt64(limit) : 0
+        guard (try? reader.seek(toOffset: start)) != nil else { return "" }
+        let data = (try? reader.read(upToCount: limit)) ?? Data()
+        return String(decoding: data, as: UTF8.self)
+    }
 }
 
+/// The environment every program SandSeek starts runs with: `container`,
+/// `codesign` and the sandbox script. It is built from a short list, never
+/// filtered from the app's own environment, so nothing set in the shell or
+/// by a launcher (`DYLD_*`, `BASH_ENV`, proxy variables, tokens) reaches them.
 public enum ResearchCommandEnvironment {
-    /// Apps opened from Finder get a minimal PATH, which leaves out where
-    /// Apple `container` and Homebrew install their tools.
+    /// Only system folders. Every program is started by its full path, so this
+    /// is for what those programs start in turn (`codesign`, `container`'s
+    /// helpers, the script's `curl`, `tr`, `mktemp`).
+    public static let path = "/usr/bin:/bin:/usr/sbin:/sbin"
+    public static let language = "en_US.UTF-8"
+    /// The names copied from the app's environment when they are set: where
+    /// the user's files and temporary files are, and who the user is.
+    static let inheritedNames = ["HOME", "USER", "LOGNAME", "TMPDIR"]
+    /// The settings the sandbox script reads, passed on when set: the VM's
+    /// DNS servers and the search engine's address.
+    public static let sandboxScriptNames = ["SANDSEEK_DNS", "SEARXNG_URL"]
+
     public static func environment(
         base: [String: String] = ProcessInfo.processInfo.environment
     ) -> [String: String] {
-        var environment = base
-        let extra = ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
-        let existing = (base["PATH"] ?? "").split(separator: ":").map(String.init)
-        var path: [String] = []
-        for entry in existing + extra where !entry.isEmpty && !path.contains(entry) {
-            path.append(entry)
+        var environment = ["PATH": path, "LANG": language]
+        for name in inheritedNames {
+            if let value = base[name], !value.isEmpty { environment[name] = value }
         }
-        environment["PATH"] = path.joined(separator: ":")
         return environment
     }
 }
 
-private final class ProcessFinishedFlag: @unchecked Sendable {
+private final class ProcessProgress: @unchecked Sendable {
     private let lock = NSLock()
-    private var value = false
+    private var finished = false
+    private var didTimeOut = false
 
-    var isSet: Bool { lock.withLock { value } }
-    func set() { lock.withLock { value = true } }
+    var isFinished: Bool { lock.withLock { finished } }
+    var timedOut: Bool { lock.withLock { didTimeOut } }
+
+    func markFinished() { lock.withLock { finished = true } }
+
+    /// True when the command was still running, now marked as timed out.
+    func markTimedOutIfRunning() -> Bool {
+        lock.withLock {
+            guard !finished else { return false }
+            didTimeOut = true
+            return true
+        }
+    }
 }

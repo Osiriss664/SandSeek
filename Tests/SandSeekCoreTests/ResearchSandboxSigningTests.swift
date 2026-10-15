@@ -391,6 +391,7 @@ private final class Requests: @unchecked Sendable {
         let path: String
         let headers: [String: String]
         let body: Data
+        var timeout: TimeInterval? = nil
     }
 
     private let lock = NSLock()
@@ -465,7 +466,8 @@ private struct FakeSandbox: ResearchHTTPTransport {
     func send(method: String, url: URL, body: Data?, timeout: TimeInterval?,
               authorization: String?, headers: [String: String]) async throws -> ResearchHTTPResponse {
         let requestBody = body ?? Data()
-        requests.add(Requests.Item(method: method, path: url.path, headers: headers, body: requestBody))
+        requests.add(Requests.Item(
+            method: method, path: url.path, headers: headers, body: requestBody, timeout: timeout))
         let nonce = headers["X-Sandbox-Nonce"] ?? ""
         let honestKey = keys.value
         let path = url.path
@@ -578,6 +580,16 @@ private func everyCall(_ client: ResearchSandboxClient, expecting error: Researc
         // The body that was signed is the body that was sent.
         let search = try #require(try ResearchJSON.decode(sent[1].body)["query"]?.stringValue)
         #expect(search == "q")
+    }
+
+    @Test func everyCallHasItsOwnTimeLimit() async throws {
+        let fake = FakeSandbox()
+        let sandbox = client(fake)
+        try await sandbox.checkHealth()
+        _ = try await sandbox.search(query: "q", maxResults: 3)
+        _ = try await sandbox.fetch(url: "https://example.com/a", offset: 0, maxCharacters: 100)
+        // Far below the transport's half hour, so a hung sandbox ends the call.
+        #expect(fake.requests.all.map(\.timeout) == [10, 60, 90])
     }
 
     @Test func theTimeComesFromTheClock() async throws {

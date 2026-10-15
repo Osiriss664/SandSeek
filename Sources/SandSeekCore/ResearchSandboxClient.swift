@@ -97,6 +97,14 @@ public final class ResearchSandboxProof: @unchecked Sendable {
 public struct ResearchSandboxClient: Sendable {
     /// How long a signed health check vouches for the sandbox.
     static let identityMaxAge: TimeInterval = 5
+    /// How long each kind of call may take, in seconds, from sending the
+    /// request to the end of the answer. A sandbox that hangs must not hold
+    /// the research run for the transport's own limit (half an hour). The
+    /// fetch limit matches the sandbox's own limit for a page and its
+    /// redirects (`FETCH_TOTAL_DEADLINE`).
+    static let healthTimeout: TimeInterval = 10
+    static let searchTimeout: TimeInterval = 60
+    static let fetchTimeout: TimeInterval = 90
 
     public let baseURL: URL
     private let transport: any ResearchHTTPTransport
@@ -133,7 +141,8 @@ public struct ResearchSandboxClient: Sendable {
     public func checkHealth(requirePassages: Bool = false) async throws {
         // A 3xx is never followed (see `ResearchNoRedirectDelegate`) and is an
         // error here, as every other answer but 200.
-        let response = try await exchange(method: "GET", path: "health", body: nil)
+        let response = try await exchange(
+            method: "GET", path: "health", body: nil, timeout: Self.healthTimeout)
         guard response.status == 200 else {
             throw ResearchError.sandboxUnavailable("health check answered HTTP \(response.status)")
         }
@@ -160,7 +169,7 @@ public struct ResearchSandboxClient: Sendable {
         let reply = try await post("v1/search", [
             "query": .string(query),
             "max_results": .integer(maxResults),
-        ])
+        ], timeout: Self.searchTimeout)
         return (reply["results"]?.arrayValue ?? []).compactMap { item in
             // The sandbox only ever returns http and https addresses; anything
             // else came from something that is not the sandbox, and a result
@@ -188,7 +197,7 @@ public struct ResearchSandboxClient: Sendable {
             fields["passages"] = .bool(true)
             fields["query"] = .string(query)
         }
-        let reply = try await post("v1/fetch", fields)
+        let reply = try await post("v1/fetch", fields, timeout: Self.fetchTimeout)
         guard let finalURL = reply["url"]?.stringValue,
               let text = reply["text"]?.stringValue else {
             throw ResearchToolFailure(message: "the sandbox returned an unreadable page")
@@ -225,7 +234,8 @@ public struct ResearchSandboxClient: Sendable {
         return slice
     }
 
-    private func post(_ path: String, _ fields: [String: ResearchJSON]) async throws -> ResearchJSON {
+    private func post(_ path: String, _ fields: [String: ResearchJSON],
+                      timeout: TimeInterval) async throws -> ResearchJSON {
         let body: Data
         do {
             body = try ResearchJSON.object(fields).encoded()
@@ -233,7 +243,7 @@ public struct ResearchSandboxClient: Sendable {
             throw ResearchError.sandboxUnavailable(error.localizedDescription)
         }
         try await proveIdentityIfStale()
-        let response = try await exchange(method: "POST", path: path, body: body)
+        let response = try await exchange(method: "POST", path: path, body: body, timeout: timeout)
         let reply = try? ResearchJSON.decode(response.body)
         guard response.status == 200, let reply else {
             let message = reply?["error"]?["message"]?.stringValue
@@ -252,7 +262,8 @@ public struct ResearchSandboxClient: Sendable {
     /// nothing in it is passed on to the model. Then the answer's signature is
     /// checked, whatever its status, before anything in it is used. The secret
     /// is read for every request, and a missing one stops it here.
-    private func exchange(method: String, path: String, body: Data?) async throws -> ResearchHTTPResponse {
+    private func exchange(method: String, path: String, body: Data?,
+                          timeout: TimeInterval) async throws -> ResearchHTTPResponse {
         // The path that is signed is the one that is sent.
         let url = baseURL.appendingPathComponent(path)
         let signing = try ResearchSandboxSigning.begin(
@@ -260,8 +271,11 @@ public struct ResearchSandboxClient: Sendable {
         let response: ResearchHTTPResponse
         do {
             response = try await transport.send(
-                method: method, url: url, body: body, timeout: nil, authorization: nil,
+                method: method, url: url, body: body, timeout: timeout, authorization: nil,
                 headers: signing.requestHeaders(body: body ?? Data()))
+        } catch let error as URLError where error.code == .timedOut {
+            throw ResearchError.sandboxUnavailable(
+                "no answer from the sandbox within \(Int(timeout)) seconds")
         } catch {
             throw ResearchError.sandboxUnavailable(error.localizedDescription)
         }

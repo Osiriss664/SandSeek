@@ -89,7 +89,7 @@ private final class RedirectingServices: ResearchHTTPTransport, @unchecked Senda
 
     @Test func aSandboxPortThatRedirectsIsNotARunningSandbox() async throws {
         let sandbox = ResearchSandboxController(
-            runner: FakeProcessRunner(), transport: RedirectingServices(everything: true),
+            runner: FakeProcessRunner(), containerTool: .trustedForTests(), transport: RedirectingServices(everything: true),
             defaults: MemorySettings(), environment: [:],
             resources: try testResources(), stateDirectory: temporaryDirectory(), secretFile: TestSandboxSecret.file)
         await sandbox.refresh()

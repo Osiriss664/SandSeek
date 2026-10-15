@@ -58,7 +58,7 @@ private final class BusyRunServices: ResearchHTTPTransport, @unchecked Sendable 
         let run = ResearchRunController(
             store: reports, transport: busyRun ? BusyRunServices(runServices) : runServices, sandboxSecretFile: TestSandboxSecret.file)
         let sandbox = ResearchSandboxController(
-            runner: FakeProcessRunner(), transport: FakeResearchServices(),
+            runner: FakeProcessRunner(), containerTool: .trustedForTests(), transport: FakeResearchServices(),
             defaults: MemorySettings(), environment: [:], resources: try testResources(),
             stateDirectory: temporaryDirectory(), secretFile: TestSandboxSecret.file)
         await sandbox.start()
@@ -135,7 +135,7 @@ private final class BusyRunServices: ResearchHTTPTransport, @unchecked Sendable 
             transport: services, tuffStreaming: false)
         let reports = ResearchReportStore(directory: temporaryDirectory())
         let sandbox = ResearchSandboxController(
-            runner: FakeProcessRunner(), transport: FakeResearchServices(),
+            runner: FakeProcessRunner(), containerTool: .trustedForTests(), transport: FakeResearchServices(),
             defaults: MemorySettings(), environment: [:],
             resources: try testResources(bundle: bundle), stateDirectory: temporaryDirectory(), secretFile: TestSandboxSecret.file)
         await sandbox.start()

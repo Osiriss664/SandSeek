@@ -171,7 +171,7 @@ private final class FakeClock: @unchecked Sendable {
         }
         let gate = GatedRunner(runner)
         let sandbox = ResearchSandboxController(
-            runner: gate, transport: sandboxServices, defaults: MemorySettings(),
+            runner: gate, containerTool: .trustedForTests(), transport: sandboxServices, defaults: MemorySettings(),
             environment: [:], resources: try testResources(),
             stateDirectory: temporaryDirectory(), secretFile: TestSandboxSecret.file)
 
@@ -493,7 +493,7 @@ private final class FakeClock: @unchecked Sendable {
                 : FakeProcessRunner.healthy(command)
         }
         let sandbox = ResearchSandboxController(
-            runner: runner, transport: FakeResearchServices(), defaults: MemorySettings(),
+            runner: runner, containerTool: .trustedForTests(), transport: FakeResearchServices(), defaults: MemorySettings(),
             environment: [:], resources: try testResources(),
             stateDirectory: temporaryDirectory(), secretFile: TestSandboxSecret.file)
         let workspace = ResearchWorkspace(
@@ -566,7 +566,7 @@ private final class FakeClock: @unchecked Sendable {
     private func makeSandbox(_ services: FakeResearchServices, clock: FakeClock) throws
         -> ResearchSandboxController {
         ResearchSandboxController(
-            runner: FakeProcessRunner(), transport: services, defaults: MemorySettings(),
+            runner: FakeProcessRunner(), containerTool: .trustedForTests(), transport: services, defaults: MemorySettings(),
             environment: [:], resources: try testResources(),
             stateDirectory: temporaryDirectory(), secretFile: TestSandboxSecret.file,
             now: { clock.now })

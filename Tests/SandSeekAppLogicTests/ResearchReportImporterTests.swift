@@ -252,7 +252,7 @@ import Testing
         let reports = ResearchReportStore(directory: folders.sandseek)
         let workspace = ResearchWorkspace(
             sandbox: ResearchSandboxController(
-                runner: FakeProcessRunner(), transport: FakeResearchServices(),
+                runner: FakeProcessRunner(), containerTool: .trustedForTests(), transport: FakeResearchServices(),
                 defaults: MemorySettings(), environment: [:],
                 resources: try testResources(), stateDirectory: temporaryDirectory(), secretFile: TestSandboxSecret.file),
             server: ResearchServerController(

@@ -176,6 +176,7 @@ final class FakeProcessRunner: ResearchProcessRunning, @unchecked Sendable {
     private let reply: @Sendable ([String]) -> ResearchProcessResult
     private var recorded: [[String]] = []
     private var recordedEnvironments: [[String: String]] = []
+    private var recordedExecutables: [URL] = []
 
     /// By default every command succeeds, and the in-VM privilege check
     /// reports the unprivileged user the sandbox should run as.
@@ -186,12 +187,35 @@ final class FakeProcessRunner: ResearchProcessRunning, @unchecked Sendable {
     var commands: [[String]] { lock.withLock { recorded } }
     /// The environment each command ran with, in order.
     var environments: [[String: String]] { lock.withLock { recordedEnvironments } }
+    /// The full path of the program each command ran, in order.
+    var executables: [URL] { lock.withLock { recordedExecutables } }
 
     @Sendable static func healthy(_ command: [String]) -> ResearchProcessResult {
+        // What Apple's tool says about itself, for `ResearchContainerTool.verify()`.
+        if command.first == "codesign", command.contains("-dv") {
+            return ResearchProcessResult(status: 0, output: appleSignatureDetails)
+        }
+        if command.first == "codesign" { return ResearchProcessResult(status: 0, output: "") }
+        if command == ["container", "--version"] {
+            return ResearchProcessResult(
+                status: 0, output: "container CLI version 1.5.0 (build: release, commit: 0123abc)\n")
+        }
         if command.contains("python3") { return ResearchProcessResult(status: 0, output: "10001 none\n") }
         if command.contains("nft") { return ResearchProcessResult(status: 0, output: firewallListing) }
         return ResearchProcessResult(status: 0, output: "")
     }
+
+    /// What `codesign -dv --verbose=2` prints for Apple's `container`.
+    static let appleSignatureDetails = """
+    Executable=/usr/local/bin/container
+    Identifier=com.apple.container-cli
+    Format=Mach-O thin (arm64)
+    Authority=Developer ID Application: Apple Inc. - Containerization (UPBK2H6LZM)
+    Authority=Developer ID Certification Authority
+    Authority=Apple Root CA
+    TeamIdentifier=UPBK2H6LZM
+
+    """
 
     /// What `nft list table inet sandseek_sandbox` prints for firewall.nft with
     /// the Mac as DNS server.
@@ -248,6 +272,7 @@ final class FakeProcessRunner: ResearchProcessRunning, @unchecked Sendable {
         lock.withLock {
             recorded.append(command)
             recordedEnvironments.append(environment)
+            recordedExecutables.append(executable)
         }
         return reply(command)
     }
@@ -489,5 +514,16 @@ enum TestSandboxSecret {
             key: key, method: method, path: url.path, nonce: nonce,
             status: response.status, body: response.body)
         return ResearchHTTPResponse(status: response.status, body: response.body, headers: signedHeaders)
+    }
+}
+
+extension ResearchContainerTool {
+    /// A tool that passes `verify()` without looking at this Mac: the file
+    /// counts as root's, and the commands it runs (`codesign`, `--version`)
+    /// are answered by `runner` (a fake that says "Apple, 1.5.0" by default).
+    static func trustedForTests(runner: (any ResearchProcessRunning)? = nil) -> ResearchContainerTool {
+        ResearchContainerTool(
+            runner: runner ?? FakeProcessRunner(), environment: [:],
+            isTrusted: { _ in true }, fileExists: { _ in true }, identity: { _ in "test" })
     }
 }
