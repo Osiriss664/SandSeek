@@ -837,6 +837,9 @@ class RecordedPortStrictnessTests(unittest.TestCase):
         self.port = os.path.join(self.folder, "port")
 
     def write(self, text, mode=0o600):
+        # A new file each time: an earlier mode may not allow writing.
+        if os.path.exists(self.port):
+            os.remove(self.port)
         with open(self.port, "w") as handle:
             handle.write(text)
         os.chmod(self.port, mode)

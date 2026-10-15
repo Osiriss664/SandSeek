@@ -186,13 +186,14 @@ private func write(_ text: String, to name: String, in folder: URL, mode: Int = 
         let folder = try sandboxFolder()
         let file = ResearchSandboxFiles.lockFile(in: folder)
         let lock = try #require(ResearchSandboxLock.acquire(at: file, now: when))
-        try withExtendedLifetime(lock) {
-            #expect(ResearchSandboxLock.status(of: file) == .held(pid: getpid(), since: when))
-            #expect(try String(contentsOf: file, encoding: .utf8) == "\(getpid()) 1700000000\n")
-            // A second owner is refused, and the first is not disturbed.
-            #expect(ResearchSandboxLock.acquire(at: file) == nil)
-            #expect(ResearchSandboxLock.status(of: file) == .held(pid: getpid(), since: when))
-        }
+        // The lock is held until the end of the test.
+        defer { withExtendedLifetime(lock) {} }
+        #expect(ResearchSandboxLock.status(of: file) == .held(pid: getpid(), since: when))
+        let content = try String(contentsOf: file, encoding: .utf8)
+        #expect(content == "\(getpid()) 1700000000\n")
+        // A second owner is refused, and the first is not disturbed.
+        #expect(ResearchSandboxLock.acquire(at: file) == nil)
+        #expect(ResearchSandboxLock.status(of: file) == .held(pid: getpid(), since: when))
         #expect(ResearchSandboxLock.busyMessage
             == "Another SandSeek is using the web sandbox. Close it first, or press Stop in it.")
     }

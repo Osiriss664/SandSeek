@@ -95,7 +95,7 @@ try:
 except ImportError:  # Without pypdf a PDF is refused as before; /health says "pdf": false.
     pypdf = PdfReader = None
 
-PORT = int(os.environ.get("PORT", "9100"))
+PORT = int(os.environ.get("PORT") or "9100")
 SEARXNG_URL = os.environ.get("SEARXNG_URL", "").rstrip("/")
 # Kept unchanged until the q3 comparison, so search results stay comparable.
 USER_AGENT = os.environ.get(
