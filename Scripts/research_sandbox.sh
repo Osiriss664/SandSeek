@@ -211,7 +211,7 @@ require_container() {
     if [[ "$untrusted_path" == "$container_bin" || "$untrusted_path" == "$resolved" ]]; then
       echo "$untrusted_path can be changed by you or by others, so it is not run. Reinstall Apple container with Apple's installer: https://github.com/apple/container" >&2
     else
-      echo "The folder $untrusted_path above $container_bin can be changed by you or by others, so it is not run. Apple's installer does not change this folder. To let SandSeek trust it, make it belong to root: sudo chown root:wheel $untrusted_path && sudo chmod 755 $untrusted_path (this affects an Intel Homebrew installed in /usr/local)." >&2
+      echo "The folder $untrusted_path, on the way to $container_bin, can be changed by you or by others, so it is not run. Apple's installer does not change this folder. To let SandSeek trust it, make it belong to root: sudo chown root:wheel $untrusted_path && sudo chmod 755 $untrusted_path (this affects an Intel Homebrew installed in /usr/local)." >&2
     fi
     exit 1
   fi

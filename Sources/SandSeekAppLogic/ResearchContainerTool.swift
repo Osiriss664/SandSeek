@@ -69,8 +69,8 @@ public enum ResearchContainerError: Error, Equatable, CustomStringConvertible, S
                 + "sudo chown root:wheel \(untrusted.path) && sudo chmod 755 \(untrusted.path) "
                 + "(this affects an Intel Homebrew installed in /usr/local)."
         case .notTrusted(let untrusted):
-            return "Apple container is at \(path), but the file \(untrusted.path) is not an "
-                + "executable file that only root can change, so SandSeek will not run it. "
+            return "Apple container is at \(path), but the file \(untrusted.path) can be changed "
+                + "by you or another user (it must belong to root alone), so SandSeek will not run it. "
                 + "Reinstall it with Apple's installer (https://github.com/apple/container), "
                 + "which makes it belong to root alone."
         case .notSigned(let reason):
