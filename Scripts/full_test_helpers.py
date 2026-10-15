@@ -125,6 +125,31 @@ def http_code(url):
         return "000"
 
 
+def models_check(url, key_file=""):
+    """Reads GET <url>/v1/models. Prints nothing and returns 0 when the list
+    is fine or cannot be judged (no answer, no JSON, no default named).
+    Returns 1 and prints a plain note when the server names a default model
+    that its own list does not hold, since a question without --model would
+    go to a model that is not installed."""
+    try:
+        request = urllib.request.Request(url.rstrip("/") + "/v1/models")
+        if key_file:
+            with open(key_file, encoding="utf-8") as handle:
+                request.add_header("Authorization", "Bearer " + handle.read().strip())
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(request, timeout=10) as answer:
+            data = json.loads(answer.read(1 << 20).decode("utf-8", "replace"))
+        listed = [entry["id"] for entry in data["data"] if isinstance(entry.get("id"), str)]
+        default = data.get("default", data.get("default_model"))
+    except Exception:
+        return 0
+    if isinstance(default, str) and default and listed and default not in listed:
+        print(f"the server's default model ({default}) is not in its list of models "
+              f"({', '.join(listed)}). Pass --model NAME with one of the listed models.")
+        return 1
+    return 0
+
+
 def mask_files(paths):
     known = secrets()
     for path in paths:
@@ -220,12 +245,18 @@ def read_results(run_dir):
 
 def report(run_dir, overall, reason):
     rows = read_results(run_dir)
+    try:
+        with open(os.path.join(run_dir, "model.txt"), encoding="utf-8") as handle:
+            model = mask(handle.read().strip()) or "(server default)"
+    except OSError:
+        model = "(server default)"
     counts = {key: sum(1 for row in rows if row["result"] == key) for key in ("PASS", "FAIL", "SKIP")}
     for row in rows:
         row["log_tail"] = tail(row["log"]) if row["result"] == "FAIL" and row["log"] else ""
     total = sum(row["seconds"] for row in rows)
     lines = [f"# SandSeek full test: {overall}", "",
              f"Run folder: `{run_dir}`", "",
+             f"Model: {model}", "",
              f"{counts['PASS']} passed, {counts['FAIL']} failed, {counts['SKIP']} skipped, "
              f"{total} s in steps." + (f" Stopped early: {reason}." if reason else ""), "",
              "| Step | Result | Time | Note |", "|---|---|---|---|"]
@@ -242,7 +273,7 @@ def report(run_dir, overall, reason):
     text = mask("\n".join(lines) + "\n")
     with open(os.path.join(run_dir, "report.md"), "w", encoding="utf-8") as handle:
         handle.write(text)
-    data = {"overall": overall, "reason": reason, "run_folder": run_dir,
+    data = {"overall": overall, "reason": reason, "run_folder": run_dir, "model": model,
             "counts": counts, "seconds": total,
             "steps": [{"id": row["id"], "name": row["name"], "result": row["result"],
                        "seconds": row["seconds"], "note": row["note"],
@@ -277,6 +308,8 @@ def main(argv):
     if command == "image-age" and len(argv) == 4:
         print(image_age(argv[2], argv[3]))
         return 0
+    if command == "models-check" and len(argv) in (3, 4):
+        return models_check(argv[2], argv[3] if len(argv) == 4 else "")
     if command == "http-code" and len(argv) == 3:
         print(http_code(argv[2]))
         return 0

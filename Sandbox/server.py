@@ -145,6 +145,12 @@ PDF_SNIFFED_TYPES = ("", "application/octet-stream", "binary/octet-stream")
 PDF_MAGIC = b"%PDF-"
 MAX_REDIRECTS = 5
 MAX_REQUEST_BYTES = 64 * 1024
+# After an answer on a connection that is being closed, the server discards
+# what the client still sends for at most this long and this many bytes, so
+# the close does not turn into a reset that destroys the answer.
+LINGER_SECONDS = 1.0
+LINGER_BYTES = 1 << 20
+
 # Seconds a client may stay silent on an open connection (see Handler.timeout).
 REQUEST_TIMEOUT = 30
 # The whole request (line, headers and body) must arrive within this many
@@ -1572,6 +1578,31 @@ class Handler(BaseHTTPRequestHandler):
     def finish(self):
         self._request_read()
         super().finish()
+        self._linger()
+
+    def _linger(self):
+        """Closes without losing the answer. Closing a socket that still has
+        unread request bytes makes macOS (and sometimes Linux) send a reset,
+        which can reach the client before, and wipe out, the answer it has
+        not read yet. So the sending side is shut down first (the client
+        reads the answer and an end of file), then what the client still sends
+        is discarded for at most LINGER_SECONDS or LINGER_BYTES."""
+        connection = self.connection
+        try:
+            connection.shutdown(socket.SHUT_WR)
+            end = time.monotonic() + LINGER_SECONDS
+            left = LINGER_BYTES
+            while left > 0:
+                wait = end - time.monotonic()
+                if wait <= 0:
+                    break
+                connection.settimeout(wait)
+                chunk = connection.recv(min(left, 65536))
+                if not chunk:
+                    break
+                left -= len(chunk)
+        except OSError:
+            pass
 
     def handle_one_request(self):
         self._started = time.monotonic()

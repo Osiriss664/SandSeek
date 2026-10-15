@@ -108,12 +108,23 @@ class ContainerCheckTests(unittest.TestCase):
         self.assertNotEqual(bash(f'chain_is_closed "{path}"').returncode, 0)
 
     def test_the_failing_path_is_reported(self):
+        # The file is checked first, then the folders above it. As root, a file
+        # made here belongs to root and passes, so the open folder is the first
+        # failure. As any other user the file belongs to that user and fails
+        # before any folder is looked at.
         os.chmod(self.folder, 0o777)
         path = self.make("tool", 0o755)
         result = bash(f'chain_is_closed "{path}" || true; echo "[$untrusted_path]"')
-        self.assertIn(f"[{self.folder}]", result.stdout)
+        first = self.folder if os.geteuid() == 0 else path
+        self.assertIn(f"[{first}]", result.stdout)
         os.chmod(self.folder, 0o755)
         path = self.make("tool2", 0o777)
+        result = bash(f'chain_is_closed "{path}" || true; echo "[$untrusted_path]"')
+        self.assertIn(f"[{path}]", result.stdout)
+
+    def test_the_file_is_reported_before_the_folder_above_it(self):
+        os.chmod(self.folder, 0o777)
+        path = self.make("tool", 0o777)
         result = bash(f'chain_is_closed "{path}" || true; echo "[$untrusted_path]"')
         self.assertIn(f"[{path}]", result.stdout)
 

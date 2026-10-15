@@ -4,7 +4,7 @@
 #   Scripts/full_test.sh [--quick] [--no-sandbox] [--thorough]
 #                        [--server URL] [--api-key-file FILE]
 #                        [--start-server TUFFSERVER [--models FOLDER]]
-#                        [--injection-base-url URL] [--time-limit MINUTES]
+#                        [--model NAME] [--injection-base-url URL] [--time-limit MINUTES]
 #                        [--take-over-sandbox]
 #
 # Run it in the background (nohup or a background job) when a caller cuts
@@ -32,6 +32,13 @@
 #                    http://127.0.0.1:8080). Without an answering server, step 6
 #                    and 7 are SKIP; this script never starts a model server on
 #                    its own unless --start-server is given.
+#   --model NAME     model for the questions of step 6 and the injection check,
+#                    passed to sandseek as --model NAME (default
+#                    $SANDSEEK_FULL_TEST_MODEL, else the server's own default).
+#                    Without it, a server whose default model is not in its list
+#                    of models, or a question that fails with "is not
+#                    installed", FAILS step 6 with a note to pass --model. The
+#                    report shows the model used.
 #   --api-key-file F key file of a model server that asks for a key (passed to
 #                    sandseek; its content is masked in every log and report)
 #   --start-server P starts TUFFServer (P is TUFFServer, tuff or TUFF.app) on
@@ -81,6 +88,7 @@ PY="${FT_PYTHON:-python3}"
 quick=0 no_sandbox=0 thorough=0
 model_server="${SANDSEEK_MODEL_SERVER:-http://127.0.0.1:8080}"
 api_key_file="${SANDSEEK_API_KEY_FILE:-}"
+model_name="${SANDSEEK_FULL_TEST_MODEL:-}"
 take_over=0 start_server="" models_folder="" injection_base="${FT_INJECTION_BASE_URL:-}"
 time_limit_minutes=60
 
@@ -93,6 +101,7 @@ while [[ $# -gt 0 ]]; do
     --take-over-sandbox) take_over=1 ;;
     --server) model_server="${2:?--server needs a URL}"; shift ;;
     --api-key-file) api_key_file="${2:?--api-key-file needs a path}"; shift ;;
+    --model) model_name="${2:?--model needs a name}"; shift ;;
     --start-server) start_server="${2:?--start-server needs a path}"; shift ;;
     --models) models_folder="${2:?--models needs a folder}"; shift ;;
     --injection-base-url) injection_base="${2:?needs a URL}"; shift ;;
@@ -105,6 +114,9 @@ done
 if [[ -n "$models_folder" ]]; then
   [[ -n "$start_server" ]] || { echo "--models needs --start-server" >&2; exit 2; }
   [[ "$models_folder" == /* && -d "$models_folder" ]] || { echo "--models must be an absolute, existing folder: $models_folder" >&2; exit 2; }
+fi
+if [[ -n "$model_name" && ( "$model_name" == -* || "$model_name" == *[[:cntrl:]]* ) ]]; then
+  echo "--model needs a model name, not an option or control characters" >&2; exit 2
 fi
 [[ "$time_limit_minutes" =~ ^[0-9]+$ ]] || { echo "--time-limit must be a number of minutes" >&2; exit 2; }
 total_limit="${FULL_TEST_TIME_LIMIT_SECONDS:-$((time_limit_minutes * 60))}"
@@ -131,6 +143,7 @@ n=1
 while [[ -e "$RUN" ]]; do RUN="$ROOT/build/full-test/$stamp-$n"; n=$((n + 1)); done
 mkdir -p "$RUN/logs" || exit 2
 : > "$RUN/results.tsv"
+printf '%s\n' "${model_name:-(server default)}" > "$RUN/model.txt"
 FT_NOTE_FILE="$RUN/note.txt"
 FT_MASK_FILES="$secret_file${api_key_file:+:$api_key_file}"
 export ROOT RUN PORT SWIFT CONTAINER CODESIGN CURL GIT SANDBOX_SH FT_NOTE_FILE FT_MASK_FILES \
@@ -520,6 +533,7 @@ fi
 research_args() { # mode
   local args=(--server "$SERVER_URL" --sandbox "http://127.0.0.1:$PORT")
   if [[ -n "$api_key_file" ]]; then args+=(--api-key-file "$api_key_file"); fi
+  if [[ -n "$model_name" ]]; then args+=(--model "$model_name"); fi
   # Quick: the CLI defaults, which equal the app's Quick preset (8 steps, 3 pages,
   # 5 results). Thorough: the app's Thorough preset.
   if [[ "$1" == thorough ]]; then args+=(--max-steps 30 --min-pages 6 --search-results 8); fi
@@ -527,7 +541,14 @@ research_args() { # mode
 }
 
 ask() { # id name limit mode question expected_regex
-  local id="$1" name="$2" limit="$3" mode="$4" question="$5" expect="$6" args=() line
+  local id="$1" name="$2" limit="$3" mode="$4" question="$5" expect="$6" args=() line note
+  if [[ -z "$model_name" ]]; then
+    # Without --model the question goes to the server's default model.
+    if ! note="$("$PY" "$helpers" models-check "$SERVER_URL" "$api_key_file")"; then
+      record "$id" "$name" FAIL 0 "$note"
+      return 0
+    fi
+  fi
   while IFS= read -r line; do args+=("$line"); done < <(research_args "$mode")
   export FT_Q="$question" FT_EXPECT="$expect" FT_ARGS_FILE="$RUN/args-$id.txt"
   printf '%s\n' "${args[@]}" > "$FT_ARGS_FILE"
@@ -536,7 +557,10 @@ ask() { # id name limit mode question expected_regex
      out="$RUN/answer-'"$id"'.txt"; prog="$RUN/logs/'"$id"'.progress"
      # The model server key and the sandbox secret must not stay in these files.
      trap '"'"'for f in "$out" "$prog"; do [ -f "$f" ] && "$PY" "$ROOT/Scripts/full_test_helpers.py" mask < "$f" > "$f.m" && mv "$f.m" "$f"; done'"'"' EXIT
-     "$sandseek_bin" "$FT_Q" "${args[@]}" > "$out" 2> "$prog" || { tail -n 20 "$prog"; exit 1; }
+     "$sandseek_bin" "$FT_Q" "${args[@]}" > "$out" 2> "$prog" || {
+       tail -n 20 "$prog"
+       if grep -q "is not installed" "$prog"; then echo "the model is not installed on the server; pass --model NAME with an installed model" > "$FT_NOTE_FILE"; fi
+       exit 1; }
      cat "$out"
      while IFS= read -r rx; do
        [ -n "$rx" ] || continue
@@ -567,9 +591,9 @@ if [[ $sandbox_ready -ne 1 ]]; then skip 7 "injection check" "the sandbox is not
 elif [[ $model_up -ne 1 ]]; then skip 7 "injection check" "it needs a model server, and none answers"
 elif [[ -z "$injection_base" ]]; then skip 7 "injection check" "it needs --injection-base-url, a public URL of the fixtures (the sandbox only fetches public addresses)"
 else
-  export FT_INJ_BASE="$injection_base" FT_SERVER_URL="$SERVER_URL" FT_KEY="$api_key_file"
+  export FT_INJ_BASE="$injection_base" FT_SERVER_URL="$SERVER_URL" FT_KEY="$api_key_file" FT_MODEL="$model_name"
   step 7 "injection check" 2400 \
-    '"$PY" "$ROOT/Scripts/research_injection_check.py" --base-url "$FT_INJ_BASE" --research-bin "$sandseek_bin" --server "$FT_SERVER_URL" --sandbox "http://127.0.0.1:$PORT" ${FT_KEY:+--api-key-file "$FT_KEY"}' || true
+    '"$PY" "$ROOT/Scripts/research_injection_check.py" --base-url "$FT_INJ_BASE" --research-bin "$sandseek_bin" --server "$FT_SERVER_URL" --sandbox "http://127.0.0.1:$PORT" ${FT_KEY:+--api-key-file "$FT_KEY"} ${FT_MODEL:+--model "$FT_MODEL"}' || true
 fi
 
 # ---- 8. stop and leftovers (9 is the same code in the trap) ---------------------------------------

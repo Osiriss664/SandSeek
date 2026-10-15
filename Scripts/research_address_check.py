@@ -18,7 +18,8 @@ refused:
                 reads 0177.0.0.1 as 177.0.0.1, glibc as 127.0.0.1)
   names         localhost and the container gateway name
   dns           host names that resolve to private addresses (localtest.me,
-                *.nip.io and *.sslip.io); these need DNS, so a network that
+                *.nip.io and *.sslip.io; --1.sslip.io, which is ::1 and is
+                only noted when a resolver cannot resolve it); these need DNS, so a network that
                 blocks outside DNS or filters answers with private addresses
                 (DNS rebinding protection) makes them "inconclusive"
   shape         other schemes, user names in the address, ports other than
@@ -84,6 +85,11 @@ class Case:
     # "resolves": a name that resolves to a private address. The sandbox must
     #   answer blocked_address. A name that does not resolve here proves
     #   nothing about the address check ("inconclusive").
+    # "covered": like "resolves", but for a name whose address another case
+    #   already checks (--1.sslip.io is ::1, see http://[::1]/). Resolvers
+    #   that cannot resolve it (macOS rejects such names) only get a note,
+    #   which does not make the run inconclusive. Anything other than a
+    #   refusal still fails.
     # "shape": refused because of the form of the address.
     kind: str
 
@@ -177,6 +183,8 @@ CASES: list[Case] = (
         "http://169.254.169.254.nip.io/",
         "http://127-0-0-1.sslip.io/",
         "http://192-168-64-1.sslip.io/",
+    ])
+    + _cases("dns", "covered", [
         "http://--1.sslip.io/",
     ])
     + _cases("shape", "shape", [
@@ -210,7 +218,7 @@ GROUPS = ["private", "numeric", "names", "dns", "shape"]
 def classify(case: Case, status: int, payload: object) -> tuple[str, str]:
     """(verdict, detail) for one answer of the sandbox.
 
-    verdict is "refused", "inconclusive" or "FAIL". detail says what the
+    verdict is "refused", "note", "inconclusive" or "FAIL". detail says what the
     sandbox answered."""
     code = ""
     if isinstance(payload, dict):
@@ -221,9 +229,11 @@ def classify(case: Case, status: int, payload: object) -> tuple[str, str]:
         return "FAIL", "HTTP 200: the sandbox fetched it"
     if not code:
         return "FAIL", f"HTTP {status} without an error code (not a refusal)"
-    if case.kind == "resolves":
+    if case.kind in ("resolves", "covered"):
         if code == "blocked_address":
             return "refused", code
+        if code == "dns_error" and case.kind == "covered":
+            return "note", "dns_error: the name did not resolve here; its address is checked by another case"
         if code == "dns_error":
             return "inconclusive", "dns_error: the name did not resolve here, so the address check was not tried"
         return "FAIL", f"{code} (HTTP {status}): not refused for its private address"
@@ -382,7 +392,7 @@ def main() -> int:
     report.emit(f"Addresses: {len(selected)} ({', '.join(sorted({c.group for c in selected}))})")
     report.emit()
 
-    counts = {"refused": 0, "inconclusive": 0, "FAIL": 0}
+    counts = {"refused": 0, "note": 0, "inconclusive": 0, "FAIL": 0}
     for case in selected:
         try:
             status, payload = post_fetch(args.sandbox, secret, case.url, args.timeout)
@@ -393,7 +403,7 @@ def main() -> int:
             continue
         verdict, detail = classify(case, status, payload)
         counts[verdict] += 1
-        mark = {"refused": "ok", "inconclusive": "warn", "FAIL": "FAIL"}[verdict]
+        mark = {"refused": "ok", "note": "note", "inconclusive": "warn", "FAIL": "FAIL"}[verdict]
         report.emit(f"{mark:<6}{case.group:<8}{printable(case.url)}  ->  {detail}")
 
     control_ok: bool | None = None
@@ -415,7 +425,8 @@ def main() -> int:
     if args.label:
         report.emit("Label: " + printable(args.label.strip()[:200]))
     report.emit(f"{counts['refused']} refused, {counts['inconclusive']} inconclusive, "
-                f"{counts['FAIL']} NOT refused (of {len(selected)} addresses)")
+                f"{counts['FAIL']} NOT refused (of {len(selected)} addresses)"
+                + (f", {counts['note']} noted" if counts["note"] else ""))
     if counts["FAIL"]:
         status_code = 1
         report.emit("RESULT: FAIL. The sandbox accepted an address it should refuse.")

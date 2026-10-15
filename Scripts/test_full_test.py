@@ -136,6 +136,10 @@ class Fixture:
             #!/bin/bash
             echo "sandseek $*" >> "$FAKE_LOG"
             echo "using key {KEY} and secret {SECRET}" >&2
+            if [ "$FAKE_NOT_INSTALLED" = 1 ]; then
+              echo "error: the model server refused the request (HTTP 404): Gemma is not installed." >&2
+              exit 1
+            fi
             case "$1" in
               *Iceland*) if [ "$FAKE_ANSWER" = iceland-only ]; then echo "Iceland has 380000 people."
                          else echo "Iceland and Ireland compared."; fi ;;
@@ -167,6 +171,8 @@ class Fixture:
             "FT_SANDSEEK_BIN": f"{self.repo}/sandseek-stub",
             "FAKE_LOG": self.log,
             "FAKE_FAIL": "",
+            "FAKE_NOT_INSTALLED": "",
+            "SANDSEEK_FULL_TEST_MODEL": "",
             "SANDSEEK_SANDBOX_PORT": "49321",
             "SANDSEEK_MODEL_SERVER": "http://127.0.0.1:1",
             "FT_SERVER_WAIT": "20",
@@ -207,6 +213,21 @@ class QuietHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+
+class ModelListHandler(BaseHTTPRequestHandler):
+    """A server whose /v1/models names a default that it does not list."""
+    listing = {"object": "list", "default": "gemma4",
+               "data": [{"id": "qwen36"}, {"id": "ornith-9b"}]}
+
+    def do_GET(self):
+        body = json.dumps(self.listing).encode() if self.path == "/v1/models" else b"{}"
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(body)
 
     def log_message(self, *args):
         pass
@@ -448,6 +469,66 @@ class ModelServer(FullTestCase):
         self.assertNotIn("--max-steps", calls)  # Quick = the CLI defaults
         self.assertNotIn("--min-pages", calls)
         self.assertEqual(steps["7"]["result"], "SKIP")
+
+    def serve_models(self, listing=None):
+        handler = type("H", (ModelListHandler,), {"listing": listing or ModelListHandler.listing})
+        server = HTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_port}"
+
+    def test_model_flag_is_passed_to_the_cli_and_shown_in_the_report(self):
+        process = self.fx.run("--server", self.serve_models(), "--model", "qwen36")
+        report, steps, directory = self.fx.results(process)
+        self.assertEqual(steps["6.1"]["result"], "PASS", process.stdout)
+        self.assertIn("--model qwen36", self.fx.calls().replace("\n", " "))
+        self.assertEqual(report["model"], "qwen36")
+        with open(os.path.join(directory, "report.md")) as handle:
+            self.assertIn("Model: qwen36", handle.read())
+
+    def test_model_comes_from_the_environment_too(self):
+        process = self.fx.run("--server", self.serve_models(), SANDSEEK_FULL_TEST_MODEL="ornith-9b")
+        _, steps, _ = self.fx.results(process)
+        self.assertEqual(steps["6.1"]["result"], "PASS", process.stdout)
+        self.assertIn("--model ornith-9b", self.fx.calls().replace("\n", " "))
+
+    def test_no_model_means_none_is_passed_and_the_report_says_default(self):
+        process = self.fx.run("--server", self.serve())
+        report, _, _ = self.fx.results(process)
+        self.assertNotIn("--model", self.fx.calls())
+        self.assertEqual(report["model"], "(server default)")
+
+    def test_a_default_that_is_not_listed_fails_with_a_note_to_pass_a_model(self):
+        process = self.fx.run("--server", self.serve_models(), "--thorough")
+        _, steps, _ = self.fx.results(process)
+        for step_id in ("6.1", "6.2"):
+            self.assertEqual(steps[step_id]["result"], "FAIL", process.stdout)
+            self.assertIn("gemma4", steps[step_id]["note"])
+            self.assertIn("--model", steps[step_id]["note"])
+        self.assertNotIn("sandseek What", self.fx.calls())  # the question was not asked
+
+    def test_a_listed_default_is_fine(self):
+        listing = {"default": "qwen36", "data": [{"id": "qwen36"}]}
+        process = self.fx.run("--server", self.serve_models(listing))
+        _, steps, _ = self.fx.results(process)
+        self.assertEqual(steps["6.1"]["result"], "PASS", process.stdout)
+
+    def test_an_explicit_model_skips_the_default_check(self):
+        process = self.fx.run("--server", self.serve_models(), "--model", "qwen36")
+        _, steps, _ = self.fx.results(process)
+        self.assertEqual(steps["6.1"]["result"], "PASS")
+
+    def test_not_installed_fails_with_a_note_to_pass_a_model(self):
+        process = self.fx.run("--server", self.serve(), FAKE_NOT_INSTALLED="1")
+        _, steps, _ = self.fx.results(process)
+        self.assertEqual(steps["6.1"]["result"], "FAIL", process.stdout)
+        self.assertIn("is not installed", steps["6.1"]["note"])
+        self.assertIn("--model", steps["6.1"]["note"])
+
+    def test_a_model_name_that_looks_like_an_option_is_refused(self):
+        process = self.fx.run("--model", "--thorough")
+        self.assertEqual(process.returncode, 2)
 
     def test_thorough_adds_a_question(self):
         process = self.fx.run("--server", self.serve(), "--thorough")

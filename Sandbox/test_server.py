@@ -3,6 +3,7 @@
 replaced with fakes. Run with `python3 -m unittest Sandbox/test_server.py`."""
 
 import base64
+import collections
 import contextlib
 import gzip
 import hashlib
@@ -2074,6 +2075,8 @@ class VectorServerTests(LiveServer):
     secret = VECTOR_SECRET
 
     def test_the_server_accepts_each_vector_request_exactly_as_written(self):
+        # The URL is not the point here: any address gets the same page.
+        self.transport.routes = collections.defaultdict(lambda: page(ARTICLE))
         # expected_auth comes straight from the JSON file: no code computes it.
         for vector in VECTORS["request"]:
             with self.subTest(vector["name"]):
@@ -2213,6 +2216,8 @@ class SignedRoundTripTests(LiveServer):
         self.assertError(answer, 422, "invalid_url")
 
     def test_a_non_ascii_body_is_signed_over_its_bytes(self):
+        # The URL is not the point here: any address gets the same page.
+        self.transport.routes = collections.defaultdict(lambda: page(ARTICLE))
         answer = self.post("/v1/fetch", {"url": "https://example.com/café"})
         self.assertSigned(answer)
         self.assertNotEqual(answer.status, 401)
@@ -2615,6 +2620,9 @@ class ReadDeadlineTests(LiveServer):
                     chunk = client.recv(4096)
                 except (socket.timeout, TimeoutError):
                     continue
+                except ConnectionResetError:
+                    # Judged below: only fine if the whole 408 came first.
+                    break
                 data += chunk
                 if not chunk:
                     break
@@ -2630,11 +2638,38 @@ class ReadDeadlineTests(LiveServer):
         self.assertLess(time.monotonic() - started, 5)
         head, _, answer = data.partition(b"\r\n\r\n")
         self.assertTrue(head.startswith(b"HTTP/1.0 408"), head)
+        lengths = [int(line.split(b": ", 1)[1]) for line in head.split(b"\r\n")
+                   if line.lower().startswith(b"content-length")]
+        self.assertEqual(lengths, [len(answer)], "the 408 arrived cut short")
         self.assertEqual(json.loads(answer)["error"]["code"], "request_timeout")
         auth = [line.split(b": ", 1)[1].decode() for line in head.split(b"\r\n")
                 if line.lower().startswith(b"x-sandbox-auth")]
         self.assertEqual(auth, [expected_response_auth(self.secret, "POST", "/v1/fetch", nonce,
                                                        408, answer)])
+
+    def test_a_refusal_is_read_whole_although_the_client_keeps_sending(self):
+        # The server closes with request bytes unread; without a lingering
+        # close macOS answers that with a reset that can destroy the answer.
+        nonce, headers = self.headers_for("POST", "/v1/fetch", b"{}", length=str(10 ** 9))
+        with socket.create_connection(("127.0.0.1", self.port), timeout=10) as client:
+            head = "POST /v1/fetch HTTP/1.1\r\n" + "".join(f"{n}: {v}\r\n" for n, v in headers)
+            client.sendall(head.encode() + b"\r\n")
+            try:
+                client.sendall(b"x" * 200000)
+            except OSError:
+                pass
+            data = b""
+            while True:
+                try:
+                    chunk = client.recv(4096)
+                except ConnectionResetError:
+                    break
+                if not chunk:
+                    break
+                data += chunk
+        head, _, answer = data.partition(b"\r\n\r\n")
+        self.assertTrue(head.startswith(b"HTTP/1.0 413"), head)
+        self.assertEqual(json.loads(answer)["error"]["code"], "invalid_request")
 
     def test_a_sender_that_drips_the_headers_is_dropped_by_the_deadline(self):
         started = time.monotonic()
@@ -2987,7 +3022,7 @@ class AddressCheckScriptTests(unittest.TestCase):
         # be refused before any connection, with numeric parsing only.
         checked = 0
         for case in self.check.CASES:
-            if case.kind == "resolves":
+            if case.kind in ("resolves", "covered"):
                 continue
             with self.assertRaises(ToolError, msg=case.url) as caught:
                 server.check_url(case.url, _numeric_only_resolver)
@@ -3011,7 +3046,7 @@ class AddressCheckScriptTests(unittest.TestCase):
                 server.check_url(url, decimal_resolver)
             self.assertEqual(caught.exception.code, "invalid_url", url)
         for case in self.check.CASES:
-            if case.kind == "resolves":
+            if case.kind in ("resolves", "covered"):
                 continue
             with self.assertRaises(ToolError, msg=case.url):
                 server.check_url(case.url, decimal_resolver)
@@ -3031,6 +3066,12 @@ class AddressCheckScriptTests(unittest.TestCase):
         self.assertEqual(classify(resolves, 403, refused)[0], "refused")
         self.assertEqual(classify(resolves, 502, {"error": {"code": "dns_error"}})[0], "inconclusive")
         self.assertEqual(classify(resolves, 422, {"error": {"code": "invalid_url"}})[0], "FAIL")
+        covered = Case("dns", "http://--1.sslip.io/", "covered")
+        self.assertEqual(classify(covered, 403, refused)[0], "refused")
+        self.assertEqual(classify(covered, 502, {"error": {"code": "dns_error"}})[0], "note")
+        self.assertEqual(classify(covered, 200, {"text": "page"})[0], "FAIL")
+        self.assertEqual(classify(covered, 502, {"error": {"code": "fetch_failed"}})[0], "FAIL")
+        self.assertEqual(classify(covered, 422, {"error": {"code": "invalid_url"}})[0], "FAIL")
 
     def secret_file(self):
         folder = tempfile.TemporaryDirectory()
@@ -3093,6 +3134,35 @@ class AddressCheckScriptTests(unittest.TestCase):
         self.assertIn("control", text)
         self.assertEqual(transport.calls[0][1].host, "example.com")
         self.assertEqual(len(transport.calls), 1, "only the control page may be fetched")
+
+    def test_an_unresolvable_covered_name_is_a_note_not_inconclusive(self):
+        def resolver(host, port):
+            if host == "example.com":
+                return ["93.184.216.34"]
+            if host == "--1.sslip.io":
+                raise ToolError("could not resolve", "dns_error", 502)
+            if host == "localtest.me" or host.endswith((".nip.io", ".sslip.io")):
+                return ["127.0.0.1"]
+            return _numeric_only_resolver(host, port)
+
+        code, text = self.run_script(
+            resolver, FakeTransport({"https://example.com/": page(ARTICLE)}))
+        self.assertEqual(code, 0, text)
+        self.assertIn("note", text)
+        self.assertIn("1 noted", text)
+
+    def test_a_covered_name_that_is_fetched_still_fails(self):
+        def resolver(host, port):
+            if host == "example.com" or host == "--1.sslip.io":
+                return ["93.184.216.34"]  # a hole: the name leads to a public address
+            if host == "localtest.me" or host.endswith((".nip.io", ".sslip.io")):
+                return ["127.0.0.1"]
+            return _numeric_only_resolver(host, port)
+
+        code, text = self.run_script(
+            resolver, FakeTransport({"https://example.com/": page(ARTICLE),
+                                     "http://--1.sslip.io/": page(ARTICLE)}))
+        self.assertEqual(code, 1, text)
 
     def test_names_that_do_not_resolve_are_inconclusive_not_a_pass(self):
         def resolver(host, port):
@@ -3212,7 +3282,7 @@ class FirewallFileTests(unittest.TestCase):
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "firewall.nft")
         ok = subprocess.run(["nft", "-c", "-D", "gateway=192.168.64.1", "-f", path],
                             capture_output=True, text=True)
-        if "ermission" in ok.stderr or "not supported" in ok.stderr:
+        if "ermission" in ok.stderr or "not permitted" in ok.stderr or "not supported" in ok.stderr:
             self.skipTest("nft cannot check rules here: " + ok.stderr.strip())
         self.assertEqual(ok.returncode, 0, ok.stderr)
         missing = subprocess.run(["nft", "-c", "-f", path], capture_output=True, text=True)
