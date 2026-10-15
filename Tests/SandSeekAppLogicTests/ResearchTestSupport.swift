@@ -217,8 +217,10 @@ final class FakeProcessRunner: ResearchProcessRunning, @unchecked Sendable {
 
     """
 
-    /// What `nft -nn list table inet sandseek_sandbox` prints for firewall.nft
-    /// with the Mac as DNS server and the Mac's addresses in the blocked sets.
+    /// What `nft list table inet sandseek_sandbox` (nft 1.0.9) prints after
+    /// `firewall.nft` is loaded with a sample gateway and the commands from
+    /// `entrypoint.sh` run with sample values: the Mac as DNS server and some
+    /// of the Mac's addresses in the blocked sets. Captured, not hand-written.
     static let firewallListing = """
     table inet sandseek_sandbox {
     \tset private4 {
@@ -242,13 +244,15 @@ final class FakeProcessRunner: ResearchProcessRunning, @unchecked Sendable {
 
     \tset blocked6 {
     \t\ttype ipv6_addr
-    \t\telements = { ::1, fe80::1 }
+    \t\telements = { ::1,
+    \t\t\t     2001:db8::1 }
     \t}
 
     \tset refused6 {
     \t\ttype ipv6_addr
     \t\tflags interval
-    \t\telements = { 2001::/32, 2001:db8::/32,
+    \t\telements = { 2001::/32,
+    \t\t\t     2001:db8::/32,
     \t\t\t     2002::/16 }
     \t}
 
@@ -258,15 +262,15 @@ final class FakeProcessRunner: ResearchProcessRunning, @unchecked Sendable {
     \t\tip daddr 192.168.64.1 udp dport 53 accept
     \t\toifname "lo" accept
     \t\tct state established,related accept
-    \t\tmeta nfproto ipv4 ip daddr @blocked4 meta l4proto tcp reject with tcp reset
-    \t\tmeta nfproto ipv4 ip daddr @blocked4 reject
-    \t\tmeta nfproto ipv6 ip6 daddr @blocked6 meta l4proto tcp reject with tcp reset
-    \t\tmeta nfproto ipv6 ip6 daddr @blocked6 reject
-    \t\tmeta nfproto ipv4 ip daddr @private4 meta l4proto tcp reject with tcp reset
-    \t\tmeta nfproto ipv4 ip daddr @private4 reject
+    \t\tip daddr @blocked4 meta l4proto tcp reject with tcp reset
+    \t\tip daddr @blocked4 reject with icmp port-unreachable
+    \t\tip6 daddr @blocked6 meta l4proto tcp reject with tcp reset
+    \t\tip6 daddr @blocked6 reject with icmpv6 port-unreachable
+    \t\tip daddr @private4 meta l4proto tcp reject with tcp reset
+    \t\tip daddr @private4 reject with icmp port-unreachable
     \t\tmeta nfproto ipv4 accept
-    \t\tmeta nfproto ipv6 ip6 daddr @refused6 meta l4proto tcp reject with tcp reset
-    \t\tmeta nfproto ipv6 ip6 daddr @refused6 reject
+    \t\tip6 daddr @refused6 meta l4proto tcp reject with tcp reset
+    \t\tip6 daddr @refused6 reject with icmpv6 port-unreachable
     \t\tip6 daddr 2000::/3 accept
     \t\tmeta l4proto tcp reject with tcp reset
     \t\treject

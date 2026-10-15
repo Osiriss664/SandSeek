@@ -168,11 +168,11 @@ These hold as long as the design is intact and the VM boundary holds.
   which SandSeek never uses) so the security check can show that the list works,
   not only the private ranges. The VM's DNS exception to the Mac is inserted
   above these rules, and replies on connections the Mac opened to the
-  published port are allowed before them. The list is made when the sandbox
-  starts: an address the Mac gains later is not on it (a new public address
-  needs a restart; the bridge address the Mac gets while the VM runs is private
-  and already refused, and the security check tries the Mac's current addresses
-  too).
+  published port are allowed before them. The list is taken when the sandbox
+  starts, so an address the Mac gets later (a rotated temporary IPv6 address,
+  for example) is blocked only after a restart. The security check reads the
+  Mac's addresses again and reports any that are not in the blocked sets. The
+  bridge address the Mac gets while the VM runs is private and already refused.
 - **The sandbox API is not for web pages.** It refuses a `Host` header that is
   not a loopback name (which stops DNS rebinding from your browser) and
   accepts only `application/json` POSTs (which a page cannot send across

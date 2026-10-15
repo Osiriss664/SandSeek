@@ -204,6 +204,12 @@ class AddressPolicyTests(unittest.TestCase):
                         "::ffff:192.168.64.1", "0.0.0.0", "224.0.0.1", "not-an-ip"]:
             self.assertFalse(server.is_public_address(address), address)
 
+    def test_an_address_with_a_zone_id_is_refused(self):
+        # A zone id makes the blocked-set lookup miss, so no such text is public.
+        for address in ["fe80::1%en0", "2606:2800:220:1::2%en0", "2606:2800:220:1::2%1",
+                        "93.184.216.34%en0", "::1%lo0", "2001:4860:4860::8888%"]:
+            self.assertFalse(server.is_public_address(address), address)
+
     def test_public_addresses_are_allowed(self):
         for address in ["93.184.216.34", "2606:2800:220:1:248:1893:25c8:1946",
                         "2001:4860:4860::8888", "::ffff:8.8.8.8"]:

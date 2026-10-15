@@ -307,7 +307,7 @@ public final class ResearchSandboxController {
         let firewall = try? await runner.run(
             executable: container,
             arguments: ["exec", Self.containerName,
-                        "nft", "-nn", "list", "table", "inet", Self.firewallTable],
+                        "nft", "list", "table", "inet", Self.firewallTable],
             environment: environment, timeout: 30)
         guard state == .ready else { return }
         guard let firewall, firewall.status == 0 else {
@@ -351,9 +351,10 @@ public final class ResearchSandboxController {
         "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/3",
     ]
 
-    /// Reads `nft -nn list table inet sandseek_sandbox` (`-nn` prints ports as
-    /// numbers) and says what is wrong with it, or nil when it has the shape
-    /// `firewall.nft` gives it. Outbound: traffic dropped unless allowed, the
+    /// Reads `nft list table inet sandseek_sandbox` (plain: since nft 0.9.1,
+    /// `-n` prints every protocol, state and ICMP code as a number, which the
+    /// checks below would not recognise) and says what is wrong with it, or nil
+    /// when it has the shape `firewall.nft` gives it. Outbound: traffic dropped unless allowed, the
     /// private ranges and the Mac's own addresses (the sets `blocked4` and
     /// `blocked6`, filled at start) refused, and no rule but SandSeek's own:
     /// loopback, replies, DNS to the name servers, one SearXNG address and
@@ -455,7 +456,8 @@ public final class ResearchSandboxController {
     /// The input chain `firewall.nft` writes: policy drop, loopback and
     /// replies accepted, and new connections accepted on port 9100 from one
     /// IPv4 address only, the VM's default gateway (the address the published
-    /// port connects from). Any other rule, or none for port 9100, is a
+    /// port connects from). nft may print port 9100 by its service name. Any
+    /// other rule, or none for port 9100, is a
     /// problem: another rule could open a port to the local network.
     private static func inputChainProblem(_ lines: [String]) -> String? {
         guard let start = lines.firstIndex(where: {
@@ -470,7 +472,7 @@ public final class ResearchSandboxController {
             if line == "iifname \"lo\" accept" || line == "ct state established,related accept" {
                 continue
             }
-            if line.wholeMatch(of: #/ip saddr (?:[0-9]{1,3}\.){3}[0-9]{1,3} tcp dport 9100 accept/#) != nil {
+            if line.wholeMatch(of: #/ip saddr (?:[0-9]{1,3}\.){3}[0-9]{1,3} tcp dport (?:9100|jetdirect) accept/#) != nil {
                 gatewayRules += 1
                 continue
             }

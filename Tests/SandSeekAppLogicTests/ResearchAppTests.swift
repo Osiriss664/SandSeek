@@ -686,8 +686,8 @@ private struct UnsignedServices: ResearchHTTPTransport {
         #expect(sandbox.startedByApp)
         #expect(runner.scriptCommands == ["build", "start"])
         #expect(runner.commands.contains {
-            $0.starts(with: ["container", "exec", "sandseek-sandbox", "nft", "-nn",
-                             "list", "table", "inet", "sandseek_sandbox"])
+            $0 == ["container", "exec", "sandseek-sandbox", "nft",
+                   "list", "table", "inet", "sandseek_sandbox"]
         })
 
         // Unchanged files and an existing image: no rebuild.
@@ -819,7 +819,7 @@ private struct UnsignedServices: ResearchHTTPTransport {
             with: "")
         #expect(emptyV4 != good)
         #expect(ResearchSandboxController.firewallProblem(emptyV4)?.contains("none of the Mac's") == true)
-        let emptyV6 = good.replacingOccurrences(of: "\t\telements = { ::1, fe80::1 }\n", with: "")
+        let emptyV6 = good.replacingOccurrences(of: "\t\telements = { ::1,\n\t\t\t     2001:db8::1 }\n", with: "")
         #expect(emptyV6 != good)
         #expect(ResearchSandboxController.firewallProblem(emptyV6) == nil)
         // The rules that use the sets must be there, for both families.
@@ -873,9 +873,11 @@ private struct UnsignedServices: ResearchHTTPTransport {
             #expect(listing != good)
             #expect(ResearchSandboxController.firewallProblem(listing) != nil)
         }
-        // Service names are not accepted for the port: the app asks nft for numbers.
+        // nft may print the port's service name; another service is not port 9100.
         #expect(ResearchSandboxController.firewallProblem(good
-            .replacingOccurrences(of: "dport 9100", with: "dport jetdirect")) != nil)
+            .replacingOccurrences(of: "dport 9100", with: "dport jetdirect")) == nil)
+        #expect(ResearchSandboxController.firewallProblem(good
+            .replacingOccurrences(of: "dport 9100", with: "dport ssh")) != nil)
     }
 
     @Test func aFirewallWithoutTheInboundRulesIsNotVerified() async throws {

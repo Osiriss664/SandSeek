@@ -224,6 +224,9 @@ MAX_BLOCKED_FILE_BYTES = 64 * 1024
 
 
 def is_public_address(address: str) -> bool:
+    # A zone id ("fe80::1%eth0") makes the lookup in the blocked set miss.
+    if "%" in address:
+        return False
     try:
         ip = ipaddress.ip_address(address)
     except ValueError:

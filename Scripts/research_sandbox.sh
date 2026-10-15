@@ -788,11 +788,14 @@ case "${1:-}" in
       fail "the output chain does not reject the blocked sets: ${output_rules:0:200}"
     fi
     # Only the firewall makes this fail at once with a refusal (a connection
-    # reset): without the rule the address is simply unanswered.
+    # reset): without the rule the address is simply unanswered. Port 53 is
+    # used because this address (a root server) accepts TCP there, so without
+    # the rule the connection would succeed, not be reset. The DNS exception covers the VM's own name servers only,
+    # so this address is still refused on port 53.
     refusal="$("$container_bin" exec --user 10001:10001 "$name" python3 -c "
 import socket, sys
 try:
-    socket.create_connection((sys.argv[1], 80), timeout=4).close()
+    socket.create_connection((sys.argv[1], 53), timeout=4).close()
     print('connected')
 except ConnectionRefusedError:
     print('refused')

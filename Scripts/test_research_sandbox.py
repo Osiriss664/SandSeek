@@ -325,6 +325,14 @@ class MacAddressTests(unittest.TestCase):
         self.assertNotIn("blocked", run_options)
 
 
+class SelfTestPortTests(unittest.TestCase):
+    def test_the_blocked_address_is_tried_on_a_port_a_root_server_accepts(self):
+        # Port 80 might be reset even without the firewall rule; TCP port 53 is
+        # open on the root server, so only the rule can make it fail at once.
+        self.assertIn("socket.create_connection((sys.argv[1], 53), timeout=4)", TEXT)
+        self.assertNotIn("socket.create_connection((sys.argv[1], 80)", TEXT)
+
+
 class FixedEnvironmentTests(unittest.TestCase):
     def test_the_second_run_has_only_the_fixed_environment(self):
         # Everything up to the end of the environment block, then `env`.
