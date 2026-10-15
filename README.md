@@ -4,20 +4,22 @@
 
 <h1 align="center">SandSeek</h1>
 
-SandSeek answers a question by searching the web and reading pages with a
-local model, and returns an answer with numbered sources. The model runs on
-your Mac. Search and page fetching run inside a disposable Linux VM made by
-Apple's [`container`](https://github.com/apple/container) tool. The model has
-exactly two tools, `web_search` and `open_page`: no shell, no file access, no
-network tool. `open_page` reads web pages and text PDFs (up to 5 MB and 50
-pages, no OCR), parsed inside the VM.
+SandSeek answers a question by searching the web and reading pages with a local
+LLM (Ollama, llama.cpp or TUFF), and returns an answer with numbered sources.
+The model runs on your Mac. Search and page fetching run inside a disposable
+Linux VM made by Apple's [`container`](https://github.com/apple/container)
+tool. The model has exactly two tools, `web_search` and `open_page`: no shell,
+no file access, no network tool. `open_page` reads web pages and text PDFs (up
+to 5 MB and 50 pages, no OCR), parsed inside the VM.
 
-Status: 0.2.0. SandSeek began in a fork of TUFF. The command-line tool,
+Status: 0.3.0. SandSeek began in a fork of TUFF. The command-line tool,
 the core library and the Mac app (a window with the same research loop) are one
-Swift package. Built, tested and tried by hand on a Mac with macOS 27, TUFF
-9.3.0 and Qwen3.6 35B (15 October 2026), including the safety test
+Swift package. 0.2.0 was built, tested and tried by hand on a Mac with macOS
+27, TUFF 9.3.0 and Qwen3.6 35B (15 October 2026), including the safety test
 ([docs/SAFETY_TEST.md](docs/SAFETY_TEST.md)); Start server was tried with TUFF
-8.3.11 and llama.cpp for 0.1.0.
+8.3.11 and llama.cpp for 0.1.0. 0.3.0 adds experimental Ollama support,
+tested on a Mac with Ollama 0.40.4 and Gemma 4 12B from the command line
+(October 2026).
 
 ![The SandSeek window: the question box with model and mode, Stop everything, the folded Model server and Web sandbox cards showing Connected, Ready and Signed, then an answer with its folded Figure check and Pages that could not be read lists, the sources and the searches](docs/assets/sandseek-app.png)
 
@@ -47,11 +49,11 @@ addresses go to the internet. More in [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.m
 
    LM Studio is planned; other servers are not supported yet.
 2. Get the app, in one of two ways:
-   - **Download:** `SandSeek-0.2.0.zip` from the release page, unzip it and
+   - **Download:** `SandSeek-0.3.0.zip` from the release page, unzip it and
      move SandSeek to Applications. It is not notarized: on first launch
      choose System Settings → Privacy & Security → Open Anyway.
    - **Build it yourself:** with Xcode 26 or its command line tools (Swift
-     6.2 or newer; 0.2.0 was built on macOS 27):
+     6.2 or newer; 0.3.0 was built on macOS 27):
 
          git clone https://github.com/Osiriss664/SandSeek.git
          cd SandSeek
@@ -61,9 +63,9 @@ addresses go to the internet. More in [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.m
      you built yourself opens without "Open Anyway".
 3. Open SandSeek and choose your server on the **Model server** card. Either
    start the server yourself and press **Check**, or choose its program once
-   and press **Start server** (TUFF and llama.cpp). Then press **Start
-   Sandbox** on the **Web sandbox** card; the first start builds the sandbox
-   image and takes a few minutes. Or press **Start everything**, which does
+   and press **Start server** (TUFF and llama.cpp; start Ollama yourself).
+   Then press **Start Sandbox** on the **Web sandbox** card; the first start
+   builds the sandbox image and takes a few minutes. Or press **Start everything**, which does
    both and runs the security check. Type your question in the box on top and
    press **Research**. **Stop everything** stops it all again.
 
@@ -88,7 +90,8 @@ above all test reports.
 ## Documentation
 
 - [docs/INSTALL.md](docs/INSTALL.md): requirements, build and package the app,
-  start TUFF or llama.cpp safely, first run, where reports live, uninstall.
+  start TUFF, llama.cpp or Ollama safely, first run, where reports live,
+  uninstall.
 - [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md): the research method.
 - [docs/SECURITY.md](docs/SECURITY.md): what the sandbox guarantees and what it
   does not, the threat model, the tests and how to run them, known limits.
@@ -101,7 +104,7 @@ above all test reports.
 - A local model server on 127.0.0.1: TUFF 8.3.1 or newer, or llama.cpp or
   Ollama (both experimental, see below). Streaming is on by
   default for TUFF, so that Stop and the time limits make it stop generating.
-  llama.cpp (`llama-server`) is experimental in 0.2.0: it works through
+  llama.cpp (`llama-server`) is experimental in 0.3.0: it works through
   `--server-type llamacpp` with plain requests (no streaming), the app's
   Thinking switch has no effect on it yet, and it was probed but not measured
   with a research run. The app connects to a
@@ -250,7 +253,7 @@ and `--output` for a report that names the server type and model.
 
 The command finds out which kind of model server it talks to before the sandbox
 check: a model server that does not answer ends the run with exit code 1 (as
-before), a server that is not recognised as TUFF with exit code 2 (use
+before), a server that is neither TUFF nor Ollama with exit code 2 (use
 `--server-type llamacpp` for llama-server; `research_question_set.py run` and
 `research_injection_check.py` pass the option on).
 

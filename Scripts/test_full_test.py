@@ -54,7 +54,7 @@ class Fixture:
         write(f"{b}/swift", """\
             #!/bin/bash
             echo "swift $1" >> "$FAKE_LOG"
-            echo "stdin: $(cat | wc -c)"
+            echo "stdin: $(cat | wc -c | tr -d ' ')"
             if [ "$FAKE_FAIL" = "swift-$1" ]; then
               for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do echo "noise $i"; done
               echo "FAKE FAILURE LINE"; exit 1

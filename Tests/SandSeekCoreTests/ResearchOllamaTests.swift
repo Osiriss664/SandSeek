@@ -579,12 +579,12 @@ struct ResearchOllamaStreamTests {
     @Test func emptyLinesAndCarriageReturnsAreSkipped() throws {
         let lines = [
             "",
-            #"{"model":"m","message":{"role":"assistant","content":"Ein"},"done":false}"# + "\r",
+            #"{"model":"m","message":{"role":"assistant","content":"On"},"done":false}"# + "\r",
             "   ",
-            #"{"model":"m","message":{"role":"assistant","content":"s"},"done":true,"done_reason":"stop"}"# + "\r",
+            #"{"model":"m","message":{"role":"assistant","content":"e"},"done":true,"done_reason":"stop"}"# + "\r",
         ]
         let turn = try ResearchOllamaStreamAssembler.assemble(lines: lines)
-        #expect(turn.content == "Eins")
+        #expect(turn.content == "One")
     }
 
     @Test func nothingAfterDoneChangesTheTurn() throws {
@@ -610,7 +610,7 @@ struct ResearchOllamaStreamTests {
             func sendStreaming(method: String, url: URL, body: Data?,
                                timeout: TimeInterval?) async throws -> ResearchHTTPLineResponse {
                 let lines = AsyncThrowingStream<String, any Error> { continuation in
-                    continuation.yield(#"{"model":"m","message":{"role":"assistant","content":"Ein"},"done":false}"#)
+                    continuation.yield(#"{"model":"m","message":{"role":"assistant","content":"On"},"done":false}"#)
                     continuation.finish(throwing: URLError(.timedOut))
                 }
                 return ResearchHTTPLineResponse(status: 200, lines: lines)

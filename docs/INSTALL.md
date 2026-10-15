@@ -31,7 +31,7 @@ For what the security design does and does not promise, read
   - **TUFF 8.3.1 or newer** (the official release), with a Qwen model for
     research; or
   - **llama.cpp** (`llama-server`), with a model that supports tool calls (the
-    project probed it with Bonsai). llama.cpp is experimental in 0.2.0: no
+    project probed it with Bonsai). llama.cpp is experimental in 0.3.0: no
     streaming, the Thinking switch has no effect on it yet, and no research
     run was measured with it; see [SECURITY.md](SECURITY.md).
   - **Ollama**, experimental (tested once on a Mac). See "Ollama" below.
@@ -257,7 +257,7 @@ note if it could not tell.
    question, the sandbox this app started, and the model server only if
    SandSeek started it. A sandbox started from Terminal is left running; stop
    it with `Scripts/research_sandbox.sh stop`.
-2. On the model server card, choose TUFF or llama.cpp, check the address, and
+2. On the model server card, choose TUFF, llama.cpp or Ollama, check the address, and
    press **Check**. It should say **Connected** and list the models.
 3. On the sandbox card, press **Start Sandbox**. The first start builds the
    image and takes a few minutes. When it says **Ready**, the app has checked the

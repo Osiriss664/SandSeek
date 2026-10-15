@@ -1,21 +1,28 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 (16 October 2026)
+
+New: Ollama as a third model server, next to TUFF and llama.cpp. The sandbox
+image did not change; no rebuild is needed.
 
 - Experimental Ollama support (`--server-type ollama`, or the Ollama choice on
   the model server card), through Ollama's native `/api/chat` with streaming.
   Tested once on a Mac with Ollama 0.40.4 and Gemma 4 12B (MLX build) from the
-  command line; the app's Ollama card was not tried by hand. You start Ollama yourself; SandSeek never starts or
-  stops it. The model must support tool calls and run on this Mac: Ollama cloud
+  command line; the app's Ollama card was not tried by hand. You start Ollama
+  yourself; SandSeek never starts or stops it. The model must support tool calls and run on this Mac: Ollama cloud
   models are refused. The context is 32,768 tokens (or the model's maximum if
   smaller; `--context-tokens N` changes it, up to the model's maximum). With
   Ollama, `think` is sent only to models that can think, and then always as
   true or false. `--server-type ollama` defaults to port 11434. The exposure
   check advises `OLLAMA_HOST=127.0.0.1:11434`.
-- The command's progress line for Ollama ends with `thinking on` or `thinking off`.
+- The command's progress line for an Ollama model that can think ends with
+  `thinking on` or `thinking off`.
+- `--server-type auto` (the default) also recognises Ollama, by its
+  `/api/version`. `Scripts/research_injection_check.py` accepts
+  `--server-type ollama`.
 - `Scripts/full_test.sh` takes `--server-type tuff|llamacpp|ollama|auto`.
-- `web_search` accepts a list of queries and searches the first one, telling
-  the model so. Gemma 4 through Ollama sent the query as a list in 3 of 7 test
+- `web_search` accepts a list of queries and searches the first non-empty one;
+  with more than one, it tells the model that only the first was used. Gemma 4 through Ollama sent the query as a list in 3 of 7 test
   runs and then got only errors until the step budget ran out.
 
 ## 0.2.0 (15 October 2026)
