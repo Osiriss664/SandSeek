@@ -1,0 +1,461 @@
+#!/usr/bin/env python3
+"""Tests for Scripts/full_test.sh, with stub programs, on any platform.
+
+  python3 Scripts/test_full_test.py
+
+The script is copied into a fake checkout together with stub swift, container,
+codesign, curl and sandbox scripts, so nothing real is built or started.
+"""
+
+import json
+import os
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+import textwrap
+import threading
+import time
+import unittest
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SECRET = "5ec12e7" * 9 + "abcd"  # 67 characters, not hex
+HEX_SECRET = "ab" * 32
+KEY = "sk-test-key-98765"
+
+
+def write(path, text, mode=0o755):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as handle:
+        handle.write(textwrap.dedent(text))
+    os.chmod(path, mode)
+
+
+class Fixture:
+    def __init__(self):
+        self.root = tempfile.mkdtemp(prefix="fulltest-")
+        self.repo = os.path.join(self.root, "repo")
+        self.bin = os.path.join(self.root, "bin")
+        self.home = os.path.join(self.root, "home")
+        self.secret_folder = os.path.join(self.home, "sandbox")
+        self.log = os.path.join(self.root, "calls.log")
+        os.makedirs(self.home)
+        for name in ("full_test.sh", "full_test_helpers.py"):
+            dest = os.path.join(self.repo, "Scripts", name)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            shutil.copy(os.path.join(HERE, name), dest)
+        self.make_stubs()
+
+    def make_stubs(self):
+        r, b = self.repo, self.bin
+        write(f"{b}/swift", """\
+            #!/bin/bash
+            echo "swift $1" >> "$FAKE_LOG"
+            echo "stdin: $(cat | wc -c)"
+            if [ "$FAKE_FAIL" = "swift-$1" ]; then
+              for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do echo "noise $i"; done
+              echo "FAKE FAILURE LINE"; exit 1
+            fi
+            [ "$1" = test ] && echo "Executed 7 tests, with 0 failures (0 unexpected)"
+            exit 0
+            """)
+        write(f"{b}/container", """\
+            #!/bin/bash
+            echo "container $*" >> "$FAKE_LOG"
+            case "$1 $2" in
+              "image list") [ "$FAKE_IMAGE" = 1 ] && echo "sandseek-sandbox latest" ;;
+            esac
+            exit 0
+            """)
+        write(f"{b}/codesign", "#!/bin/bash\necho codesign >> \"$FAKE_LOG\"\n")
+        write(f"{b}/curl", "#!/bin/bash\necho 401\n")
+        write(f"{r}/Scripts/research_sandbox.sh", f"""\
+            #!/bin/bash
+            echo "sandbox $1" >> "$FAKE_LOG"
+            case "$1" in
+              build) echo built ;;
+              start)
+                mkdir -p "$FT_SECRET_FOLDER"; printf '%s' "{SECRET}" > "$FT_SECRET_FOLDER/secret"
+                echo "secret={SECRET} also {HEX_SECRET}"
+                [ "$FAKE_FAIL" = start ] && {{ echo "start failed"; exit 1; }}
+                echo ready ;;
+              stop) rm -f "$FT_SECRET_FOLDER/secret"; echo stopped ;;
+              status) echo answers ;;
+              selftest)
+                echo "  ok    one"; echo "  ok    two"
+                [ "$FAKE_FAIL" = selftest-fail ] && echo "  FAIL  three"
+                if [ "$FAKE_SLEEP" = selftest ]; then touch "$FAKE_LOG.sleeping"; sleep 60; fi ;;
+            esac
+            exit 0
+            """)
+        write(f"{r}/Scripts/package_app.sh", """\
+            #!/bin/bash
+            echo "package" >> "$FAKE_LOG"
+            mkdir -p build/SandSeek.app/Contents/Resources
+            : > build/SandSeek.app/Contents/Resources/AppIcon.icns
+            python3 - <<'PY'
+            import plistlib
+            with open("build/SandSeek.app/Contents/Info.plist", "wb") as h:
+                plistlib.dump({"CFBundleIconFile": "AppIcon"}, h)
+            PY
+            """)
+        write(f"{r}/Scripts/verify_sandbox_signature.py",
+              "import sys\nprint('matches: True')\n", 0o644)
+        write(f"{r}/Scripts/research_address_check.py", """\
+            import os, sys
+            print("all refused")
+            sys.exit(1 if os.environ.get("FAKE_FAIL") == "address" else 0)
+            """, 0o644)
+        write(f"{r}/Scripts/test_research_sandbox.py", """\
+            import unittest
+            class T(unittest.TestCase):
+                def test_a(self): pass
+            unittest.main()
+            """, 0o644)
+        write(f"{r}/Sandbox/test_server.py", """\
+            import unittest
+            class T(unittest.TestCase):
+                def test_a(self): pass
+                def test_b(self): pass
+            """, 0o644)
+        write(f"{r}/Scripts/other.sh", "#!/bin/bash\ntrue\n")
+        write(f"{r}/sandseek-stub", f"""\
+            #!/bin/bash
+            echo "sandseek $*" >> "$FAKE_LOG"
+            echo "using key {KEY} and secret {SECRET}" >&2
+            echo "Canberra is the capital of Australia."
+            echo
+            echo "1. https://example.org/canberra"
+            """)
+        # A model server stub as a script, started by --start-server.
+        write(f"{r}/server/TUFFServer", f"""\
+            #!{sys.executable}
+            import sys
+            from http.server import BaseHTTPRequestHandler, HTTPServer
+            port = int(sys.argv[sys.argv.index("--port") + 1])
+            class H(BaseHTTPRequestHandler):
+                def do_GET(self):
+                    self.send_response(200); self.end_headers(); self.wfile.write(b"{{}}")
+                def log_message(self, *a): pass
+            HTTPServer(("127.0.0.1", port), H).serve_forever()
+            """)
+
+    def env(self, **extra):
+        env = {
+            "PATH": self.bin + os.pathsep + os.environ["PATH"],
+            "HOME": self.home,
+            "SANDSEEK_FULL_TEST_FAKE": "1",
+            "FT_CONTAINER": f"{self.bin}/container",
+            "FT_SECRET_FOLDER": self.secret_folder,
+            "FT_SANDSEEK_BIN": f"{self.repo}/sandseek-stub",
+            "FAKE_LOG": self.log,
+            "FAKE_FAIL": "",
+            "SANDSEEK_SANDBOX_PORT": "49321",
+            "SANDSEEK_MODEL_SERVER": "http://127.0.0.1:1",
+            "FT_SERVER_WAIT": "20",
+        }
+        env.update(extra)
+        return env
+
+    def run(self, *args, stdin=None, timeout=120, **extra):
+        process = subprocess.run(
+            ["bash", f"{self.repo}/Scripts/full_test.sh", *args], env=self.env(**extra),
+            input=stdin, capture_output=True, text=True, timeout=timeout)
+        return process
+
+    def calls(self):
+        try:
+            with open(self.log) as handle:
+                return handle.read()
+        except OSError:
+            return ""
+
+    def report_dir(self, process):
+        for line in process.stdout.splitlines()[::-1]:
+            if line.startswith("FULL_TEST_REPORT="):
+                return os.path.dirname(line.split("=", 1)[1])
+        raise AssertionError("no FULL_TEST_REPORT line:\n" + process.stdout)
+
+    def results(self, process):
+        directory = self.report_dir(process)
+        with open(os.path.join(directory, "report.json")) as handle:
+            data = json.load(handle)
+        return data, {step["id"]: step for step in data["steps"]}, directory
+
+    def close(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+
+class QuietHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+
+class FullTestCase(unittest.TestCase):
+    def setUp(self):
+        self.fx = Fixture()
+        self.addCleanup(self.fx.close)
+
+    def everything_text(self, directory):
+        found = ""
+        for folder, _, names in os.walk(directory):
+            for name in names:
+                with open(os.path.join(folder, name), errors="replace") as handle:
+                    found += handle.read()
+        return found
+
+
+class PassingRun(FullTestCase):
+    def test_script_is_valid_bash(self):
+        for name in ("full_test.sh",):
+            subprocess.run(["bash", "-n", os.path.join(HERE, name)], check=True)
+
+    def test_all_pass_and_report_files(self):
+        process = self.fx.run()
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        data, steps, directory = self.fx.results(process)
+        self.assertEqual(data["overall"], "PASS")
+        self.assertTrue(process.stdout.rstrip().splitlines()[-1].startswith("FULL_TEST_REPORT="))
+        with open(os.path.join(directory, "report.md")) as handle:
+            markdown = handle.read()
+        self.assertIn("| Step | Result | Time | Note |", markdown)
+        self.assertIn("Still manual", markdown)
+        self.assertIn("Print and Export as PDF", markdown)
+        for step_id in ("1", "2.1", "2.2", "3.1", "3.2", "3.3", "4.1", "4.2", "4.3",
+                        "5.2", "5.4", "5.5", "5.6", "5.7", "8"):
+            self.assertEqual(steps[step_id]["result"], "PASS", step_id)
+        self.assertIn("7 tests", steps["2.2"]["note"])
+        self.assertIn("2 checks", steps["5.4"]["note"])
+        # No model server answers: question and injection check are skipped.
+        for step_id in ("6.1", "7"):
+            self.assertEqual(steps[step_id]["result"], "SKIP", step_id)
+        self.assertIn("no model server", steps["6.1"]["note"])
+        self.assertEqual(data["steps"][-1]["id"], "8")
+
+    def test_children_get_no_standard_input(self):
+        process = self.fx.run(stdin="HELLO-FROM-PARENT\n")
+        directory = self.fx.report_dir(process)
+        text = self.everything_text(directory)
+        self.assertIn("stdin: 0", text)
+        self.assertNotIn("HELLO-FROM-PARENT", text)
+
+    def test_secrets_are_masked_everywhere(self):
+        key_file = os.path.join(self.fx.root, "key")
+        with open(key_file, "w") as handle:
+            handle.write(KEY)
+        server = HTTPServer(("127.0.0.1", 0), QuietHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        process = self.fx.run("--server", f"http://127.0.0.1:{server.server_port}",
+                              "--api-key-file", key_file)
+        directory = self.fx.report_dir(process)
+        text = process.stdout + process.stderr + self.everything_text(directory)
+        for secret in (SECRET, HEX_SECRET, KEY):
+            self.assertNotIn(secret, text)
+        self.assertIn("***", text)
+
+    def test_cleanup_runs_at_the_end(self):
+        process = self.fx.run()
+        calls = self.fx.calls()
+        self.assertIn("sandbox stop", calls)
+        self.assertFalse(os.path.exists(os.path.join(self.fx.secret_folder, "secret")))
+        self.assertEqual(process.returncode, 0)
+
+
+class Failures(FullTestCase):
+    def test_failing_step_gives_exit_1_log_tail_and_cleanup(self):
+        process = self.fx.run(FAKE_FAIL="swift-test")
+        self.assertEqual(process.returncode, 1)
+        data, steps, directory = self.fx.results(process)
+        self.assertEqual(data["overall"], "FAIL")
+        self.assertEqual(steps["2.2"]["result"], "FAIL")
+        self.assertIn("FAKE FAILURE LINE", steps["2.2"]["log_tail"])
+        self.assertLessEqual(len(steps["2.2"]["log_tail"].splitlines()), 15)
+        with open(os.path.join(directory, "report.md")) as handle:
+            markdown = handle.read()
+        self.assertIn("## Failures", markdown)
+        self.assertIn("FAKE FAILURE LINE", markdown)
+        self.assertIn("sandbox stop", self.fx.calls())  # the later steps still ran
+
+    def test_failed_start_skips_checks_and_still_cleans_up(self):
+        process = self.fx.run(FAKE_FAIL="start")
+        self.assertEqual(process.returncode, 1)
+        _, steps, _ = self.fx.results(process)
+        self.assertEqual(steps["5.2"]["result"], "FAIL")
+        for step_id in ("5.3", "5.4", "5.5", "5.6", "5.7"):
+            self.assertEqual(steps[step_id]["result"], "SKIP")
+        self.assertIn("sandbox stop", self.fx.calls())
+        self.assertFalse(os.path.exists(os.path.join(self.fx.secret_folder, "secret")))
+        self.assertEqual(steps["8"]["result"], "PASS")
+
+    def test_selftest_fail_line_fails_the_step(self):
+        process = self.fx.run(FAKE_FAIL="selftest-fail")
+        _, steps, _ = self.fx.results(process)
+        self.assertEqual(steps["5.4"]["result"], "FAIL")
+        self.assertEqual(process.returncode, 1)
+
+    def test_leftover_secret_fails_the_cleanup_check(self):
+        # A stop that leaves the secret behind must be reported.
+        write(f"{self.fx.repo}/Scripts/research_sandbox.sh", """\
+            #!/bin/bash
+            echo "sandbox $1" >> "$FAKE_LOG"
+            mkdir -p "$FT_SECRET_FOLDER"; : > "$FT_SECRET_FOLDER/secret"
+            exit 0
+            """)
+        process = self.fx.run()
+        _, steps, _ = self.fx.results(process)
+        self.assertEqual(steps["8"]["result"], "FAIL")
+        self.assertIn("secret", steps["8"]["note"])
+        self.assertEqual(process.returncode, 1)
+
+    def test_sigint_cleans_up(self):
+        process = subprocess.Popen(
+            ["bash", f"{self.fx.repo}/Scripts/full_test.sh"], env=self.fx.env(FAKE_SLEEP="selftest"),
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        deadline = time.time() + 60
+        while not os.path.exists(self.fx.log + ".sleeping") and time.time() < deadline:
+            time.sleep(0.1)
+        self.assertTrue(os.path.exists(self.fx.log + ".sleeping"))
+        process.send_signal(signal.SIGINT)
+        out, _ = process.communicate(timeout=60)
+        self.assertEqual(process.returncode, 130)
+        self.assertIn("sandbox stop", self.fx.calls())
+        self.assertFalse(os.path.exists(os.path.join(self.fx.secret_folder, "secret")))
+        directory = os.path.dirname(out.strip().splitlines()[-1].split("=", 1)[1])
+        with open(os.path.join(directory, "report.json")) as handle:
+            data = json.load(handle)
+        self.assertEqual(data["overall"], "FAIL")
+        self.assertEqual(data["reason"], "interrupted")
+        self.assertTrue(any(step["id"] == "5.4" and step["result"] == "FAIL" for step in data["steps"]))
+
+    def test_whole_run_time_limit(self):
+        started = time.time()
+        process = self.fx.run(FAKE_SLEEP="selftest", FULL_TEST_TIME_LIMIT_SECONDS="4")
+        self.assertLess(time.time() - started, 40)
+        self.assertEqual(process.returncode, 124)
+        data, _, _ = self.fx.results(process)
+        self.assertEqual(data["overall"], "FAIL")
+        self.assertIn("time limit", data["reason"])
+        self.assertIn("sandbox stop", self.fx.calls())
+        self.assertFalse(os.path.exists(os.path.join(self.fx.secret_folder, "secret")))
+
+    def test_step_time_limit(self):
+        # The helper kills a step that runs too long.
+        log = os.path.join(self.fx.root, "slow.log")
+        process = subprocess.run(
+            [sys.executable, f"{self.fx.repo}/Scripts/full_test_helpers.py", "run", log, "1",
+             "bash", "-c", "echo before; sleep 30"], capture_output=True, text=True, timeout=30)
+        self.assertEqual(process.returncode, 124)
+        with open(log) as handle:
+            self.assertIn("before", handle.read())
+
+
+class Flags(FullTestCase):
+    def test_no_sandbox_skips_package_and_sandbox(self):
+        process = self.fx.run("--no-sandbox")
+        self.assertEqual(process.returncode, 0, process.stdout)
+        _, steps, _ = self.fx.results(process)
+        for step_id in ("4", "5", "6", "7", "8"):
+            self.assertEqual(steps[step_id]["result"], "SKIP", step_id)
+        self.assertEqual(steps["2.2"]["result"], "PASS")
+        calls = self.fx.calls()
+        self.assertNotIn("package", calls)
+        self.assertNotIn("sandbox", calls)
+
+    def test_quick_skips_package_and_image_build_when_present(self):
+        os.makedirs(f"{self.fx.repo}/build/SandSeek.app/Contents/Resources")
+        import plistlib
+        with open(f"{self.fx.repo}/build/SandSeek.app/Contents/Info.plist", "wb") as handle:
+            plistlib.dump({"CFBundleIconFile": "AppIcon"}, handle)
+        open(f"{self.fx.repo}/build/SandSeek.app/Contents/Resources/AppIcon.icns", "w").close()
+        process = self.fx.run("--quick", FAKE_IMAGE="1")
+        _, steps, _ = self.fx.results(process)
+        self.assertEqual(steps["4.1"]["result"], "SKIP")
+        self.assertEqual(steps["5.1"]["result"], "SKIP")
+        self.assertEqual(steps["4.3"]["result"], "PASS")
+        calls = self.fx.calls()
+        self.assertNotIn("package", calls)
+        self.assertNotIn("sandbox build", calls)
+
+    def test_quick_still_builds_when_missing(self):
+        process = self.fx.run("--quick")
+        _, steps, _ = self.fx.results(process)
+        self.assertEqual(steps["4.1"]["result"], "PASS")
+        self.assertEqual(steps["5.1"]["result"], "PASS")
+        self.assertIn("sandbox build", self.fx.calls())
+
+    def test_unknown_flag_is_refused(self):
+        self.assertEqual(self.fx.run("--bogus").returncode, 2)
+
+
+class ModelServer(FullTestCase):
+    def serve(self):
+        server = HTTPServer(("127.0.0.1", 0), QuietHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_port}"
+
+    def test_question_runs_when_a_server_answers(self):
+        process = self.fx.run("--server", self.serve())
+        _, steps, _ = self.fx.results(process)
+        self.assertEqual(steps["6.1"]["result"], "PASS", process.stdout)
+        self.assertNotIn("6.2", steps)
+        self.assertIn("--min-pages 2", self.fx.calls().replace("\n", " "))
+        self.assertEqual(steps["7"]["result"], "SKIP")
+
+    def test_thorough_adds_a_question(self):
+        process = self.fx.run("--server", self.serve(), "--thorough")
+        _, steps, _ = self.fx.results(process)
+        self.assertEqual(steps["6.1"]["result"], "PASS")
+        self.assertEqual(steps["6.2"]["result"], "FAIL")  # the stub does not mention Iceland
+        # and without --thorough there is no 6.2 at all (see the test above)
+
+    def test_answer_without_source_fails(self):
+        write(f"{self.fx.repo}/sandseek-stub", "#!/bin/bash\necho 'Canberra'\n")
+        process = self.fx.run("--server", self.serve())
+        _, steps, _ = self.fx.results(process)
+        self.assertEqual(steps["6.1"]["result"], "FAIL")
+        self.assertIn("numbered source", steps["6.1"]["note"])
+
+    def test_start_server_starts_uses_and_stops_it(self):
+        process = self.fx.run("--start-server", f"{self.fx.repo}/server/TUFFServer")
+        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        _, steps, directory = self.fx.results(process)
+        self.assertEqual(steps["6.0"]["result"], "PASS")
+        self.assertEqual(steps["6.1"]["result"], "PASS")
+        note = steps["6.0"]["note"]
+        port = note.split("port ")[1].split(" ")[0]
+        pid = int(note.split("pid ")[1].rstrip(")"))
+        self.assertIn(f"http://127.0.0.1:{port}", self.fx.calls())
+        time.sleep(0.5)
+        with self.assertRaises(OSError):
+            os.kill(pid, 0)  # stopped by the cleanup
+
+    def test_started_server_is_stopped_on_failure(self):
+        process = self.fx.run("--start-server", f"{self.fx.repo}/server/TUFFServer",
+                              FAKE_FAIL="selftest-fail")
+        _, steps, _ = self.fx.results(process)
+        pid = int(steps["6.0"]["note"].split("pid ")[1].rstrip(")"))
+        time.sleep(0.5)
+        with self.assertRaises(OSError):
+            os.kill(pid, 0)
+        self.assertEqual(process.returncode, 1)
+
+    def test_start_server_with_bad_path_fails(self):
+        process = self.fx.run("--start-server", "/nonexistent/TUFFServer")
+        _, steps, _ = self.fx.results(process)
+        self.assertEqual(steps["6.0"]["result"], "FAIL")
+        self.assertEqual(process.returncode, 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
