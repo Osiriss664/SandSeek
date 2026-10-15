@@ -8,6 +8,10 @@ no JSON and no portable port probe, so they live here).
       after SECONDS (exit 124) or when this process gets SIGTERM/SIGINT
       (exit 143). Otherwise exits with the command's status.
   full_test_helpers.py mask            masks stdin to stdout
+  full_test_helpers.py mask-files FILE...  masks the files in place (missing ones are skipped)
+  full_test_helpers.py image-age INSPECT_FILE DIR
+      Best effort: prints a note when a file under DIR is newer than the image
+      creation date found in the `container image inspect` output.
   full_test_helpers.py http-code URL   prints the HTTP status, or 000 when nothing answers
   full_test_helpers.py listening PORT  exit 0 when something listens on 127.0.0.1:PORT
   full_test_helpers.py free-port       prints a free loopback port
@@ -84,8 +88,9 @@ def run(log, seconds, command):
         state["stop"] = 143
         kill_group()
 
-    signal.signal(signal.SIGTERM, on_signal)
-    signal.signal(signal.SIGINT, on_signal)
+    if not os.environ.get("FT_RUN_IMMUNE"):  # cleanup runs immune to signals
+        signal.signal(signal.SIGTERM, on_signal)
+        signal.signal(signal.SIGINT, on_signal)
     # Reading in a thread-free way: a timer thread kills the group on time.
     import threading
     timer = threading.Timer(seconds, lambda: (state.__setitem__("stop", 124), kill_group()))
@@ -111,12 +116,75 @@ def run(log, seconds, command):
 
 def http_code(url):
     try:
-        with urllib.request.urlopen(url, timeout=5) as answer:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(url, timeout=5) as answer:
             return str(answer.status)
     except urllib.error.HTTPError as error:
         return str(error.code)
     except Exception:
         return "000"
+
+
+def mask_files(paths):
+    known = secrets()
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                text = handle.read()
+            masked = mask(text, known)
+            if masked != text:
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write(masked)
+        except OSError:
+            continue
+
+
+def image_created(text):
+    """The first creation timestamp in `container image inspect` JSON, as epoch seconds."""
+    import calendar
+    import time
+    try:
+        data = json.loads(text)
+    except ValueError:
+        data = None
+    stamps = []
+
+    def walk(node):
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if isinstance(value, str) and key.lower() in ("created", "createdat", "creationdate", "created_at"):
+                    stamps.append(value)
+                else:
+                    walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(data)
+    for value in stamps or re.findall(r'"[Cc]reated(?:At)?"\s*:\s*"([^"]+)"', text):
+        match = re.match(r"(\d{4})-(\d\d)-(\d\d)[T ](\d\d):(\d\d):(\d\d)", value)
+        if match:
+            return calendar.timegm(time.struct_time(tuple(int(g) for g in match.groups()) + (0, 0, 0))), value
+    return None
+
+
+def image_age(inspect_file, folder):
+    try:
+        with open(inspect_file, encoding="utf-8", errors="replace") as handle:
+            created = image_created(handle.read())
+        if not created:
+            return ""
+        newest = 0
+        for base, _, names in os.walk(folder):
+            for name in names:
+                if name.endswith((".pyc",)) or "__pycache__" in base:
+                    continue
+                newest = max(newest, os.path.getmtime(os.path.join(base, name)))
+        if newest > created[0]:
+            return f"note: files in Sandbox/ are newer than the image (created {created[1][:19]}); rebuild without --quick"
+    except Exception:
+        pass
+    return ""
 
 
 def listening(port):
@@ -202,6 +270,12 @@ def main(argv):
         return run(argv[2], float(argv[3]), argv[4:])
     if command == "mask":
         sys.stdout.write(mask(sys.stdin.read()))
+        return 0
+    if command == "mask-files":
+        mask_files(argv[2:])
+        return 0
+    if command == "image-age" and len(argv) == 4:
+        print(image_age(argv[2], argv[3]))
         return 0
     if command == "http-code" and len(argv) == 3:
         print(http_code(argv[2]))

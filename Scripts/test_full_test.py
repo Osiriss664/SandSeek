@@ -67,6 +67,9 @@ class Fixture:
             echo "container $*" >> "$FAKE_LOG"
             case "$1 $2" in
               "image list") [ "$FAKE_IMAGE" = 1 ] && echo "sandseek-sandbox latest" ;;
+              "image inspect") [ -n "$FAKE_IMAGE_CREATED" ] && printf '[{"name":"sandseek-sandbox","created":"%s"}]\\n' "$FAKE_IMAGE_CREATED" ;;
+              "builder status") [ "$FAKE_BUILDER" = running ] && echo "buildkit" ;;
+              "list --all") [ "$FAKE_EXISTING" = 1 ] && echo "sandseek-sandbox" ;;
             esac
             exit 0
             """)
@@ -82,7 +85,8 @@ class Fixture:
                 echo "secret={SECRET} also {HEX_SECRET}"
                 [ "$FAKE_FAIL" = start ] && {{ echo "start failed"; exit 1; }}
                 echo ready ;;
-              stop) rm -f "$FT_SECRET_FOLDER/secret"; echo stopped ;;
+              stop) [ "$FAKE_SLEEP" = stop ] && sleep 8
+                    rm -f "$FT_SECRET_FOLDER/secret"; echo stopped ;;
               status) echo answers ;;
               selftest)
                 echo "  ok    one"; echo "  ok    two"
@@ -126,7 +130,11 @@ class Fixture:
             #!/bin/bash
             echo "sandseek $*" >> "$FAKE_LOG"
             echo "using key {KEY} and secret {SECRET}" >&2
-            echo "Canberra is the capital of Australia."
+            case "$1" in
+              *Iceland*) if [ "$FAKE_ANSWER" = iceland-only ]; then echo "Iceland has 380000 people."
+                         else echo "Iceland and Ireland compared."; fi ;;
+              *) echo "Canberra is the capital of Australia." ;;
+            esac
             echo
             echo "1. https://example.org/canberra"
             """)
@@ -409,15 +417,26 @@ class ModelServer(FullTestCase):
         _, steps, _ = self.fx.results(process)
         self.assertEqual(steps["6.1"]["result"], "PASS", process.stdout)
         self.assertNotIn("6.2", steps)
-        self.assertIn("--min-pages 2", self.fx.calls().replace("\n", " "))
+        calls = self.fx.calls().replace("\n", " ")
+        self.assertIn("sandseek What is the capital", calls)
+        self.assertNotIn("--max-steps", calls)  # Quick = the CLI defaults
+        self.assertNotIn("--min-pages", calls)
         self.assertEqual(steps["7"]["result"], "SKIP")
 
     def test_thorough_adds_a_question(self):
         process = self.fx.run("--server", self.serve(), "--thorough")
         _, steps, _ = self.fx.results(process)
         self.assertEqual(steps["6.1"]["result"], "PASS")
-        self.assertEqual(steps["6.2"]["result"], "FAIL")  # the stub does not mention Iceland
+        self.assertEqual(steps["6.2"]["result"], "PASS", process.stdout)
+        self.assertIn("--max-steps 30 --min-pages 6 --search-results 8",
+                      self.fx.calls().replace("\n", " "))
         # and without --thorough there is no 6.2 at all (see the test above)
+
+    def test_thorough_needs_both_countries(self):
+        process = self.fx.run("--server", self.serve(), "--thorough", FAKE_ANSWER="iceland-only")
+        _, steps, _ = self.fx.results(process)
+        self.assertEqual(steps["6.2"]["result"], "FAIL")
+        self.assertIn("Ireland", steps["6.2"]["note"])
 
     def test_answer_without_source_fails(self):
         write(f"{self.fx.repo}/sandseek-stub", "#!/bin/bash\necho 'Canberra'\n")
@@ -455,6 +474,171 @@ class ModelServer(FullTestCase):
         _, steps, _ = self.fx.results(process)
         self.assertEqual(steps["6.0"]["result"], "FAIL")
         self.assertEqual(process.returncode, 1)
+
+    def test_start_server_refused_when_a_server_answers(self):
+        process = self.fx.run("--start-server", f"{self.fx.repo}/server/TUFFServer",
+                              "--server", self.serve())
+        _, steps, _ = self.fx.results(process)
+        self.assertEqual(steps["6.0"]["result"], "FAIL")
+        self.assertIn("already answers", steps["6.0"]["note"])
+        self.assertEqual(steps["6.1"]["result"], "SKIP")
+        self.assertEqual(process.returncode, 1)
+
+    def test_start_server_refused_when_a_server_process_runs(self):
+        write(f"{self.fx.bin}/fakepgrep", "#!/bin/bash\n[ \"$2\" = TUFFServer ] && { echo 4242; exit 0; }\nexit 1\n")
+        process = self.fx.run("--start-server", f"{self.fx.repo}/server/TUFFServer",
+                              FT_PGREP=f"{self.fx.bin}/fakepgrep")
+        _, steps, _ = self.fx.results(process)
+        self.assertEqual(steps["6.0"]["result"], "FAIL")
+        self.assertIn("TUFFServer process", steps["6.0"]["note"])
+
+    def test_ready_needs_status_200(self):
+        write(f"{self.fx.repo}/server/TUFFServer", f"""\
+            #!{sys.executable}
+            import sys
+            from http.server import BaseHTTPRequestHandler, HTTPServer
+            port = int(sys.argv[sys.argv.index("--port") + 1])
+            class H(BaseHTTPRequestHandler):
+                def do_GET(self):
+                    self.send_response(503); self.end_headers()
+                def log_message(self, *a): pass
+            HTTPServer(("127.0.0.1", port), H).serve_forever()
+            """)
+        process = self.fx.run("--start-server", f"{self.fx.repo}/server/TUFFServer",
+                              FT_SERVER_WAIT="3")
+        _, steps, _ = self.fx.results(process)
+        self.assertEqual(steps["6.0"]["result"], "FAIL")
+        self.assertIn("no answer", steps["6.0"]["note"])
+
+
+class Takeover(FullTestCase):
+    def secret_exists(self):
+        os.makedirs(self.fx.secret_folder, exist_ok=True)
+        with open(os.path.join(self.fx.secret_folder, "secret"), "w") as handle:
+            handle.write("x" * 20)
+
+    def test_existing_secret_refuses_and_leaves_it_alone(self):
+        self.secret_exists()
+        process = self.fx.run()
+        _, steps, _ = self.fx.results(process)
+        self.assertEqual(steps["5.0"]["result"], "FAIL")
+        self.assertIn("Stop everything in SandSeek", steps["5.0"]["note"])
+        self.assertIn("--take-over-sandbox", steps["5.0"]["note"])
+        for step_id in ("5.2", "5.4"):
+            self.assertEqual(steps[step_id]["result"], "SKIP")
+        self.assertEqual(steps["8"]["result"], "SKIP")
+        self.assertNotIn("sandbox stop", self.fx.calls())
+        self.assertTrue(os.path.exists(os.path.join(self.fx.secret_folder, "secret")))
+        self.assertEqual(process.returncode, 1)
+
+    def test_listener_on_port_refuses(self):
+        server = HTTPServer(("127.0.0.1", 0), QuietHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        process = self.fx.run(SANDSEEK_SANDBOX_PORT=str(server.server_port))
+        _, steps, _ = self.fx.results(process)
+        self.assertEqual(steps["5.0"]["result"], "FAIL")
+        self.assertNotIn("sandbox start", self.fx.calls())
+
+    def test_existing_container_refuses(self):
+        process = self.fx.run(FAKE_EXISTING="1")
+        _, steps, _ = self.fx.results(process)
+        self.assertEqual(steps["5.0"]["result"], "FAIL")
+        self.assertNotIn("sandbox start", self.fx.calls())
+        self.assertNotIn("sandbox stop", self.fx.calls())
+
+    def test_take_over_flag_allows_it(self):
+        self.secret_exists()
+        process = self.fx.run("--take-over-sandbox")
+        _, steps, _ = self.fx.results(process)
+        self.assertEqual(steps["5.2"]["result"], "PASS")
+        self.assertEqual(steps["8"]["result"], "PASS")
+        self.assertEqual(process.returncode, 0, process.stdout)
+
+
+class Builder(FullTestCase):
+    def test_idle_builder_is_stopped_even_if_build_is_cut_off(self):
+        process = self.fx.run()
+        self.assertIn("container builder stop", self.fx.calls())
+        self.assertEqual(process.returncode, 0)
+
+    def test_running_builder_is_left_alone(self):
+        self.fx.run(FAKE_BUILDER="running")
+        self.assertNotIn("container builder stop", self.fx.calls())
+
+    def test_quick_image_exists_does_not_touch_builder(self):
+        self.fx.run("--quick", FAKE_IMAGE="1")
+        self.assertNotIn("container builder stop", self.fx.calls())
+
+    def test_quick_notes_stale_image(self):
+        process = self.fx.run("--quick", FAKE_IMAGE="1", FAKE_IMAGE_CREATED="2000-01-01T00:00:00Z")
+        # build/SandSeek.app is missing, so only the image check matters here
+        _, steps, _ = self.fx.results(process)
+        self.assertEqual(steps["5.1"]["result"], "SKIP")
+        self.assertIn("newer than the image", steps["5.1"]["note"])
+
+
+class Cleanup(FullTestCase):
+    def test_stop_running_past_the_time_limit_still_ends_clean(self):
+        started = time.time()
+        process = self.fx.run(FAKE_SLEEP="stop", FULL_TEST_TIME_LIMIT_SECONDS="5", timeout=90)
+        self.assertLess(time.time() - started, 80)
+        self.assertFalse(os.path.exists(os.path.join(self.fx.secret_folder, "secret")))
+        self.assertIn("sandbox stop", self.fx.calls())
+        self.assertIn(process.returncode, (0, 124))
+        self.fx.results(process)  # a report was written
+
+    def test_sigterm_exits_143_and_cleans_up(self):
+        process = subprocess.Popen(
+            ["bash", f"{self.fx.repo}/Scripts/full_test.sh"], env=self.fx.env(FAKE_SLEEP="selftest"),
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        deadline = time.time() + 60
+        while not os.path.exists(self.fx.log + ".sleeping") and time.time() < deadline:
+            time.sleep(0.1)
+        process.send_signal(signal.SIGTERM)
+        out, _ = process.communicate(timeout=60)
+        self.assertEqual(process.returncode, 143)
+        self.assertFalse(os.path.exists(os.path.join(self.fx.secret_folder, "secret")))
+        self.assertIn("FULL_TEST_REPORT=", out)
+
+    def test_killed_step_output_is_masked_at_the_end(self):
+        key_file = os.path.join(self.fx.root, "key")
+        with open(key_file, "w") as handle:
+            handle.write(KEY)
+        write(f"{self.fx.repo}/sandseek-stub", f"""\
+            #!/bin/bash
+            echo "key {KEY}"
+            echo "key {KEY}" >&2
+            sleep 30
+            """)
+        server = HTTPServer(("127.0.0.1", 0), QuietHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        write(f"{self.fx.repo}/Scripts/research_address_check.py", "print('x')\n", 0o644)
+        process = self.fx.run("--server", f"http://127.0.0.1:{server.server_port}",
+                              "--api-key-file", key_file, FULL_TEST_TIME_LIMIT_SECONDS="12", timeout=90)
+        directory = self.fx.report_dir(process)
+        self.assertNotIn(KEY, self.everything_text(directory))
+
+
+class Usage(FullTestCase):
+    def test_models_without_start_server_is_a_usage_error(self):
+        process = self.fx.run("--models", self.fx.root)
+        self.assertEqual(process.returncode, 2)
+        self.assertNotIn("FULL_TEST_REPORT", process.stdout)
+
+    def test_models_must_be_an_existing_absolute_folder(self):
+        process = self.fx.run("--start-server", f"{self.fx.repo}/server/TUFFServer",
+                              "--models", "relative/folder")
+        self.assertEqual(process.returncode, 2)
+
+    def test_help_mentions_background_run(self):
+        process = self.fx.run("--help")
+        self.assertEqual(process.returncode, 0)
+        self.assertIn("background", process.stdout)
+        self.assertIn("--take-over-sandbox", process.stdout)
 
 
 if __name__ == "__main__":

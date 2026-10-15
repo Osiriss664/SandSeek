@@ -5,6 +5,10 @@
 #                        [--server URL] [--api-key-file FILE]
 #                        [--start-server TUFFSERVER [--models FOLDER]]
 #                        [--injection-base-url URL] [--time-limit MINUTES]
+#                        [--take-over-sandbox]
+#
+# Run it in the background (nohup or a background job) when a caller cuts
+# commands after a few minutes; poll for the last line FULL_TEST_REPORT=<path>.
 #
 # It builds, runs the unit tests, packages the app, starts the web sandbox in
 # its Apple container VM, checks it, asks one real research question if a model
@@ -21,7 +25,9 @@
 #   --quick          skip packaging when build/SandSeek.app exists and skip the
 #                    image build when the sandbox image exists
 #   --no-sandbox     only build and unit tests (steps 1 to 3)
-#   --thorough       also ask one Thorough question (longer limit)
+#   --thorough       also ask one Thorough question (longer limit; --max-steps 30
+#                    --min-pages 6 --search-results 8). The Quick question uses the
+#                    CLI defaults, which equal the app's Quick preset.
 #   --server URL     model server for step 6 (default $SANDSEEK_MODEL_SERVER or
 #                    http://127.0.0.1:8080). Without an answering server, step 6
 #                    and 7 are SKIP; this script never starts a model server on
@@ -33,7 +39,15 @@
 #                    argument list, clean environment, no shell), waits for it,
 #                    uses it for step 6, and stops it, by its process id only,
 #                    at the end, after a failure, on Ctrl-C and on time-out
-#   --models F       models folder for --start-server (TUFFServer --models-root)
+#                    It refuses to start when a model server already answers
+#                    (here or on 127.0.0.1:8080) or a TUFFServer or llama-server
+#                    process runs: one model at a time on a 16 GB Mac.
+#   --models F       absolute, existing models folder for --start-server
+#                    (TUFFServer --models-root); a usage error without it
+#   --take-over-sandbox
+#                    by default the run FAILS step 5 when a sandbox is already
+#                    running (the app's: secret file, listener on the port or a
+#                    sandseek-sandbox container); this flag allows stopping it
 #   --injection-base-url URL
 #                    public URL of Sandbox/fixtures/injection for step 7
 #   --time-limit M   limit of the whole run in minutes (default 60); when it is
@@ -45,9 +59,13 @@
 # 1 to 3 min, a Quick question 1 to 5 min, a Thorough one 5 to 20 min, stop 10
 # s. About 15 to 35 min in all with an empty cache, 5 to 15 min with --quick.
 #
+# Exit codes: 0 no step failed, 1 a step failed, 124 whole-run time limit,
+# 130 Ctrl-C (INT), 143 TERM. Usage errors exit 2 and print no report line.
+# Every exit except a usage error prints FULL_TEST_REPORT=<path> as last line.
+#
 # For the tests in Scripts/test_full_test.py the commands can be replaced:
 # SANDSEEK_FULL_TEST_FAKE=1 skips the macOS check, FT_SWIFT, FT_CONTAINER,
-# FT_CODESIGN, FT_CURL, FT_GIT and FT_SECRET_FOLDER name other programs and
+# FT_CODESIGN, FT_CURL, FT_GIT, FT_PGREP and FT_SECRET_FOLDER name other programs and
 # folders, and FULL_TEST_TIME_LIMIT_SECONDS replaces --time-limit.
 
 set -u
@@ -60,15 +78,16 @@ PY="${FT_PYTHON:-python3}"
 quick=0 no_sandbox=0 thorough=0
 model_server="${SANDSEEK_MODEL_SERVER:-http://127.0.0.1:8080}"
 api_key_file="${SANDSEEK_API_KEY_FILE:-}"
-start_server="" models_folder="" injection_base="${FT_INJECTION_BASE_URL:-}"
+take_over=0 start_server="" models_folder="" injection_base="${FT_INJECTION_BASE_URL:-}"
 time_limit_minutes=60
 
-usage() { sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//' | head -n 40; }
+usage() { sed -n '2,/^$/p' "$0" | sed 's/^# \{0,1\}//' | head -n 80; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --quick) quick=1 ;;
     --no-sandbox) no_sandbox=1 ;;
     --thorough) thorough=1 ;;
+    --take-over-sandbox) take_over=1 ;;
     --server) model_server="${2:?--server needs a URL}"; shift ;;
     --api-key-file) api_key_file="${2:?--api-key-file needs a path}"; shift ;;
     --start-server) start_server="${2:?--start-server needs a path}"; shift ;;
@@ -80,6 +99,10 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+if [[ -n "$models_folder" ]]; then
+  [[ -n "$start_server" ]] || { echo "--models needs --start-server" >&2; exit 2; }
+  [[ "$models_folder" == /* && -d "$models_folder" ]] || { echo "--models must be an absolute, existing folder: $models_folder" >&2; exit 2; }
+fi
 [[ "$time_limit_minutes" =~ ^[0-9]+$ ]] || { echo "--time-limit must be a number of minutes" >&2; exit 2; }
 total_limit="${FULL_TEST_TIME_LIMIT_SECONDS:-$((time_limit_minutes * 60))}"
 
@@ -88,6 +111,7 @@ CONTAINER="${FT_CONTAINER:-/usr/local/bin/container}"
 CODESIGN="${FT_CODESIGN:-codesign}"
 CURL="${FT_CURL:-curl}"
 GIT="${FT_GIT:-git}"
+PGREP="${FT_PGREP:-pgrep}"
 SANDBOX_SH="$ROOT/Scripts/research_sandbox.sh"
 PORT="${SANDSEEK_SANDBOX_PORT:-9100}"
 secret_folder="${FT_SECRET_FOLDER:-$HOME/Library/Application Support/SandSeek/sandbox}"
@@ -107,7 +131,7 @@ export ROOT RUN PORT SWIFT CONTAINER CODESIGN CURL GIT SANDBOX_SH FT_NOTE_FILE F
        app sandseek_bin secret_file secret_folder PY
 
 CHILD="" ABORT="" ABORT_CODE=0 CUR_ID="" CUR_NAME="" CUR_START=0
-CLEANED=0 SANDBOX_TOUCHED=0 SANDBOX_UP=0 SERVER_PID="" SERVER_PATH="" WATCHDOG=""
+CLEANED=0 SANDBOX_TOUCHED=0 BUILDER_TOUCHED=0 CTL_RC=0 CTL_OUT="" SANDBOX_UP=0 SERVER_PID="" SERVER_PATH="" WATCHDOG=""
 SERVER_URL="$model_server"
 
 clean_field() { printf '%s' "$1" | tr '\t\n\r' '   ' | cut -c1-300; }
@@ -128,14 +152,14 @@ step() {
   log="$RUN/logs/$id.log"
   CUR_ID="$id" CUR_NAME="$name" CUR_START=$SECONDS
   : > "$FT_NOTE_FILE"
-  "$PY" "$helpers" run "$log" "$limit" bash -c "set -eo pipefail; $command" &
+  "$PY" "$helpers" run "$log" "$limit" /bin/bash -c "set -eo pipefail; $command" &
   CHILD=$!
   wait "$CHILD"; rc=$?
   CHILD=""
   note="$(cat "$FT_NOTE_FILE" 2>/dev/null)"
   if [[ $rc -eq 0 ]]; then
     if [[ -n "$notecmd" ]]; then
-      note="$(LOG="$log" bash -c "$notecmd" 2>/dev/null </dev/null | head -n 3 | tr '\n' ' ')${note:+ $note}"
+      note="$(LOG="$log" /bin/bash -c "$notecmd" 2>/dev/null </dev/null | head -n 3 | tr '\n' ' ')${note:+ $note}"
     fi
     record "$id" "$name" PASS $((SECONDS - CUR_START)) "$note" "$log"
   elif [[ $rc -eq 124 ]]; then
@@ -145,6 +169,17 @@ step() {
   fi
   CUR_ID=""
   return $rc
+}
+
+# ctl NAME LIMIT PROGRAM [ARGS...]: one short call with a time limit; the output
+# goes to logs/NAME.log and into CTL_OUT, the status into CTL_RC.
+ctl() {
+  local log="$RUN/logs/$1.log" limit="$2"
+  shift 2
+  "$PY" "$helpers" run "$log" "$limit" "$@" &
+  CHILD=$!; wait "$CHILD"; CTL_RC=$?; CHILD=""
+  CTL_OUT="$(cat "$log" 2>/dev/null || true)"
+  return 0
 }
 
 failed_any() { grep -q "$(printf '\tFAIL\t')" "$RUN/results.tsv"; }
@@ -179,6 +214,22 @@ resolve_server_path() {
 
 start_model_server() { # records step 6.0
   local begin=$SECONDS port home tmp args wait_limit="${FT_SERVER_WAIT:-180}" code
+  # One model at a time on a 16 GB Mac: never start a second server.
+  local busy="" url
+  for url in "$model_server" "http://127.0.0.1:8080"; do
+    code="$("$PY" "$helpers" http-code "${url%/}/tuff/v1/status")"
+    if [[ "$code" != 000 ]]; then busy="a model server already answers at $url"; break; fi
+  done
+  if [[ -z "$busy" ]]; then
+    local program
+    for program in TUFFServer llama-server; do
+      if "$PGREP" -x "$program" >/dev/null 2>&1 </dev/null; then busy="a $program process is already running"; break; fi
+    done
+  fi
+  if [[ -n "$busy" ]]; then
+    record 6.0 "start model server" FAIL 0 "$busy; not starting a second one (16 GB Mac: one model at a time). Stop it or use --server."
+    return 1
+  fi
   SERVER_PATH="$(resolve_server_path "$start_server")" && [[ "$SERVER_PATH" == /* && -x "$SERVER_PATH" ]] || {
     record 6.0 "start model server" FAIL 0 "not a runnable TUFFServer, tuff or TUFF.app with a full path: $start_server"
     SERVER_PATH=""; return 1; }
@@ -194,7 +245,7 @@ start_model_server() { # records step 6.0
   SERVER_PID=$!
   while (( SECONDS - begin < wait_limit )); do
     code="$("$PY" "$helpers" http-code "http://127.0.0.1:$port/tuff/v1/status")"
-    if [[ "$code" != 000 ]]; then
+    if [[ "$code" == 200 ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
       SERVER_URL="http://127.0.0.1:$port"
       record 6.0 "start model server" PASS $((SECONDS - begin)) "answering on port $port (pid $SERVER_PID)" "$RUN/logs/6.0.log"
       return 0
@@ -210,34 +261,47 @@ start_model_server() { # records step 6.0
 # ---- cleanup (step 8, and the trap) -------------------------------------------
 
 do_cleanup() { # id name
-  local id="$1" name="$2" begin=$SECONDS problems="" count list
-  CLEANED=1
+  local id="$1" name="$2" begin=$SECONDS problems="" count touched=0
+  # Nothing may interrupt this: a signal now would leave the VM and the secret.
+  trap '' INT TERM USR1
+  export FT_RUN_IMMUNE=1
   stop_model_server
+  if [[ $SANDBOX_TOUCHED -eq 1 || $BUILDER_TOUCHED -eq 1 ]]; then touched=1; fi
   if [[ $SANDBOX_TOUCHED -eq 1 ]]; then
-    "$PY" "$helpers" run "$RUN/logs/$id-stop.log" 180 bash "$SANDBOX_SH" stop &
+    "$PY" "$helpers" run "$RUN/logs/$id-stop.log" 180 /bin/bash "$SANDBOX_SH" stop &
     CHILD=$!; wait "$CHILD"; CHILD=""
     # A second attempt that cannot hurt: the VM and the secret must be gone.
     if [[ -x "$CONTAINER" ]]; then
-      list="$("$CONTAINER" list --all --quiet 2>/dev/null </dev/null || true)"
-      count="$(printf '%s\n' "$list" | grep -c sandseek || true)"
+      ctl "$id-list" 30 "$CONTAINER" list --all --quiet
+      count="$(printf '%s\n' "$CTL_OUT" | grep -c sandseek || true)"
       if [[ "${count:-0}" -gt 0 ]]; then
-        "$CONTAINER" stop sandseek-sandbox >/dev/null 2>&1 </dev/null || true
-        "$CONTAINER" delete sandseek-sandbox >/dev/null 2>&1 </dev/null || true
-        list="$("$CONTAINER" list --all --quiet 2>/dev/null </dev/null || true)"
-        count="$(printf '%s\n' "$list" | grep -c sandseek || true)"
+        ctl "$id-force-stop" 30 "$CONTAINER" stop sandseek-sandbox
+        ctl "$id-force-delete" 30 "$CONTAINER" delete sandseek-sandbox
+        ctl "$id-list2" 30 "$CONTAINER" list --all --quiet
+        count="$(printf '%s\n' "$CTL_OUT" | grep -c sandseek || true)"
         [[ "${count:-0}" -eq 0 ]] || problems="$problems $count sandseek container(s) left;"
       fi
     fi
     [[ ! -e "$secret_file" ]] || problems="$problems secret file left in the sandbox folder;"
     if "$PY" "$helpers" listening "$PORT"; then problems="$problems something still listens on port $PORT;"; fi
   fi
+  if [[ $BUILDER_TOUCHED -eq 1 && -x "$CONTAINER" ]]; then
+    # The image build starts Apple's builder VM; a build that ran into its time
+    # limit leaves it running.
+    ctl "$id-builder-stop" 60 "$CONTAINER" builder stop
+    ctl "$id-builder-status" 30 "$CONTAINER" builder status --quiet
+    if [[ $CTL_RC -eq 0 && -n "$(printf '%s' "$CTL_OUT" | tr -d '[:space:]')" ]]; then
+      problems="$problems the builder VM is still running;"
+    fi
+  fi
   if [[ -n "$problems" ]]; then
     record "$id" "$name" FAIL $((SECONDS - begin)) "$problems" "$RUN/logs/$id-stop.log"
-  elif [[ $SANDBOX_TOUCHED -eq 1 ]]; then
-    record "$id" "$name" PASS $((SECONDS - begin)) "no container, secret or listener left" "$RUN/logs/$id-stop.log"
+  elif [[ $touched -eq 1 ]]; then
+    record "$id" "$name" PASS $((SECONDS - begin)) "no container, builder, secret or listener left" "$RUN/logs/$id-stop.log"
   else
     skip "$id" "$name" "the sandbox was never started"
   fi
+  CLEANED=1
 }
 
 # ---- finish -------------------------------------------------------------------
@@ -252,6 +316,8 @@ finish() {
     record "$CUR_ID" "$CUR_NAME" FAIL $((SECONDS - CUR_START)) "${ABORT:-stopped}" "$RUN/logs/$CUR_ID.log"
     CUR_ID=""
   fi
+  # Mask while the secret file still exists; a killed step never ran its trap.
+  "$PY" "$helpers" mask-files "$RUN"/answer-*.txt "$RUN"/logs/*.progress 2>/dev/null || true
   [[ $CLEANED -eq 1 ]] || do_cleanup 9 "cleanup after abort"
   if [[ -n "$ABORT" ]] || failed_any; then overall=FAIL; fi
   "$PY" "$helpers" report "$RUN" "$overall" "$ABORT"
@@ -261,7 +327,8 @@ finish() {
   exit 1
 }
 trap finish EXIT
-trap 'ABORT="interrupted"; ABORT_CODE=130; exit 130' INT TERM
+trap 'ABORT="interrupted"; ABORT_CODE=130; exit 130' INT
+trap 'ABORT="terminated"; ABORT_CODE=143; exit 143' TERM
 trap 'ABORT="whole-run time limit of ${total_limit} s reached"; ABORT_CODE=124; exit 124' USR1
 ( sleep "$total_limit"; kill -USR1 $$ 2>/dev/null ) </dev/null >/dev/null 2>&1 &
 WATCHDOG=$!
@@ -292,7 +359,7 @@ step 3.1 "sandbox unit tests" 600 \
 step 3.2 "research script tests" 600 'cd "$ROOT" && "$PY" Scripts/test_research_sandbox.py' \
   'grep -E "^Ran [0-9]+ tests?" "$LOG"' || true
 step 3.3 "bash -n on scripts" 60 \
-  'cd "$ROOT"; for f in Scripts/*.sh; do bash -n "$f" && echo "ok $f"; done' \
+  'cd "$ROOT"; for f in Scripts/*.sh; do /bin/bash -n "$f" && echo "ok $f"; done' \
   'grep -c "^ok " "$LOG" | sed "s/$/ scripts/"' || true
 
 if [[ $no_sandbox -eq 1 ]]; then
@@ -307,7 +374,7 @@ fi
 if [[ $quick -eq 1 && -d "$app" ]]; then
   skip 4.1 "package app" "--quick and build/SandSeek.app exists"
 else
-  step 4.1 "package app" 2400 'cd "$ROOT" && bash Scripts/package_app.sh' || true
+  step 4.1 "package app" 2400 'cd "$ROOT" && /bin/bash Scripts/package_app.sh' || true
 fi
 if [[ -d "$app" ]]; then
   step 4.2 "codesign verify" 120 '"$CODESIGN" --verify --deep --strict "$app"' || true
@@ -329,26 +396,58 @@ fi
 
 # ---- 5. sandbox ---------------------------------------------------------------------
 sandbox_ready=0
+skip_sandbox_steps() { # reason, ids...
+  local why="$1" sid; shift
+  for sid in "$@"; do skip "$sid" "sandbox step" "$why"; done
+}
 if [[ ! -x "$CONTAINER" ]]; then
-  for id in 5.0 5.1 5.2 5.3 5.4 5.5 5.6 5.7; do skip "$id" "sandbox step" "no container program at $CONTAINER"; done
+  skip_sandbox_steps "no container program at $CONTAINER" 5.0 5.1 5.2 5.3 5.4 5.5 5.6 5.7
 else
-  SANDBOX_TOUCHED=1
+  # Never take over a sandbox the app started.
+  conflict=""
+  if [[ $take_over -eq 0 ]]; then
+    if [[ -e "$secret_file" ]]; then conflict="the secret file exists"
+    elif "$PY" "$helpers" listening "$PORT"; then conflict="something listens on port $PORT"
+    else
+      ctl 5.0-existing 30 "$CONTAINER" list --all --quiet
+      if printf '%s\n' "$CTL_OUT" | grep -q sandseek-sandbox; then conflict="a sandseek-sandbox container exists"; fi
+    fi
+  fi
+  if [[ -n "$conflict" ]]; then
+    record 5.0 "sandbox already running" FAIL 0 "A sandbox is already running (the app's?) ($conflict). Press Stop everything in SandSeek first, or pass --take-over-sandbox."
+    skip_sandbox_steps "a sandbox is already running" 5.1 5.2 5.3 5.4 5.5 5.6 5.7
+  else
   # The service must run; starting it must not wait for a person.
   if step 5.0 "container service" 180 \
     '"$CONTAINER" system status >/dev/null 2>&1 || "$CONTAINER" system start
      "$CONTAINER" system status >/dev/null 2>&1 || { echo "the container service is not running and could not be started without input; run: container system start" > "$FT_NOTE_FILE"; exit 1; }'; then
+    # Is Apple's builder VM idle now? Then a build that gets cut off by its
+    # time limit leaves it behind, and cleanup stops it (like research_sandbox.sh).
+    builder_idle=0
+    ctl 5.0-builder 30 "$CONTAINER" builder status --quiet
+    if [[ $CTL_RC -eq 0 && -z "$(printf '%s' "$CTL_OUT" | tr -d '[:space:]')" ]]; then builder_idle=1; fi
     image_present=0
-    if [[ $quick -eq 1 ]] && "$CONTAINER" image list 2>/dev/null </dev/null | grep -q sandseek-sandbox; then image_present=1; fi
-    if [[ $image_present -eq 1 ]]; then skip 5.1 "sandbox image build" "--quick and the image exists"
-    else step 5.1 "sandbox image build" 2700 'bash "$SANDBOX_SH" build' || true; fi
-    if step 5.2 "sandbox start" 300 'bash "$SANDBOX_SH" start'; then sandbox_ready=1; fi
+    if [[ $quick -eq 1 ]]; then
+      ctl 5.1-image 30 "$CONTAINER" image list
+      if printf '%s\n' "$CTL_OUT" | grep -q sandseek-sandbox; then image_present=1; fi
+    fi
+    if [[ $image_present -eq 1 ]]; then
+      ctl 5.1-inspect 30 "$CONTAINER" image inspect sandseek-sandbox
+      stale="$("$PY" "$helpers" image-age "$RUN/logs/5.1-inspect.log" "$ROOT/Sandbox" 2>/dev/null || true)"
+      skip 5.1 "sandbox image build" "--quick and the image exists${stale:+; $stale}"
+    else
+      [[ $builder_idle -eq 0 ]] || BUILDER_TOUCHED=1
+      step 5.1 "sandbox image build" 2700 '/bin/bash "$SANDBOX_SH" build' || true
+    fi
+    SANDBOX_TOUCHED=1   # the check passed and the start is attempted now
+    if step 5.2 "sandbox start" 300 '/bin/bash "$SANDBOX_SH" start'; then sandbox_ready=1; fi
   else
-    for id in 5.1 5.2; do skip "$id" "sandbox step" "container service not running"; done
+    skip_sandbox_steps "container service not running" 5.1 5.2
   fi
   if [[ $sandbox_ready -eq 1 ]]; then
-    step 5.3 "sandbox status" 60 'bash "$SANDBOX_SH" status' || true
+    step 5.3 "sandbox status" 60 '/bin/bash "$SANDBOX_SH" status' || true
     step 5.4 "sandbox selftest" 900 \
-      'out="$(bash "$SANDBOX_SH" selftest 2>&1)" && rc=0 || rc=$?
+      'out="$(/bin/bash "$SANDBOX_SH" selftest 2>&1)" && rc=0 || rc=$?
        printf "%s\n" "$out"
        [ "$rc" -eq 0 ]
        if printf "%s\n" "$out" | grep -qE "^[[:space:]]*FAIL"; then exit 1; fi
@@ -356,13 +455,14 @@ else
        [ "${ok:-0}" -gt 0 ]
        echo "$ok checks passed" > "$FT_NOTE_FILE"' || true
     step 5.5 "unsigned request gives 401" 60 \
-      'code="$("$CURL" -s -o /dev/null -w "%{http_code}" --max-time 15 "http://127.0.0.1:$PORT/health" </dev/null)"
+      'code="$("$CURL" -s --noproxy "*" -o /dev/null -w "%{http_code}" --max-time 15 "http://127.0.0.1:$PORT/health" </dev/null)"
        echo "HTTP $code"; [ "$code" = 401 ]' || true
     step 5.6 "signed answer verifies" 60 '"$PY" "$ROOT/Scripts/verify_sandbox_signature.py" "$secret_file" "$PORT"' || true
     step 5.7 "address checks" 900 \
-      '"$PY" "$ROOT/Scripts/research_address_check.py" --label full-test --output "$RUN/address-check.txt"' || true
+      '"$PY" "$ROOT/Scripts/research_address_check.py" --label full-test --sandbox "http://127.0.0.1:$PORT" --secret-file "$secret_file" --output "$RUN/address-check.txt"' || true
   else
-    for id in 5.3 5.4 5.5 5.6 5.7; do skip "$id" "sandbox step" "the sandbox did not start"; done
+    skip_sandbox_steps "the sandbox did not start" 5.3 5.4 5.5 5.6 5.7
+  fi
   fi
 fi
 
@@ -378,7 +478,9 @@ fi
 research_args() { # mode
   local args=(--server "$SERVER_URL" --sandbox "http://127.0.0.1:$PORT")
   if [[ -n "$api_key_file" ]]; then args+=(--api-key-file "$api_key_file"); fi
-  if [[ "$1" == quick ]]; then args+=(--max-steps 6 --min-pages 2); else args+=(--max-steps 20 --min-pages 6); fi
+  # Quick: the CLI defaults, which equal the app's Quick preset (8 steps, 3 pages,
+  # 5 results). Thorough: the app's Thorough preset.
+  if [[ "$1" == thorough ]]; then args+=(--max-steps 30 --min-pages 6 --search-results 8); fi
   printf '%s\n' "${args[@]}"
 }
 
@@ -394,7 +496,12 @@ ask() { # id name limit mode question expected_regex
      trap '"'"'for f in "$out" "$prog"; do [ -f "$f" ] && "$PY" "$ROOT/Scripts/full_test_helpers.py" mask < "$f" > "$f.m" && mv "$f.m" "$f"; done'"'"' EXIT
      "$sandseek_bin" "$FT_Q" "${args[@]}" > "$out" 2> "$prog" || { tail -n 20 "$prog"; exit 1; }
      cat "$out"
-     grep -qiE "$FT_EXPECT" "$out" || { echo "answer does not match: $FT_EXPECT" > "$FT_NOTE_FILE"; exit 1; }
+     while IFS= read -r rx; do
+       [ -n "$rx" ] || continue
+       grep -qiE "$rx" "$out" || { echo "answer does not match: $rx" > "$FT_NOTE_FILE"; exit 1; }
+     done <<EXPECT_EOF
+$FT_EXPECT
+EXPECT_EOF
      grep -qE "^[[:space:]]*(\[1\]|1[.)])" "$out" || { echo "no numbered source in the answer" > "$FT_NOTE_FILE"; exit 1; }' || true
 }
 
@@ -402,13 +509,14 @@ if [[ $sandbox_ready -ne 1 ]]; then
   skip 6.1 "quick question" "the sandbox is not running"
   [[ $thorough -eq 0 ]] || skip 6.2 "thorough question" "the sandbox is not running"
 elif [[ $model_up -ne 1 ]]; then
-  skip 6.1 "quick question" "no model server answers at $SERVER_URL (use --start-server or --server)"
+  skip 6.1 "quick question" "${start_server:+see step 6.0: }no model server answers at $SERVER_URL (use --start-server or --server)"
   [[ $thorough -eq 0 ]] || skip 6.2 "thorough question" "no model server answers at $SERVER_URL"
 else
   ask 6.1 "quick question" 900 quick "What is the capital of Australia?" "Canberra"
   if [[ $thorough -eq 1 ]]; then
     ask 6.2 "thorough question" 2400 thorough \
-      "Compare the population and the area of Iceland and Ireland, with sources." "Iceland"
+      "Compare the population and the area of Iceland and Ireland, with sources." "Iceland
+Ireland"
   fi
 fi
 
