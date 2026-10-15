@@ -63,8 +63,14 @@ extension SavedResearchReport {
                 readAddress(at: later) == address && failureReason(after: later) == nil
             }
             if readLater { continue }
+            // One line per address: a page that failed more than once keeps
+            // its last reason.
             let page = UnreadablePage(address: address, reason: reason)
-            if !result.contains(page) { result.append(page) }
+            if let earlier = result.firstIndex(where: { $0.address == address }) {
+                result[earlier] = page
+            } else {
+                result.append(page)
+            }
         }
         return result
     }

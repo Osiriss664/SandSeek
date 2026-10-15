@@ -73,6 +73,7 @@ import Testing
         ]
         let pages = saved(steps: steps).unreadablePages
         #expect(pages.map(\.address) == ["https://example.com/gone"])
+        #expect(pages.first?.reason == "timed out again")
     }
 
     @Test func aSourceIsNotListedAsUnreadable() {
@@ -117,13 +118,14 @@ import Testing
     }
 
     @Test func markdownListsThePagesOnlyWhenThereAreSome() {
+        // Not one of the report's sources (example.com/a is source 1).
         let steps = [
-            step(0, .reading, "https://example.com/a"),
+            step(0, .reading, "https://example.com/unread"),
             step(1, .failed, "timed out"),
         ]
         let with = saved(steps: steps).markdown
         #expect(with.contains("## Pages that could not be read"))
-        #expect(with.contains("- [https://example.com/a](https://example.com/a) \u{2014} timed out"))
+        #expect(with.contains("- [https://example.com/unread](https://example.com/unread) \u{2014} timed out"))
         #expect(!saved().markdown.contains("could not be read"))
     }
 
@@ -149,8 +151,9 @@ import Testing
     }
 
     @Test func printTextHasBothListsBelowTheSummary() {
+        // Not one of the report's sources (example.com/a is source 1).
         let steps = [
-            step(0, .reading, "https://example.com/a"),
+            step(0, .reading, "https://example.com/unread"),
             step(1, .failed, "timed out"),
         ]
         let figures = [ResearchUnverifiedFigure(figure: "280", sources: [1])]
@@ -158,7 +161,7 @@ import Testing
         #expect(text.contains("Figure check (1)"))
         #expect(text.contains("\u{2022} 280 \u{2014} not on [1]"))
         #expect(text.contains("Pages that could not be read (1)"))
-        #expect(text.contains("\u{2022} https://example.com/a \u{2014} timed out"))
+        #expect(text.contains("\u{2022} https://example.com/unread \u{2014} timed out"))
         let plain = ResearchReportPrintText.plainText(for: saved())
         #expect(!plain.contains("Figure check"))
         #expect(!plain.contains("could not be read"))
