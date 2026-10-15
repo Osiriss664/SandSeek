@@ -184,6 +184,46 @@ private final class FakeClock: @unchecked Sendable {
     }
 }
 
+// MARK: - Stop everything
+
+@Suite @MainActor struct ResearchStopEverythingTests {
+    @Test func stopsTheSandboxAndAServerSandSeekStarted() async throws {
+        let rig = try await Rig.make(serverUp: false, program: true)
+        await rig.workspace.startEverything()
+        #expect(rig.launch.owned != nil)
+        #expect(rig.workspace.canStopEverything)
+
+        await rig.workspace.stopEverything()
+
+        #expect(rig.sandbox.state == .off)
+        #expect(rig.scripts.contains("stop"))
+        #expect(rig.launch.owned == nil)
+        #expect(rig.launch.state == .idle)
+        #expect(!rig.workspace.isStoppingEverything)
+    }
+
+    @Test func leavesAServerStartedByHandRunning() async throws {
+        let rig = try await Rig.make(serverUp: true, program: true)
+        await rig.workspace.startEverything()
+        #expect(rig.launch.owned == nil)
+
+        await rig.workspace.stopEverything()
+
+        #expect(rig.sandbox.state == .off)
+        #expect(rig.launch.owned == nil)
+        #expect(rig.launcher.servers.isEmpty)
+        #expect(rig.server.state == .ready)
+    }
+
+    @Test func cannotStopWhenNothingRuns() async throws {
+        let rig = try await Rig.make(serverUp: true)
+        #expect(rig.sandbox.state == .off)
+        #expect(!rig.workspace.canStopEverything)
+        await rig.workspace.stopEverything()
+        #expect(rig.scripts.isEmpty)
+    }
+}
+
 // MARK: - Start everything
 
 @Suite @MainActor struct ResearchStartEverythingTests {

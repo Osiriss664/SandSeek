@@ -24,6 +24,8 @@ public final class ResearchWorkspace {
     public private(set) var isPreparingQuestion = false
     /// True while `startEverything` runs.
     public private(set) var isStartingEverything = false
+    /// True while `stopEverything` runs.
+    public private(set) var isStoppingEverything = false
     /// What `startEverything` is doing now, in a few words; nil otherwise.
     public private(set) var startEverythingNote: String?
     /// Why the last `startEverything` stopped before everything was ready, in
@@ -127,6 +129,15 @@ public final class ResearchWorkspace {
     /// Whether "Start everything" can be clicked.
     public var canStartEverything: Bool {
         !run.isRunning && !isPreparingQuestion && !isStartingEverything
+    }
+
+    /// Whether "Stop everything" can be clicked: there is a sandbox that is not
+    /// off, or a model server that SandSeek started, and neither a start nor
+    /// a stop is under way. A server started by hand does not count.
+    public var canStopEverything: Bool {
+        guard !isStartingEverything, !isStoppingEverything else { return false }
+        guard sandbox.state != .stopping, launch.state != .stopping else { return false }
+        return sandbox.state != .off || launch.owned != nil
     }
 
     /// True when a question already ran in the sandbox VM that is up now, or
@@ -341,6 +352,20 @@ public final class ResearchWorkspace {
     public func stopSandbox() async {
         run.stop()
         await sandbox.stop()
+    }
+
+    /// Stops the question in progress, the sandbox, and the model server, but
+    /// the server only if SandSeek started it; one started by hand keeps
+    /// running. Does nothing while `startEverything` runs or a stop is under
+    /// way.
+    public func stopEverything() async {
+        guard canStopEverything else { return }
+        isStoppingEverything = true
+        defer { isStoppingEverything = false }
+        await stopSandbox()
+        if launch.owned != nil {
+            await launch.stop(using: server)
+        }
     }
 
     /// Called when the app quits: stops what this app started, the model

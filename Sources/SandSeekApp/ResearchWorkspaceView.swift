@@ -80,8 +80,9 @@ struct ResearchWorkspaceView: View {
     // MARK: - Start everything
 
     /// One button for the whole start: the model server (when a program is
-    /// chosen), the sandbox, then the security check. Shown only while
-    /// something is not ready.
+    /// chosen), the sandbox, then the security check. "Stop everything" sits
+    /// next to it while something SandSeek started is running, and alone when
+    /// everything is ready.
     @ViewBuilder
     private var startEverythingRow: some View {
         if workspace.showsStartEverything {
@@ -94,6 +95,9 @@ struct ResearchWorkspaceView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(!workspace.canStartEverything)
                 .help("Starts the model server if you chose a program for it, then the sandbox, then runs the security check.")
+                if workspace.canStopEverything {
+                    stopEverythingButton
+                }
                 if workspace.isStartingEverything {
                     ProgressView().controlSize(.small)
                     Text(workspace.startEverythingNote ?? "Working\u{2026}")
@@ -108,7 +112,23 @@ struct ResearchWorkspaceView: View {
                 }
                 Spacer(minLength: 0)
             }
+        } else if workspace.canStopEverything {
+            HStack(spacing: 12) {
+                stopEverythingButton
+                Spacer(minLength: 0)
+            }
         }
+    }
+
+    private var stopEverythingButton: some View {
+        Button {
+            Task { await workspace.stopEverything() }
+        } label: {
+            Label("Stop everything", systemImage: "stop.circle")
+        }
+        .buttonStyle(.bordered)
+        .disabled(!workspace.canStopEverything)
+        .help("Stops the question, the sandbox, and the model server if SandSeek started it. A server you started yourself keeps running.")
     }
 
     // MARK: - Question

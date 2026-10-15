@@ -205,7 +205,8 @@ note if it could not tell.
    card and a **Sandbox** card. The arrow by a card's title folds it; the (i)
    button has the longer explanations. **Start everything** does steps 2 and 3
    for you (it starts the model server only if you chose a program for it, see
-   above), then runs the security check.
+   above), then runs the security check. **Stop everything** stops the
+   question and the sandbox, and the model server only if SandSeek started it.
 2. On the model server card, choose TUFF or llama.cpp, check the address, and
    press **Check**. It should say **Connected** and list the models.
 3. On the sandbox card, press **Start Sandbox**. The first start builds the
