@@ -119,7 +119,10 @@ These hold as long as the design is intact and the VM boundary holds.
   parser does not carry from one question to the next.
 - **A firewall inside the VM** drops outbound traffic unless it goes to the
   public internet or to DNS on the Mac. The Mac itself, your local network,
-  carrier-grade NAT, link-local and cloud metadata addresses are refused. The
+  carrier-grade NAT, link-local and cloud metadata addresses are refused. So
+  is every address of the Mac's own network interfaces, including a public IPv4
+  or global IPv6 address, which no range rule covers (see "The Mac's own
+  addresses" below). The
   firewall is loaded before the server starts, and the sandbox refuses to
   start without it. Inbound, the VM accepts new connections on port 9100 only,
   and only from its default gateway (plus replies and loopback). The entrypoint
@@ -138,12 +141,38 @@ These hold as long as the design is intact and the VM boundary holds.
   the request if any answer is not public (loopback, private, link-local,
   shared, multicast, reserved, and IPv6 forms that carry an IPv4 address such
   as NAT64, 6to4 and Teredo), connects to the address it checked, and checks
-  every redirect again. Only http on port 80 and https on port 443; at most
+  every redirect again, and refuses a redirect from https to http and an
+  answer with more than one `Location` header. Only http on port 80 and https on port 443; at most
   5 MB; 45 seconds per hop (name lookup excepted, see the whole-request
   limit) and 90 seconds for a whole request with its redirects, name lookups,
   connections and TLS handshakes (a second or two more at most); only HTML and plain text. Runs of blanks in a
   plain-text page are collapsed, and a page is split into passages line by
   line, so a page made of millions of spaces costs one pass, not hours.
+- **The Mac's own addresses are refused, public ones too.** The firewall's
+  ranges do not cover a public IPv4 or global IPv6 address of the Mac itself (a
+  Mac that is not behind a home router), and a page could point a name at it.
+  At each start `Scripts/research_sandbox.sh` reads the addresses of all the
+  Mac's network interfaces with `/sbin/ifconfig` (IPv4 and IPv6, loopback and
+  link-local included, zone ids such as `%en0` removed, each once), checks every
+  one strictly (a plain IPv4 address or a plain IPv6 address; anything else is
+  left out and reported), and writes them, one per line, to the file
+  `blocked-addresses` in the folder that holds the secret. That folder is
+  mounted read-only into the VM, so the list is in no environment variable and
+  no command line; the addresses are not secret. The VM's entrypoint reads the
+  file, checks each address again with Python's `ipaddress`, and puts it into
+  the nft set `blocked4` or `blocked6`, which the output chain rejects before it
+  accepts anything public; `server.py` reads the same file (as root, once) and
+  refuses the same addresses, for a literal address, a name that resolves to
+  one, and every redirect. A missing, empty, over-long or unreadable list stops
+  the start. The script adds one public address that is no Mac's (a.root-servers.net, 198.41.0.4,
+  which SandSeek never uses) so the security check can show that the list works,
+  not only the private ranges. The VM's DNS exception to the Mac is inserted
+  above these rules, and replies on connections the Mac opened to the
+  published port are allowed before them. The list is made when the sandbox
+  starts: an address the Mac gains later is not on it (a new public address
+  needs a restart; the bridge address the Mac gets while the VM runs is private
+  and already refused, and the security check tries the Mac's current addresses
+  too).
 - **The sandbox API is not for web pages.** It refuses a `Host` header that is
   not a loopback name (which stops DNS rebinding from your browser) and
   accepts only `application/json` POSTs (which a page cannot send across
@@ -153,9 +182,22 @@ These hold as long as the design is intact and the VM boundary holds.
   client refuses a page address from the sandbox that is not http or https,
   search results with such an address are dropped, and the report's list of
   sources prints one as text, never as a link. The
+  address a page ended up at, after the sandbox followed its redirects, passes
+  the same checks on the Mac as the address that was asked for before it can be
+  a source: http or https, no user name or password, and not a local or private
+  network host (loopback, private, link-local, carrier-grade NAT and multicast
+  ranges, `localhost`, `*.local`, single-label names and odd number spellings).
+  A page whose final address fails is no source, with a plain message, and the
+  **Open…** button is off for such a source. Page titles and addresses are
+  cleaned of control, invisible and bidirectional-text characters
+  (U+202A to U+202E, U+2066 to U+2069, U+200E, U+200F and the like) when they
+  arrive, again in the saved report, and again when the report is printed or
+  written as Markdown; a title is cut to one line of 300 characters. The
   app shows web text as plain text, never loads images, and opens a source in
   your browser only after you confirm its full address.
-- **The app checks before every question.** It reads the firewall rules and the
+- **The app checks before every question.** It reads the firewall rules (the
+  outbound chain, the Mac's blocked sets and the inbound chain: policy drop,
+  and port 9100 accepted from one IPv4 address only) and the
   server's user and capabilities from outside the VM, and questions stay off
   until that passes. This is a configuration check, not intrusion detection:
   an attacker with root inside the VM could change what it sees.
@@ -296,7 +338,9 @@ time-limit `container` itself; the app's limit on the script covers that.
   To restrict domains, put an egress proxy in front of the VM; SandSeek does
   not.
 - **The firewall refuses ranges, not devices.** A device with a public IPv6
-  address (router, printer, NAS, the Mac) is inside the allowed range.
+  address (router, printer, NAS) is inside the allowed range. The Mac's own
+  addresses are the exception: they are refused one by one (see above), as of
+  the start of the sandbox.
 - **Code inside the VM can leak through DNS.** DNS goes to the Mac by default
   (see below), so a taken-over parser could encode small amounts of data into
   lookups.
@@ -336,8 +380,9 @@ time-limit `container` itself; the app's limit on the script covers that.
   with the VM.
   `selftest` reads the loaded rule and checks that it names the gateway; it
   does not send packets from other addresses. The app's own firewall check
-  (`firewallProblem`) looks at the output chain only, not the input chain;
-  that is a later follow-up.
+  (`firewallProblem`) reads the input chain too: the policy must be drop, and
+  the only rules are loopback, replies and one rule that accepts port 9100 from
+  one plain IPv4 address.
 - **The search path through SearXNG** (`SEARXNG_URL`, the operator's own
   service) follows no redirect and uses no proxy from the environment, but it
   is the one request that skips the public-address check; the firewall's single
@@ -527,7 +572,7 @@ Durations are estimates from earlier runs on a 16 GB MacBook Air.
 
 | Test | What it checks | How to run | Expect | Time |
 | --- | --- | --- | --- | --- |
-| Sandbox self-test | the sandbox refuses the Mac, loopback, private ranges, metadata addresses, odd ports and schemes; the firewall is loaded and drops inbound connections except to port 9100 from the VM's gateway (rule text only); the server runs as user 10001 with no capabilities; raw connections from inside the VM to the Mac, the router addresses and the metadata address fail; every TCP port on the Mac is tried (only DNS may answer); a foreign `Host`, an unsigned request, a browser-style POST (signed, so it is the content type that is refused), a repeated request and a signed `PUT` (405, after the signature check) are refused; the secret folder is mounted read-only in the VM; a signed `/health` request gets a signed answer; a public page loads | `Scripts/research_sandbox.sh selftest` (also the app's **Security check**) | `all sandbox checks passed` | about 1 min |
+| Sandbox self-test | the sandbox refuses the Mac, loopback, private ranges, metadata addresses, odd ports and schemes, and every address on the Mac's list (also the public test address, which only the list can explain); the firewall is loaded and drops inbound connections except to port 9100 from the VM's gateway (rule text only); every address of the list is in the firewall's blocked sets, the output chain rejects them, `/health` reports how many the server refuses, and a connection to the public test address from inside the VM is refused by the firewall; the server runs as user 10001 with no capabilities; raw connections from inside the VM to the Mac, the router addresses and the metadata address fail; every TCP port on the Mac is tried (only DNS may answer); a foreign `Host`, an unsigned request, a browser-style POST (signed, so it is the content type that is refused), a repeated request and a signed `PUT` (405, after the signature check) are refused; the secret folder is mounted read-only in the VM; a signed `/health` request gets a signed answer; a public page loads | `Scripts/research_sandbox.sh selftest` (also the app's **Security check**) | `all sandbox checks passed` | about 1 min |
 | Address check | 98 addresses (private, loopback, link-local, IPv6 forms, numeric spellings, `localhost`, names that resolve to private addresses, bad schemes and ports) are refused, sent straight to the sandbox with no model; a public page still loads | `python3 Scripts/research_address_check.py` | `RESULT: pass`, exit 0 | 1 to 3 min |
 | Sandbox unit tests | the address policy, fetching, redirects, extraction, cleaning, the HTTP API, and the address check's list against the real policy; no network | `cd Sandbox && python3 -m unittest test_server` | `OK` | seconds |
 | Swift tests | the research loop with fake services, the command, the app logic, streaming, the exposure check | `swift test` | all pass | minutes |

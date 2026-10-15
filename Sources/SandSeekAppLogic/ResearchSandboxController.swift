@@ -307,7 +307,7 @@ public final class ResearchSandboxController {
         let firewall = try? await runner.run(
             executable: container,
             arguments: ["exec", Self.containerName,
-                        "nft", "list", "table", "inet", Self.firewallTable],
+                        "nft", "-nn", "list", "table", "inet", Self.firewallTable],
             environment: environment, timeout: 30)
         guard state == .ready else { return }
         guard let firewall, firewall.status == 0 else {
@@ -351,11 +351,15 @@ public final class ResearchSandboxController {
         "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/3",
     ]
 
-    /// Reads `nft list table inet sandseek_sandbox` and says what is wrong with
-    /// it, or nil when it has the shape `firewall.nft` gives it: outbound
-    /// traffic dropped unless allowed, the private ranges refused, and no
-    /// rule but SandSeek's own: loopback, replies, DNS to the name servers, one
-    /// SearXNG address and port, and public addresses after the refusals.
+    /// Reads `nft -nn list table inet sandseek_sandbox` (`-nn` prints ports as
+    /// numbers) and says what is wrong with it, or nil when it has the shape
+    /// `firewall.nft` gives it. Outbound: traffic dropped unless allowed, the
+    /// private ranges and the Mac's own addresses (the sets `blocked4` and
+    /// `blocked6`, filled at start) refused, and no rule but SandSeek's own:
+    /// loopback, replies, DNS to the name servers, one SearXNG address and
+    /// port, and public addresses after the refusals. Inbound: traffic dropped
+    /// unless it is loopback, a reply, or a new connection to port 9100 from
+    /// one IPv4 address (the VM's default gateway).
     static func firewallProblem(_ listing: String) -> String? {
         let lines = listing.split(whereSeparator: \.isNewline)
             .map { $0.trimmingCharacters(in: .whitespaces) }
@@ -376,10 +380,23 @@ public final class ResearchSandboxController {
         if let missing = requiredRefusedRanges.first(where: { !refused.contains($0) }) {
             return "does not list \(missing) among the refused addresses"
         }
+        // The Mac's own addresses, which the private ranges do not cover when
+        // one is public. The IPv4 set always holds some (the start adds a test
+        // address); the IPv6 set can be empty on a Mac without IPv6.
+        guard let blockedStart = lines.firstIndex(of: "set blocked4 {"),
+              let blockedEnd = lines[blockedStart...].firstIndex(of: "}"),
+              lines.contains("set blocked6 {") else {
+            return "has no sets of the Mac's own addresses"
+        }
+        guard lines[blockedStart..<blockedEnd].contains(where: { $0.hasPrefix("elements") }) else {
+            return "refuses none of the Mac's own addresses"
+        }
         // Every rule in the chain must be one firewall.nft or entrypoint.sh
         // writes, so nothing can allow traffic before or after the refusal.
         var refusesPrivate4 = false
         var refusesRefused6 = false
+        var refusesBlocked4 = false
+        var refusesBlocked6 = false
         var dnsAddresses: Set<String> = []
         var otherExceptions: [String] = []
         for line in lines[(chainStart + 1)...] {
@@ -396,6 +413,12 @@ public final class ResearchSandboxController {
                 if line.wholeMatch(of: #/(?:meta nfproto ipv6 )?ip6 daddr @refused6 (?:meta l4proto tcp |ip6 nexthdr tcp )?reject(?: with [a-z0-9 -]+)?/#) != nil {
                     refusesRefused6 = true
                 }
+                if line.wholeMatch(of: #/(?:meta nfproto ipv4 )?ip daddr @blocked4 (?:meta l4proto tcp |ip protocol tcp )?reject(?: with [a-z0-9 -]+)?/#) != nil {
+                    refusesBlocked4 = true
+                }
+                if line.wholeMatch(of: #/(?:meta nfproto ipv6 )?ip6 daddr @blocked6 (?:meta l4proto tcp |ip6 nexthdr tcp )?reject(?: with [a-z0-9 -]+)?/#) != nil {
+                    refusesBlocked6 = true
+                }
                 continue
             }
             if line == "oifname \"lo\" accept" || line == "ct state established,related accept" {
@@ -409,19 +432,52 @@ public final class ResearchSandboxController {
                 }
                 continue
             }
-            if line == "meta nfproto ipv4 accept", refusesPrivate4 { continue }
+            if line == "meta nfproto ipv4 accept", refusesPrivate4, refusesBlocked4 { continue }
             if ["ip6 daddr 2000::/3 accept", "meta nfproto ipv6 ip6 daddr 2000::/3 accept"]
-                .contains(line), refusesRefused6 {
+                .contains(line), refusesRefused6, refusesBlocked6 {
                 continue
             }
             return "allows more than SandSeek's own rules (\(String(line.prefix(80))))"
         }
         guard refusesPrivate4 else { return "does not refuse the private addresses" }
+        guard refusesBlocked4, refusesBlocked6 else {
+            return "does not refuse the Mac's own addresses"
+        }
         // Only SearXNG gets a port other than DNS, and never on a DNS
         // server's address, which by default is the Mac.
         if otherExceptions.count > 1
             || otherExceptions.contains(where: { dnsAddresses.contains($0) }) {
             return "allows more than DNS to the Mac or extra addresses"
+        }
+        return inputChainProblem(lines)
+    }
+
+    /// The input chain `firewall.nft` writes: policy drop, loopback and
+    /// replies accepted, and new connections accepted on port 9100 from one
+    /// IPv4 address only, the VM's default gateway (the address the published
+    /// port connects from). Any other rule, or none for port 9100, is a
+    /// problem: another rule could open a port to the local network.
+    private static func inputChainProblem(_ lines: [String]) -> String? {
+        guard let start = lines.firstIndex(where: {
+            $0.contains("hook input") && $0.contains("policy drop")
+        }) else {
+            return "does not drop inbound traffic by default"
+        }
+        var gatewayRules = 0
+        for line in lines[(start + 1)...] {
+            if line == "}" { break }
+            if line.isEmpty { continue }
+            if line == "iifname \"lo\" accept" || line == "ct state established,related accept" {
+                continue
+            }
+            if line.wholeMatch(of: #/ip saddr (?:[0-9]{1,3}\.){3}[0-9]{1,3} tcp dport 9100 accept/#) != nil {
+                gatewayRules += 1
+                continue
+            }
+            return "accepts more inbound traffic than SandSeek's own rules (\(String(line.prefix(80))))"
+        }
+        guard gatewayRules == 1 else {
+            return "does not accept port 9100 from the gateway alone"
         }
         return nil
     }

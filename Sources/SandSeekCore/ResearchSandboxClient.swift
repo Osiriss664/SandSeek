@@ -205,20 +205,27 @@ public struct ResearchSandboxClient: Sendable {
             fields["query"] = .string(query)
         }
         let reply = try await post("v1/fetch", fields, timeout: Self.fetchTimeout)
-        guard let finalURL = reply["url"]?.stringValue,
+        guard let reportedURL = reply["url"]?.stringValue,
               let text = reply["text"]?.stringValue else {
             throw ResearchToolFailure(message: "the sandbox returned an unreadable page")
         }
-        // The address becomes a source in the report. The sandbox only ever
-        // reads http and https pages; a `javascript:` or `file:` address
-        // would be a link in the saved report.
-        guard ResearchText.isWebURL(finalURL) else {
-            throw ResearchToolFailure(
-                message: "the sandbox returned a page address that is not http or https")
+        // The address becomes a source in the report and may be offered with
+        // "Open…". It is where the page ended up after the sandbox followed
+        // its redirects, so it gets the same checks on the Mac as the address
+        // that was asked for: cleaned of control, invisible and bidi
+        // characters first, then http or https, no credentials, and no local
+        // or private network address. A `javascript:` or `file:` address would
+        // be a link in the saved report. A page that fails is no source.
+        let finalURL = ResearchText.url(reportedURL)
+        if let problem = ResearchFinalAddress.problem(with: reportedURL)
+            ?? ResearchFinalAddress.problem(with: finalURL) {
+            throw ResearchToolFailure(message: "the sandbox returned a page address that \(problem)")
         }
         var slice = ResearchPageSlice(
             url: finalURL,
-            title: reply["title"]?.stringValue ?? "",
+            // The title is the page's own text: one clean line, as long as a
+            // report shows it.
+            title: ResearchText.oneLine(reply["title"]?.stringValue ?? "", limit: 300),
             text: text,
             offset: reply["offset"]?.intValue ?? offset,
             nextOffset: reply["next_offset"]?.intValue,

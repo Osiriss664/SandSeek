@@ -217,8 +217,8 @@ final class FakeProcessRunner: ResearchProcessRunning, @unchecked Sendable {
 
     """
 
-    /// What `nft list table inet sandseek_sandbox` prints for firewall.nft with
-    /// the Mac as DNS server.
+    /// What `nft -nn list table inet sandseek_sandbox` prints for firewall.nft
+    /// with the Mac as DNS server and the Mac's addresses in the blocked sets.
     static let firewallListing = """
     table inet sandseek_sandbox {
     \tset private4 {
@@ -231,6 +231,18 @@ final class FakeProcessRunner: ResearchProcessRunning, @unchecked Sendable {
     \t\t\t     192.88.99.0/24, 192.168.0.0/16,
     \t\t\t     198.18.0.0/15, 198.51.100.0/24,
     \t\t\t     203.0.113.0/24, 224.0.0.0/3 }
+    \t}
+
+    \tset blocked4 {
+    \t\ttype ipv4_addr
+    \t\telements = { 10.8.0.2, 127.0.0.1,
+    \t\t\t     192.168.64.1, 198.41.0.4,
+    \t\t\t     203.0.113.9 }
+    \t}
+
+    \tset blocked6 {
+    \t\ttype ipv6_addr
+    \t\telements = { ::1, fe80::1 }
     \t}
 
     \tset refused6 {
@@ -246,6 +258,10 @@ final class FakeProcessRunner: ResearchProcessRunning, @unchecked Sendable {
     \t\tip daddr 192.168.64.1 udp dport 53 accept
     \t\toifname "lo" accept
     \t\tct state established,related accept
+    \t\tmeta nfproto ipv4 ip daddr @blocked4 meta l4proto tcp reject with tcp reset
+    \t\tmeta nfproto ipv4 ip daddr @blocked4 reject
+    \t\tmeta nfproto ipv6 ip6 daddr @blocked6 meta l4proto tcp reject with tcp reset
+    \t\tmeta nfproto ipv6 ip6 daddr @blocked6 reject
     \t\tmeta nfproto ipv4 ip daddr @private4 meta l4proto tcp reject with tcp reset
     \t\tmeta nfproto ipv4 ip daddr @private4 reject
     \t\tmeta nfproto ipv4 accept
@@ -254,6 +270,13 @@ final class FakeProcessRunner: ResearchProcessRunning, @unchecked Sendable {
     \t\tip6 daddr 2000::/3 accept
     \t\tmeta l4proto tcp reject with tcp reset
     \t\treject
+    \t}
+
+    \tchain input {
+    \t\ttype filter hook input priority filter; policy drop;
+    \t\tiifname "lo" accept
+    \t\tct state established,related accept
+    \t\tip saddr 192.168.64.1 tcp dport 9100 accept
     \t}
     }
 

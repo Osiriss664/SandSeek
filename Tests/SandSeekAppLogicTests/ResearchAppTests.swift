@@ -686,7 +686,7 @@ private struct UnsignedServices: ResearchHTTPTransport {
         #expect(sandbox.startedByApp)
         #expect(runner.scriptCommands == ["build", "start"])
         #expect(runner.commands.contains {
-            $0.starts(with: ["container", "exec", "sandseek-sandbox", "nft",
+            $0.starts(with: ["container", "exec", "sandseek-sandbox", "nft", "-nn",
                              "list", "table", "inet", "sandseek_sandbox"])
         })
 
@@ -805,6 +805,94 @@ private struct UnsignedServices: ResearchHTTPTransport {
         for listing in problems {
             #expect(ResearchSandboxController.firewallProblem(listing) != nil)
         }
+    }
+
+    @Test func readsTheMacsOwnAddressesInTheFirewallListing() {
+        let good = FakeProcessRunner.firewallListing
+        // A listing from before the Mac's addresses were handed over.
+        let noSets = good
+            .replacingOccurrences(of: "set blocked4 {", with: "set other4 {")
+        #expect(ResearchSandboxController.firewallProblem(noSets)?.contains("Mac's own addresses") == true)
+        // The IPv4 set must hold addresses; the IPv6 set may be empty.
+        let emptyV4 = good.replacingOccurrences(
+            of: "\t\telements = { 10.8.0.2, 127.0.0.1,\n\t\t\t     192.168.64.1, 198.41.0.4,\n\t\t\t     203.0.113.9 }\n",
+            with: "")
+        #expect(emptyV4 != good)
+        #expect(ResearchSandboxController.firewallProblem(emptyV4)?.contains("none of the Mac's") == true)
+        let emptyV6 = good.replacingOccurrences(of: "\t\telements = { ::1, fe80::1 }\n", with: "")
+        #expect(emptyV6 != good)
+        #expect(ResearchSandboxController.firewallProblem(emptyV6) == nil)
+        // The rules that use the sets must be there, for both families.
+        for family in ["blocked4", "blocked6"] {
+            let kept = good.split(separator: "\n", omittingEmptySubsequences: false)
+                .filter { !$0.contains("daddr @\(family) ") }.joined(separator: "\n")
+            #expect(kept != good, "\(family)")
+            #expect(ResearchSandboxController.firewallProblem(kept) != nil, "\(family)")
+        }
+        // A blocked rule that only covers some traffic is not a refusal of the set.
+        #expect(ResearchSandboxController.firewallProblem(good
+            .replacingOccurrences(of: "ip daddr @blocked4 reject", with: "ip daddr @blocked4 tcp dport 22 reject")
+            .replacingOccurrences(of: "ip daddr @blocked4 meta l4proto tcp reject with tcp reset",
+                                  with: "ip daddr @blocked4 tcp dport 22 reject")) != nil)
+        #expect(ResearchSandboxController.firewallProblem(good
+            .replacingOccurrences(of: "ip6 daddr @blocked6 reject", with: "ip6 saddr @blocked6 reject")
+            .replacingOccurrences(of: "ip6 daddr @blocked6 meta l4proto tcp reject with tcp reset",
+                                  with: "ip6 saddr @blocked6 reject")) != nil)
+    }
+
+    @Test func readsTheInboundRulesOfTheFirewallListing() {
+        let good = FakeProcessRunner.firewallListing
+        #expect(ResearchSandboxController.firewallProblem(good) == nil)
+        let gateway = "\t\tip saddr 192.168.64.1 tcp dport 9100 accept\n"
+        #expect(good.contains(gateway))
+        let inputPolicy = "type filter hook input priority filter; policy drop;"
+        let problems = [
+            // New connections not dropped by default, or no input chain at all.
+            good.replacingOccurrences(of: inputPolicy,
+                                      with: "type filter hook input priority filter; policy accept;"),
+            good.replacingOccurrences(of: inputPolicy, with: "type filter hook forward priority filter; policy drop;"),
+            // Port 9100 from anywhere, from a whole network, over IPv6, or on another port.
+            good.replacingOccurrences(of: gateway, with: "\t\ttcp dport 9100 accept\n"),
+            good.replacingOccurrences(of: gateway, with: "\t\tip saddr 192.168.64.0/24 tcp dport 9100 accept\n"),
+            good.replacingOccurrences(of: gateway, with: "\t\tip saddr 0.0.0.0/0 tcp dport 9100 accept\n"),
+            good.replacingOccurrences(of: gateway, with: "\t\tip saddr 192.168.64.1 tcp dport 22 accept\n"),
+            good.replacingOccurrences(of: gateway, with: "\t\tip saddr 192.168.64.1 tcp dport 9100 accept\n"
+                + "\t\tip saddr 192.168.64.7 tcp dport 9100 accept\n"),
+            // No rule for the port at all (the server could not be reached).
+            good.replacingOccurrences(of: gateway, with: ""),
+            // Anything else accepted.
+            good.replacingOccurrences(of: gateway, with: gateway + "\t\ttcp dport 22 accept\n"),
+            good.replacingOccurrences(of: gateway, with: gateway + "\t\taccept\n"),
+            good.replacingOccurrences(of: gateway, with: gateway + "\t\tip saddr 10.0.0.0/8 accept\n"),
+            good.replacingOccurrences(of: gateway, with: gateway + "\t\tjump other\n"),
+            // A rule that is not a plain port rule.
+            good.replacingOccurrences(of: gateway, with: "\t\tip saddr 192.168.64.1 tcp dport 9100 counter accept\n"),
+            good.replacingOccurrences(of: gateway, with: "\t\tip saddr 192.168.64.1 tcp dport 9100 accept comment \"x\"\n"),
+        ]
+        for listing in problems {
+            #expect(listing != good)
+            #expect(ResearchSandboxController.firewallProblem(listing) != nil)
+        }
+        // Service names are not accepted for the port: the app asks nft for numbers.
+        #expect(ResearchSandboxController.firewallProblem(good
+            .replacingOccurrences(of: "dport 9100", with: "dport jetdirect")) != nil)
+    }
+
+    @Test func aFirewallWithoutTheInboundRulesIsNotVerified() async throws {
+        let runner = FakeProcessRunner { command in
+            command.contains("nft")
+                ? ResearchProcessResult(status: 0, output: FakeProcessRunner.firewallListing
+                    .replacingOccurrences(of: "hook input priority filter; policy drop;",
+                                          with: "hook input priority filter; policy accept;"))
+                : FakeProcessRunner.healthy(command)
+        }
+        let sandbox = try controller(runner: runner)
+        await sandbox.start()
+        guard case .notVerified(let message) = sandbox.protection else {
+            Issue.record("expected not verified, got \(sandbox.protection)")
+            return
+        }
+        #expect(message.contains("does not drop inbound traffic"))
     }
 
     @Test func aPermissiveFirewallIsNotVerified() async throws {

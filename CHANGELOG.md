@@ -62,6 +62,33 @@ SandSeek runs only Apple's `container`.
 - Calls to the sandbox have time limits of their own: 10 seconds for the health
   check, 60 for a search and 90 for a page, instead of the transport's half hour.
 
+Fewer ways out of the sandbox.
+
+- The Mac's own addresses are refused, public ones too. The firewall's ranges
+  did not cover a public IPv4 or global IPv6 address of the Mac itself. At each
+  start `Scripts/research_sandbox.sh` reads the addresses of the Mac's network
+  interfaces (`ifconfig`), checks each strictly, and writes them to a file in
+  the secret folder that is mounted read-only into the VM (not an environment
+  variable). The VM's firewall rejects them, and the server refuses them in
+  every URL, name lookup and redirect. A list that is missing or unreadable
+  stops the start. Rebuild the sandbox image after updating.
+- The address a page ends up at after redirects gets the same checks on the Mac
+  as the one that was asked for (http or https, no user name or password, no
+  local or private network host) before it becomes a source or can be opened
+  from the report. A page that fails is no source, with a plain message.
+- A redirect from https to http is refused, for pages and for search alike, and
+  so is an answer with more than one `Location` header.
+- The security check (`Scripts/research_sandbox.sh selftest` and the app's
+  **Security check**) tries the Mac's addresses, including a public test
+  address that only the new list can explain, and `/health` now reports how
+  many addresses the server refuses (`blocked_addresses`). The app's own check
+  before every question reads the inbound firewall rules too (drop by default,
+  port 9100 from the gateway only), not just the outbound ones, and the
+  Mac's blocked sets.
+- Page titles and addresses are cleaned of bidirectional-text and other
+  invisible characters when they arrive from the sandbox and again in saved
+  reports; a title is cut to one line of 300 characters.
+
 A better window.
 
 - The app has its own icon: the SandSeek logo, a magnifying glass over sand

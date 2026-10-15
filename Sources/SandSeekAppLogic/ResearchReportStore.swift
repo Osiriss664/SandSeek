@@ -40,10 +40,14 @@ public struct SavedResearchReport: Codable, Equatable, Identifiable, Sendable {
             self.url = url
         }
 
-        /// The address only when it is plain http or https, the only kinds
+        /// The address only when it is plain http or https, without a user
+        /// name or password and not on a local or private network (the checks
+        /// every page address gets, `ResearchFinalAddress`), the only kinds
         /// the app will hand to the browser.
         public var webURL: URL? {
-            guard let url = URL(string: ResearchText.url(url)),
+            let cleaned = ResearchText.url(url)
+            guard ResearchFinalAddress.problem(with: cleaned) == nil,
+                  let url = URL(string: cleaned),
                   let scheme = url.scheme?.lowercased(),
                   scheme == "http" || scheme == "https",
                   url.host?.isEmpty == false else { return nil }
@@ -120,7 +124,7 @@ public struct SavedResearchReport: Codable, Equatable, Identifiable, Sendable {
         answer = ResearchText.terminalSafe(report.answer)
         sources = report.sources.map {
             Source(number: $0.number,
-                   title: ResearchText.terminalSafe($0.title),
+                   title: ResearchText.oneLine($0.title, limit: 300),
                    url: ResearchText.url($0.url))
         }
         self.model = model

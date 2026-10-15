@@ -468,6 +468,28 @@ struct ResearchAgentTests {
         #expect(ResearchText.terminalSafe("a\u{1B}[2Jb\r\nc") == "a[2Jb\nc")
     }
 
+    @Test func everyBidiControlIsRemovedFromTitlesAndAddresses() {
+        let controls: [Unicode.Scalar] = [
+            "\u{202A}", "\u{202B}", "\u{202C}", "\u{202D}", "\u{202E}",
+            "\u{2066}", "\u{2067}", "\u{2068}", "\u{2069}", "\u{200E}", "\u{200F}", "\u{061C}",
+        ]
+        for control in controls {
+            let text = "ab\(Character(control))cd"
+            #expect(ResearchText.terminalSafe(text) == "abcd", "\(control.value)")
+            #expect(ResearchText.oneLine(text, limit: 50) == "abcd", "\(control.value)")
+            #expect(ResearchText.url("https://x.example/\(text)") == "https://x.example/abcd")
+            #expect(ResearchText.markdownURL("https://x.example/\(text)") == "https://x.example/abcd")
+        }
+        // In a saved report: the title and the address of a source.
+        let report = ResearchReport(
+            question: "q", answer: "A [1].",
+            sources: [ResearchSource(number: 1, title: "Gift\u{202E}cod.exe\u{2066}",
+                                     url: "https://example.com/a\u{202E}b")],
+            modelTurns: 1, budgetExhausted: false)
+        #expect(report.markdown.contains("1. [Giftcod.exe](https://example.com/ab)\n"))
+        #expect(report.markdown.unicodeScalars.allSatisfy { !ResearchText.isUnsafe($0) })
+    }
+
     @Test func fixedMarkersAlsoTakeAwayLookalikes() {
         // The default mode has no code, and still no page text can look like a marker.
         let attacks = [
@@ -6785,6 +6807,96 @@ struct ResearchSandboxAddressTests {
             reply: #"{"url":"HTTPS://example.com/a","text":"hi","title":"T","offset":0,"total_chars":2}"#))
         let slice = try await good.fetch(url: "https://example.com/", offset: 0, maxCharacters: 100)
         #expect(slice.url == "HTTPS://example.com/a")
+    }
+#endif
+
+#if canImport(CryptoKit)
+    private func fetch(reporting address: String, title: String = "T") async throws -> ResearchPageSlice {
+        let reply = #"{"url":"\#(address)","text":"hi","title":"\#(title)","offset":0,"total_chars":2}"#
+        let client = ResearchSandboxClient.forTests(
+            baseURL: sandbox, transport: CannedSandboxReply(reply: reply))
+        return try await client.fetch(url: "https://example.com/", offset: 0, maxCharacters: 100)
+    }
+
+    @Test func aFinalAddressOnALocalOrPrivateNetworkIsRefused() async {
+        // The same hosts open_page refuses for the first address.
+        for address in [
+            "http://127.0.0.1/", "http://127.0.0.1:8080/x", "https://10.0.0.5/a", "http://192.168.64.1/",
+            "http://172.16.0.1/", "http://169.254.169.254/latest/meta-data/", "http://100.64.0.1/",
+            "http://0.0.0.0/", "http://[::1]/", "http://[fe80::1]/", "http://[fd00::1]/",
+            "http://[::ffff:192.168.1.1]/", "http://localhost/", "https://localhost:3000/a",
+            "http://printer.local/", "http://nas.lan/", "http://intranet/", "http://2130706433/",
+            "http://0x7f000001/", "http://127.1/", "http://224.0.0.1/",
+        ] {
+            await #expect(throws: ResearchToolFailure(
+                message: "the sandbox returned a page address that is on a local or private network"),
+                          "\(address)") {
+                _ = try await fetch(reporting: address)
+            }
+        }
+    }
+
+    @Test func aFinalAddressWithAUserNameOrPasswordIsRefused() async {
+        for address in ["https://user@example.com/a", "https://user:pw@example.com/a",
+                        "http://:pw@example.com/", "https://example.com@evil.example/a"] {
+            await #expect(throws: ResearchToolFailure(
+                message: "the sandbox returned a page address that carries a user name or password"),
+                          "\(address)") {
+                _ = try await fetch(reporting: address)
+            }
+        }
+        // An @ in the path or the query is not a credential.
+        for address in ["https://example.com/@user", "https://example.com/a?mail=a@b.example",
+                        "https://example.com/a#@x"] {
+            #expect(!ResearchFinalAddress.hasCredentials(address), "\(address)")
+        }
+    }
+
+    @Test func aFinalAddressThatIsNotHttpSaysSo() async {
+        for address in ["ftp://example.com/a", "file:///etc/passwd", "javascript:alert(1)"] {
+            await #expect(throws: ResearchToolFailure(
+                message: "the sandbox returned a page address that is not http or https"),
+                          "\(address)") {
+                _ = try await fetch(reporting: address)
+            }
+        }
+    }
+
+    @Test func publicFinalAddressesPass() async throws {
+        for address in ["https://example.com/a", "HTTP://Example.com/a?b=1#c", "https://8.8.8.8/",
+                        "http://93.184.216.34:80/page", "https://[2606:2800:220:1:248:1893:25c8:1946]/",
+                        "https://127.0.0.1.example.com/", "https://de.wikipedia.org/wiki/K%C3%B6ln"] {
+            let slice = try await fetch(reporting: address)
+            #expect(slice.url == address)
+            #expect(ResearchFinalAddress.problem(with: address) == nil, "\(address)")
+        }
+    }
+
+    @Test func theFinalAddressAndTitleAreCleanedBeforeTheyAreUsed() async throws {
+        // Bidi controls (U+202A to U+202E, U+2066 to U+2069, U+200E and U+200F),
+        // other invisible characters, controls and line breaks.
+        let marks = "\u{202A}\u{202B}\u{202C}\u{202D}\u{202E}\u{2066}\u{2067}\u{2068}\u{2069}\u{200E}\u{200F}"
+        let slice = try await fetch(
+            reporting: "https://example.com/a\(marks)b\u{200B}c",
+            title: "Re\(marks)port\\n  of\\u001b[2J\\tthe \u{FEFF}year\\u2028done")
+        #expect(slice.url == "https://example.com/abc")
+        #expect(slice.title == "Report of[2J the year done")
+        #expect(slice.url.unicodeScalars.allSatisfy { !ResearchText.isUnsafe($0) })
+        #expect(slice.title.unicodeScalars.allSatisfy { !ResearchText.isUnsafe($0) })
+    }
+
+    @Test func aLongTitleIsCutToOneLineOfAReasonableLength() async throws {
+        let slice = try await fetch(reporting: "https://example.com/a", title: String(repeating: "word ", count: 200))
+        #expect(slice.title.count <= 301)
+        #expect(slice.title.hasSuffix("…"))
+        #expect(!slice.title.contains("\n"))
+    }
+
+    @Test func aHostSplitByAnInvisibleCharacterIsNotTakenForAPublicOne() async {
+        // Without the zero-width space this host is localhost (a single label, in any case).
+        await #expect(throws: ResearchToolFailure.self) {
+            _ = try await fetch(reporting: "http://local\u{200B}host/")
+        }
     }
 #endif
 
