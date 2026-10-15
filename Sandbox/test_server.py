@@ -12,6 +12,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import socket
 import struct
@@ -2796,7 +2797,13 @@ class EntrypointTests(unittest.TestCase):
 
 class LauncherTests(unittest.TestCase):
     """Scripts/research_sandbox.sh start and status, with `container` and `curl`
-    replaced by small stubs and HOME in a temporary folder."""
+    replaced by small stubs and HOME in a temporary folder.
+
+    The script only runs /usr/local/bin/container, after checking that it is
+    Apple's, and only the curl in /usr/bin. So these tests run a copy of it
+    that names the stubs instead, and whose `require_container` only starts
+    the stub's system service. The checks of the real tool are tested in
+    Scripts/test_research_sandbox.py."""
 
     SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "Scripts",
                           "research_sandbox.sh")
@@ -2824,6 +2831,23 @@ printf '%s\\n%s' "$FAKE_BODY" "$FAKE_CODE"
 ''')
         self.secret = os.path.join(self.home, "Library", "Application Support", "SandSeek",
                                    "sandbox", "secret")
+        self.script = self.stubbed_script()
+
+    def stubbed_script(self):
+        with open(self.SCRIPT, encoding="utf-8") as handle:
+            text = handle.read()
+        text = text.replace("container_bin=/usr/local/bin/container",
+                            f'container_bin="{self.bin}/container"', 1)
+        start = text.index("require_container() {")
+        end = text.index("\n}\n", start) + 3
+        text = (text[:start] + "require_container() {\n"
+                '  "$container_bin" system status >/dev/null 2>&1 || "$container_bin" system start\n'
+                "}\n" + text[end:])
+        text = re.sub(r"\bcurl (-s)", lambda match: f"{self.bin}/curl {match.group(1)}", text)
+        path = os.path.join(self.home, "research_sandbox.sh")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        return path
 
     def write_stub(self, name, text):
         path = os.path.join(self.bin, name)
@@ -2832,11 +2856,14 @@ printf '%s\\n%s' "$FAKE_BODY" "$FAKE_CODE"
         os.chmod(path, 0o755)
 
     def run_script(self, *args, **fake):
+        # The marker keeps the script from starting itself again with a clean
+        # environment, which would drop the FAKE_ variables the stubs read.
         env = {"PATH": self.bin + os.pathsep + os.environ["PATH"], "HOME": self.home,
+               "SANDSEEK_SANDBOX_CLEAN_ENV": "1",
                "FAKE_CALLS": self.calls, "FAKE_ALL_LIST": "sandseek-sandbox\n",
                "FAKE_LIST": "sandseek-sandbox\n", "FAKE_LOGS": "", "FAKE_BODY": "",
                "FAKE_CODE": "", **fake}
-        return subprocess.run(["bash", self.SCRIPT, *args], env=env, capture_output=True,
+        return subprocess.run(["bash", self.script, *args], env=env, capture_output=True,
                               text=True, timeout=60, stdin=subprocess.DEVNULL)
 
     def container_calls(self):

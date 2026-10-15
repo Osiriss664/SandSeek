@@ -25,6 +25,11 @@
 # with it too, so SandSeek can tell the sandbox from another program on the
 # port. The secret is in no environment variable and no command line. `stop`
 # deletes the file: no secret means the sandbox is not running.
+#
+# The only `container` this script runs is Apple's, at /usr/local/bin/container,
+# and only after `require_container` has checked it (see below). It never
+# looks for `container` through PATH, and it runs with a fixed environment:
+# nothing from your shell reaches `container` but the settings named below.
 
 set -euo pipefail
 # No file name expansion: $dns_servers is split into words below, not matched.
@@ -41,6 +46,26 @@ for old_name in TUFF_RESEARCH_SANDBOX_PORT TUFF_RESEARCH_DNS; do
     echo "warning: $old_name is the old name and is ignored; use SANDSEEK_${old_name#TUFF_RESEARCH_}" >&2
   fi
 done
+
+# A fixed environment. The script starts itself again once with `env -i`, so
+# nothing else of your shell's environment (DYLD_*, BASH_ENV, proxy variables,
+# tokens) reaches it, `container` or the programs they start. These are kept:
+# HOME, USER, LOGNAME and TMPDIR, the language, and the three settings the
+# script reads: SANDSEEK_SANDBOX_PORT, SANDSEEK_DNS and SEARXNG_URL. The
+# marker below tells the second run that it already has the fixed environment.
+if [[ "${SANDSEEK_SANDBOX_CLEAN_ENV:-}" != 1 ]]; then
+  clean_env=(PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=en_US.UTF-8
+             HOME="${HOME:?HOME is not set}" SANDSEEK_SANDBOX_CLEAN_ENV=1)
+  for kept_name in USER LOGNAME TMPDIR SANDSEEK_SANDBOX_PORT SANDSEEK_DNS SEARXNG_URL; do
+    if [[ -n "${!kept_name:-}" ]]; then
+      clean_env+=("$kept_name=${!kept_name}")
+    fi
+  done
+  exec /usr/bin/env -i "${clean_env[@]}" /bin/bash "${BASH_SOURCE[0]}" "$@"
+fi
+# Whatever the marker said, only system folders are searched from here on.
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
 
 image="sandseek-sandbox:latest"
 name="sandseek-sandbox"
@@ -84,12 +109,112 @@ check_dns() {
   done
 }
 
+# Apple's `container`, where Apple's installer puts it. Never found through
+# PATH. SandSeek (the app) makes the same checks before it runs the tool; the
+# team below is the one that signs Apple's release, and the requirement and the
+# oldest version must match Sources/SandSeekAppLogic/ResearchContainerTool.swift.
+container_bin=/usr/local/bin/container
+container_requirement='anchor apple generic and certificate leaf[subject.OU] = "UPBK2H6LZM"'
+container_minimum_major=1
+container_minimum_minor=5
+container_minimum_patch=0
+
+# How `stat` prints a file's owner (a number) and permissions (octal). On macOS
+# /usr/bin/stat is the BSD one; the other form is for Linux, where the script's
+# tests run.
+if [[ "$(/usr/bin/uname -s)" == Darwin ]]; then
+  stat_format=(-f '%u %Lp')
+else
+  stat_format=(-c '%u %a')
+fi
+
+# Succeeds when $1 belongs to root and neither its group nor others can write
+# to it. A link is judged itself, not by what it points to.
+owned_by_root_and_closed() {
+  local facts owner mode
+  facts="$(/usr/bin/stat "${stat_format[@]}" -- "$1" 2>/dev/null)" || return 1
+  owner="${facts%% *}"
+  mode="${facts#* }"
+  [[ "$owner" == 0 && "$mode" =~ ^[0-7]+$ ]] || return 1
+  (( (8#$mode & 8#022) == 0 ))
+}
+
+# Succeeds when the absolute path $1 and every folder above it, up to /, are
+# owned by root and closed to group and others.
+chain_is_closed() {
+  local path="$1"
+  [[ "$path" == /* ]] || return 1
+  while :; do
+    owned_by_root_and_closed "$path" || return 1
+    [[ "$path" == / ]] && return 0
+    path="${path%/*}"
+    [[ -n "$path" ]] || path=/
+  done
+}
+
+# Prints the real path of $1: links followed, with plain `readlink` (macOS has
+# no `readlink -f` in bash 3.2 days) and `cd -P` for the folder.
+resolve_path() {
+  local path="$1" target directory count=0
+  while [[ -L "$path" ]]; do
+    count=$((count + 1))
+    (( count <= 20 )) || return 1
+    target="$(/usr/bin/readlink "$path")" || return 1
+    case "$target" in
+      /*) path="$target" ;;
+      *) path="${path%/*}/$target" ;;
+    esac
+  done
+  directory="${path%/*}"
+  [[ -n "$directory" ]] || directory=/
+  directory="$(cd -P -- "$directory" 2>/dev/null && pwd -P)" || return 1
+  printf '%s/%s' "${directory%/}" "${path##*/}"
+}
+
+# Succeeds when the output $1 of `container --version` names a version that is
+# at least the oldest one SandSeek supports. The first "1.5" or "1.5.0" counts.
+version_is_supported() {
+  local pattern='([0-9]+)\.([0-9]+)(\.([0-9]+))?' major minor patch
+  [[ "$1" =~ $pattern ]] || return 1
+  major=$((10#${BASH_REMATCH[1]}))
+  minor=$((10#${BASH_REMATCH[2]}))
+  patch=$((10#${BASH_REMATCH[4]:-0}))
+  if (( major != container_minimum_major )); then
+    (( major > container_minimum_major ))
+  elif (( minor != container_minimum_minor )); then
+    (( minor > container_minimum_minor ))
+  else
+    (( patch >= container_minimum_patch ))
+  fi
+}
+
+# Refuses (exit 1) unless $container_bin is Apple's container tool: an
+# executable regular file that only root can change, together with every
+# folder above it, as given and with links followed; signed by Apple's team
+# (codesign checks the chain to Apple's certificate authority and the team);
+# and new enough. Then makes sure the container system service runs. A hung
+# `container` command is ended by the app's time limit, not here.
 require_container() {
-  if ! command -v container >/dev/null 2>&1; then
-    echo "Apple container is not installed; see https://github.com/apple/container" >&2
+  local resolved version
+  if [[ ! -e "$container_bin" && ! -L "$container_bin" ]]; then
+    echo "Apple container is not installed at $container_bin; see https://github.com/apple/container" >&2
     exit 1
   fi
-  container system status >/dev/null 2>&1 || container system start
+  resolved="$(resolve_path "$container_bin")" || resolved=""
+  if [[ -z "$resolved" || ! -f "$resolved" || ! -x "$resolved" ]] \
+      || ! chain_is_closed "$container_bin" || ! chain_is_closed "$resolved"; then
+    echo "$container_bin is not a program only root can change (it, or a folder above it, can be changed by you or by others), so it is not run. Reinstall Apple container with Apple's installer: https://github.com/apple/container" >&2
+    exit 1
+  fi
+  if ! /usr/bin/codesign --verify --strict -R="$container_requirement" "$resolved" >/dev/null 2>&1; then
+    echo "$container_bin is not signed by Apple, so it is not run. Install Apple container from https://github.com/apple/container" >&2
+    exit 1
+  fi
+  if ! version="$("$container_bin" --version 2>&1)" || ! version_is_supported "$version"; then
+    echo "Apple container $container_minimum_major.$container_minimum_minor.$container_minimum_patch or newer is needed; found: ${version:0:80}. Update it from https://github.com/apple/container" >&2
+    exit 1
+  fi
+  "$container_bin" system status >/dev/null 2>&1 || "$container_bin" system start
 }
 
 # Makes a new secret (32 random bytes as 64 hex characters) and writes it to
@@ -231,7 +356,7 @@ print(text)
 '
 
 signed_call() {
-  container exec "$name" python3 -c "$signed_client" "$@" 2>&1
+  "$container_bin" exec "$name" python3 -c "$signed_client" "$@" 2>&1
 }
 
 # The first line of a signed_call answer: "200 signed".
@@ -255,13 +380,13 @@ case "${1:-}" in
     # --quiet, `container builder status` prints the builder's ID only while
     # it runs; if the check itself fails, the builder is left alone.
     builder_was_running=1
-    if builder="$(container builder status --quiet 2>/dev/null)" && [[ -z "$builder" ]]; then
+    if builder="$("$container_bin" builder status --quiet 2>/dev/null)" && [[ -z "$builder" ]]; then
       builder_was_running=""
     fi
     build_status=0
-    container build -t "$image" "$context" || build_status=$?
+    "$container_bin" build -t "$image" "$context" || build_status=$?
     if [[ -z "$builder_was_running" ]]; then
-      container builder stop >/dev/null 2>&1 || true
+      "$container_bin" builder stop >/dev/null 2>&1 || true
     fi
     exit "$build_status"
     ;;
@@ -275,8 +400,8 @@ case "${1:-}" in
     check_port
     check_dns
     require_container
-    container stop "$name" >/dev/null 2>&1 || true
-    container delete "$name" >/dev/null 2>&1 || true
+    "$container_bin" stop "$name" >/dev/null 2>&1 || true
+    "$container_bin" delete "$name" >/dev/null 2>&1 || true
     # The entrypoint starts as root with these four capabilities only, to load
     # the firewall; the server then gives them all up and runs as user 10001.
     # The secret goes in as a read-only file in a mounted folder, never in the
@@ -301,14 +426,14 @@ case "${1:-}" in
     # From here on, every way out but success deletes the new secret and any
     # VM that was started, so a missing secret still means "not running".
     cleanup_failed_start() {
-      container stop "$name" >/dev/null 2>&1 || true
-      container delete "$name" >/dev/null 2>&1 || true
+      "$container_bin" stop "$name" >/dev/null 2>&1 || true
+      "$container_bin" delete "$name" >/dev/null 2>&1 || true
       remove_secret
     }
     trap cleanup_failed_start EXIT
     write_secret || exit 1
     remove_old_secret
-    container run "${run_options[@]}" "$image" >/dev/null
+    "$container_bin" run "${run_options[@]}" "$image" >/dev/null
     # The entrypoint refuses to start when it finds no default gateway (see
     # Sandbox/entrypoint.sh) or cannot load the firewall, and `--rm` deletes the
     # container then, so keep the last non-empty log (a later "not found" error
@@ -325,7 +450,7 @@ case "${1:-}" in
       # Ready needs the container to be running as well as the port to give
       # the unsigned 401: something else on the port must not pass for it.
       if probe; then
-        if ! running="$(container list --quiet 2>/dev/null)"; then
+        if ! running="$("$container_bin" list --quiet 2>/dev/null)"; then
           list_failed=1
         elif grep -qxF "$name" <<<"$running"; then
           trap - EXIT
@@ -336,7 +461,7 @@ case "${1:-}" in
         old_image=1
         break
       fi
-      if out="$(container logs "$name" 2>/dev/null)" && [[ -n "$out" ]]; then
+      if out="$("$container_bin" logs "$name" 2>/dev/null)" && [[ -n "$out" ]]; then
         startup_log="$(tail -n 5 <<<"$out")"
         [[ "$out" == *"refusing to start"* ]] && refused=1
         if [[ "$out" == *"firewall: inbound port 9100 accepted"* ]]; then
@@ -347,7 +472,7 @@ case "${1:-}" in
       fi
       # Stop early when the entrypoint refused to start or the container is gone.
       (( refused )) && break
-      if remaining="$(container list --all --quiet 2>/dev/null)" \
+      if remaining="$("$container_bin" list --all --quiet 2>/dev/null)" \
           && ! grep -qxF "$name" <<<"$remaining"; then
         gone=1
         break
@@ -370,7 +495,7 @@ case "${1:-}" in
       echo "$old_image_message" >&2
     elif (( refused || gone )); then
       # `--rm` has deleted the container, so `container logs` has nothing.
-      debug_command="container run"
+      debug_command="$container_bin run"
       for option in "${run_options[@]}"; do
         case "$option" in
           --rm|--detach) ;;
@@ -397,9 +522,9 @@ case "${1:-}" in
     ;;
   stop)
     require_container
-    container stop "$name" >/dev/null 2>&1 || true
-    container delete "$name" >/dev/null 2>&1 || true
-    if ! remaining="$(container list --all --quiet 2>/dev/null)" \
+    "$container_bin" stop "$name" >/dev/null 2>&1 || true
+    "$container_bin" delete "$name" >/dev/null 2>&1 || true
+    if ! remaining="$("$container_bin" list --all --quiet 2>/dev/null)" \
         || grep -qx "$name" <<<"$remaining"; then
       echo "could not confirm the sandbox was removed; see: container list --all" >&2
       exit 1
@@ -436,7 +561,7 @@ case "${1:-}" in
 
     echo "Fetches the sandbox must refuse:"
     # The same helper the entrypoint uses for the inbound rule.
-    gateway="$(container exec "$name" python3 /app/default_gateway.py)" \
+    gateway="$("$container_bin" exec "$name" python3 /app/default_gateway.py)" \
       || { echo "  FAIL  could not read the VM's default gateway (rebuild the image?)" >&2; exit 1; }
     blocked_urls=(
       "http://$gateway/"
@@ -470,7 +595,7 @@ case "${1:-}" in
     done
 
     echo "The VM's own protection:"
-    if container exec "$name" nft list table inet sandseek_sandbox >/dev/null 2>&1; then
+    if "$container_bin" exec "$name" nft list table inet sandseek_sandbox >/dev/null 2>&1; then
       pass "the firewall is loaded"
     else
       fail "the firewall is not loaded"
@@ -479,7 +604,7 @@ case "${1:-}" in
     # This reads the loaded rules; it does not send a packet from another
     # address, so it shows that the rule names the gateway, not that other
     # senders are refused.
-    input_rules="$(container exec "$name" nft -nn list chain inet sandseek_sandbox input 2>/dev/null || true)"
+    input_rules="$("$container_bin" exec "$name" nft -nn list chain inet sandseek_sandbox input 2>/dev/null || true)"
     if grep -q 'hook input.*policy drop' <<<"$input_rules" \
         && grep -qF "ip saddr $gateway tcp dport 9100 accept" <<<"$input_rules" \
         && [[ "$(grep -c 'dport 9100' <<<"$input_rules")" == 1 ]]; then
@@ -487,7 +612,7 @@ case "${1:-}" in
     else
       fail "the firewall's input chain is missing or not as expected: ${input_rules:0:200}"
     fi
-    privileges="$(container exec "$name" python3 -c '
+    privileges="$("$container_bin" exec "$name" python3 -c '
 import glob
 for path in glob.glob("/proc/[0-9]*/cmdline"):
     try:
@@ -511,7 +636,7 @@ for path in glob.glob("/proc/[0-9]*/cmdline"):
     # The Mac's DNS port (53) is the one exception, when the VM uses it.
     for target in "$gateway:8080" "$gateway:22" "$gateway:5000" "$gateway:443" \
                   "192.168.1.1:80" "192.168.0.1:80" "10.0.0.1:80" "169.254.169.254:80"; do
-      if container exec --user 10001:10001 "$name" python3 -c "
+      if "$container_bin" exec --user 10001:10001 "$name" python3 -c "
 import socket, sys
 host, port = sys.argv[1].rsplit(':', 1)
 try:
@@ -528,7 +653,7 @@ except OSError:
     # Every TCP port on the Mac. DNS (53) may answer when the VM's name server
     # is the Mac, which is the default; nothing else may.
     echo "Every TCP port on the Mac, from inside the VM:"
-    open_ports="$(container exec --user 10001:10001 "$name" python3 -c '
+    open_ports="$("$container_bin" exec --user 10001:10001 "$name" python3 -c '
 import socket, sys
 from concurrent.futures import ThreadPoolExecutor
 host = sys.argv[1]
@@ -542,7 +667,7 @@ with ThreadPoolExecutor(64) as pool:
     print(" ".join(str(p) for p in pool.map(probe, range(1, 65536)) if p))
 ' "$gateway" 2>/dev/null)" || open_ports="error"
     mac_dns="no"
-    if container exec "$name" awk '$1 == "nameserver" { print $2 }' /etc/resolv.conf 2>/dev/null \
+    if "$container_bin" exec "$name" awk '$1 == "nameserver" { print $2 }' /etc/resolv.conf 2>/dev/null \
         | grep -qx "$gateway"; then
       mac_dns="yes"
     fi
@@ -593,7 +718,7 @@ with ThreadPoolExecutor(64) as pool:
     fi
     # The folder is mounted read-only; /proc/mounts in the VM shows whether
     # Apple container did that.
-    mount_options="$(container exec "$name" awk -v dir="$vm_secret_folder" \
+    mount_options="$("$container_bin" exec "$name" awk -v dir="$vm_secret_folder" \
       '$2 == dir { print $4 }' /proc/mounts 2>/dev/null || true)"
     case ",$mount_options," in
       *,ro,*) pass "the secret folder is mounted read-only in the VM" ;;
