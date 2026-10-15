@@ -51,6 +51,14 @@ final class FakeResearchServices: ResearchHTTPTransport, @unchecked Sendable {
 
     var authorizations: [(path: String, value: String?)] { lock.withLock { seenAuthorization } }
 
+    /// The `Authorization` value of each signed (sandbox) request, by path, in
+    /// order. Kept apart from `authorizations`, which holds the model server's
+    /// requests only.
+    private var seenSandboxAuthorization: [(path: String, value: String?)] = []
+    var sandboxAuthorizations: [(path: String, value: String?)] {
+        lock.withLock { seenSandboxAuthorization }
+    }
+
     func send(method: String, url: URL, body: Data?, timeout: TimeInterval?,
               authorization: String?) async throws -> ResearchHTTPResponse {
         lock.withLock { seenAuthorization.append((url.path, authorization)) }
@@ -66,8 +74,8 @@ final class FakeResearchServices: ResearchHTTPTransport, @unchecked Sendable {
     /// request's nonce, method and path.
     func send(method: String, url: URL, body: Data?, timeout: TimeInterval?,
               authorization: String?, headers: [String: String]) async throws -> ResearchHTTPResponse {
-        let response = try await send(
-            method: method, url: url, body: body, timeout: timeout, authorization: authorization)
+        lock.withLock { seenSandboxAuthorization.append((url.path, authorization)) }
+        let response = try await respond(url: url, body: body, authorization: authorization)
         return TestSandboxSecret.signed(response, for: method, url: url, headers: headers)
     }
 

@@ -397,11 +397,14 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
         #expect(saved.serverKind == "llamacpp")
         #expect(saved.serverDisplayName == "llama.cpp")
         // The model requests carried the header; the sandbox requests (health,
-        // search, fetch) go through the plain `send` and never carry it.
+        // search, fetch) are signed instead and never carry it.
         let chat = services.authorizations
         #expect(!chat.isEmpty)
         #expect(chat.allSatisfy { $0.path == "/v1/chat/completions" || $0.path == "/v1/models" })
         #expect(chat.allSatisfy { $0.value == "Bearer run-key" })
+        let sandboxCalls = services.sandboxAuthorizations
+        #expect(!sandboxCalls.isEmpty)
+        #expect(sandboxCalls.allSatisfy { $0.value == nil })
         // And the key is not in the saved report.
         let json = try String(contentsOf: store.jsonURL(for: saved), encoding: .utf8)
         #expect(!json.contains("run-key"))

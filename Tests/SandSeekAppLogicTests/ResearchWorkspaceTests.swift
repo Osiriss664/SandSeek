@@ -201,9 +201,8 @@ private final class BusyRunServices: ResearchHTTPTransport, @unchecked Sendable 
         let llama = try await setup(llamaCpp: true)
         await llama.workspace.ask("Question", settings: Self.settings)
         await waitUntil { !llama.run.isRunning }
-        let sandboxCalls = llama.runServices.authorizations.filter {
-            $0.path.hasPrefix("/v1/search") || $0.path.hasPrefix("/v1/fetch") || $0.path == "/health"
-        }
+        let sandboxCalls = llama.runServices.sandboxAuthorizations
+        #expect(!sandboxCalls.isEmpty)
         #expect(sandboxCalls.allSatisfy { $0.value == nil })
         let report = try #require(llama.run.report)
         #expect(!report.markdown.contains("test-key"))
