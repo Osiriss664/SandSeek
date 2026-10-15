@@ -3,7 +3,7 @@ import SandSeekAppLogic
 import SwiftUI
 
 /// Every saved report, newest first. Opening one shows it on the Research
-/// screen.
+/// screen, or in a window of its own while a question runs.
 struct ReportsScreen: View {
     let workspace: ResearchWorkspace
     let onOpen: (SavedResearchReport) -> Void
@@ -70,7 +70,6 @@ struct ReportsScreen: View {
             }
             Spacer(minLength: 8)
             Button("Open") { onOpen(report) }
-                .disabled(workspace.run.isRunning)
             Button("Delete", role: .destructive) { reportToDelete = report }
                 .disabled(workspace.run.isRunning)
         }

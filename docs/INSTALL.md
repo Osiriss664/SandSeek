@@ -200,13 +200,18 @@ note if it could not tell.
 
 ## First run
 
-1. Open `SandSeek.app`. The window has a sidebar (Research, Reports, Settings),
-   a **Model server** card and a **Sandbox** card.
+1. Open `SandSeek.app`. The window has a sidebar (Research, Reports, Settings).
+   The Research screen has the question box on top, then a **Model server**
+   card and a **Sandbox** card. The arrow by a card's title folds it; the (i)
+   button has the longer explanations. **Start everything** does steps 2 and 3
+   for you (it starts the model server only if you chose a program for it, see
+   above), then runs the security check.
 2. On the model server card, choose TUFF or llama.cpp, check the address, and
    press **Check**. It should say **Connected** and list the models.
 3. On the sandbox card, press **Start Sandbox**. The first start builds the
    image and takes a few minutes. When it says **Ready**, the app has checked the
-   firewall and the server's privileges from outside the VM.
+   firewall and the server's privileges from outside the VM, and the card shows
+   **Signed** with the time of the last signed health check.
    **Security check** runs the longer self-test (about a minute).
 4. Pick the model, choose **Quick answer** or **Thorough**, type a question and
    press **Research** (Command-Return). Progress and answer appear side by side;

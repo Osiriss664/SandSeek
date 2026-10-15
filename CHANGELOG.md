@@ -25,6 +25,27 @@ Only SandSeek may use the sandbox.
   sign their requests; the address check reads the secret file (`--secret-file`
   to name another).
 
+A better window.
+
+- The Model server card and the Web sandbox card fold with the arrow beside
+  the title (or a click on the title row); the choice is remembered. When both
+  are ready they fold once, and a card opens again when it stops being ready.
+- **Start everything** starts the model server (only when you chose a program
+  for it, otherwise it just checks it), then the sandbox, then runs the
+  security check, and stops at the first thing that fails. It never starts a
+  second server or sandbox.
+- Less text on the cards: the longer explanations are behind an (i) button on
+  each card; warnings stay on the card. Long paths are shortened in the middle,
+  with the full path as a tooltip.
+- The question box is on top of the Research screen, the cards below it.
+- A saved report opened while a question runs opens in its own window. Before,
+  Open was off until the question finished.
+- Sources are small cards (number, page title, site, Open). New **Copy answer**
+  button copies the answer as plain text.
+- The sandbox card shows **Signed** with a checkmark and the time of its last
+  signed health check ("checked 14:05"), and says so in plain words when that
+  check fails.
+
 ## 0.1.0 (unreleased)
 
 First release. SandSeek lets a local model research the web from a sandbox

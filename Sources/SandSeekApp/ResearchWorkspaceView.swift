@@ -12,6 +12,11 @@ struct ResearchWorkspaceView: View {
     @AppStorage("ResearchModel") private var selectedModel = ""
     @AppStorage("ResearchPreset") private var presetID: ResearchPresetID = .quick
     @State private var showsProgress = true
+    // Whether the two cards show only their title row; remembered across
+    // restarts. The window also folds them on its own (see `applyFolding`).
+    @AppStorage("ServerCardFolded") private var serverFolded = false
+    @AppStorage("SandboxCardFolded") private var sandboxFolded = false
+    @State private var folding = ResearchCardFolding()
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -20,6 +25,10 @@ struct ResearchWorkspaceView: View {
                     ScreenTitle(
                         title: "Research",
                         subtitle: "Ask a question. A model on this Mac searches and reads the web through a sealed sandbox.")
+                    // The question first; the cards below it fold away when
+                    // the services are ready.
+                    questionCard
+                    startEverythingRow
                     // Side by side when the window is wide enough, otherwise stacked.
                     LazyVGrid(
                         columns: [GridItem(.adaptive(minimum: 420), spacing: 18, alignment: .top)],
@@ -28,10 +37,10 @@ struct ResearchWorkspaceView: View {
                         ConnectionCard(
                             server: workspace.server, launch: workspace.launch, locked: running,
                             questionBusy: running || workspace.isPreparingQuestion,
-                            promptBudget: workspace.presets.llamaPromptBudget)
-                        SandboxCard(workspace: workspace)
+                            promptBudget: workspace.presets.llamaPromptBudget,
+                            folded: $serverFolded)
+                        SandboxCard(workspace: workspace, folded: $sandboxFolded)
                     }
-                    questionCard
                     results(proxy: proxy)
                 }
                 .frame(maxWidth: 1_300, alignment: .leading)
@@ -52,6 +61,47 @@ struct ResearchWorkspaceView: View {
         // The model list changes on Check and on the reload button, and the
         // picked model must be one of them at once.
         .onChange(of: workspace.server.models) { pickModelIfNeeded() }
+        // Folds both cards once when both are ready, and opens a card that
+        // stops being ready (see ResearchCardFolding).
+        .onChange(of: workspace.cardReadiness, initial: true) { applyFolding() }
+    }
+
+    private func applyFolding() {
+        let current = ResearchCardFolding.Folds(server: serverFolded, sandbox: sandboxFolded)
+        let next = folding.update(workspace.cardReadiness, folds: current)
+        guard next != current else { return }
+        withAnimation(.easeOut(duration: 0.15)) {
+            serverFolded = next.server
+            sandboxFolded = next.sandbox
+        }
+    }
+
+    // MARK: - Start everything
+
+    /// One button for the whole start: the model server (when a program is
+    /// chosen), the sandbox, then the security check. Shown only while
+    /// something is not ready.
+    @ViewBuilder
+    private var startEverythingRow: some View {
+        if workspace.showsStartEverything {
+            HStack(spacing: 12) {
+                Button {
+                    Task { await workspace.startEverything() }
+                } label: {
+                    Label("Start everything", systemImage: "play.circle.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!workspace.canStartEverything)
+                .help("Starts the model server if you chose a program for it, then the sandbox, then runs the security check.")
+                if workspace.isStartingEverything {
+                    ProgressView().controlSize(.small)
+                    Text(workspace.startEverythingNote ?? "Working\u{2026}")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+            }
+        }
     }
 
     // MARK: - Question
@@ -115,7 +165,7 @@ struct ResearchWorkspaceView: View {
                 .disabled(running)
                 .help("Quick answer and Thorough use the values set under Settings.")
                 Spacer(minLength: 8)
-                if !workspace.servicesReady && !running {
+                if (!workspace.servicesReady || workspace.isStartingEverything) && !running {
                     Text(readinessHint)
                         .font(.callout)
                         .foregroundStyle(.secondary)
@@ -146,6 +196,7 @@ struct ResearchWorkspaceView: View {
 
     /// Why the Research button is off, in a few words.
     private var readinessHint: String {
+        if workspace.isStartingEverything { return workspace.startEverythingNote ?? "Starting\u{2026}" }
         if let note = workspace.sandbox.restartNote { return note }
         if workspace.server.state != .ready || workspace.server.models.isEmpty {
             return "Connect a model server first."
@@ -156,7 +207,7 @@ struct ResearchWorkspaceView: View {
     }
 
     private var canAsk: Bool {
-        workspace.servicesReady && !running
+        workspace.servicesReady && !running && !workspace.isStartingEverything
             && !selectedModel.isEmpty
             && !question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }

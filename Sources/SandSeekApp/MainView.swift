@@ -12,6 +12,7 @@ enum SidebarItem: Hashable {
 struct MainView: View {
     let workspace: ResearchWorkspace
     @State private var selection: SidebarItem? = .research
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         NavigationSplitView {
@@ -23,12 +24,23 @@ struct MainView: View {
                 ResearchWorkspaceView(workspace: workspace)
             case .reports:
                 ReportsScreen(workspace: workspace) { report in
-                    workspace.open(report)
-                    selection = .research
+                    openReport(report)
                 }
             case .settings:
                 SettingsScreen(presets: workspace.presets, server: workspace.server)
             }
+        }
+    }
+
+    /// Shows a saved report. While a question runs (or is being prepared) it
+    /// gets a window of its own, so the run stays on screen; otherwise it
+    /// opens on the Research screen.
+    private func openReport(_ report: SavedResearchReport) {
+        if workspace.reportOpensInNewWindow {
+            openWindow(value: report.id)
+        } else {
+            workspace.open(report)
+            selection = .research
         }
     }
 
@@ -47,8 +59,7 @@ struct MainView: View {
                 Section("Recent reports") {
                     ForEach(recent) { report in
                         Button {
-                            workspace.open(report)
-                            selection = .research
+                            openReport(report)
                         } label: {
                             Text(report.question)
                                 .lineLimit(2)
@@ -57,7 +68,6 @@ struct MainView: View {
                         }
                         .buttonStyle(.plain)
                         .help(report.question)
-                        .disabled(workspace.run.isRunning)
                     }
                 }
             }

@@ -50,13 +50,6 @@ struct ServerStartSection: View {
                 }
                 controls
                 status
-                if type == .tuff {
-                    Text("TUFF does not check which web page a request comes from. Quit the "
-                        + "server when you are not using it.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
             }
         }
     }
@@ -73,6 +66,9 @@ struct ServerStartSection: View {
                     + "(\(owned.path))")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .help(owned.path)
                     .textSelection(.enabled)
             }
         }
@@ -137,6 +133,7 @@ struct ServerStartSection: View {
                 .foregroundStyle(path == nil ? Color.secondary : Color.primary)
                 .lineLimit(2)
                 .truncationMode(.middle)
+                .help(path ?? placeholder)
                 .textSelection(.enabled)
             Spacer(minLength: 4)
             Button(button, action: action)

@@ -23,9 +23,13 @@ struct ConnectionCard: View {
     /// Check, so a half-typed address is not looked at.
     @State private var draft: String
     @State private var copied = false
+    /// Whether the card shows only its title row. Kept by the window, which
+    /// also folds it on its own when the server is ready.
+    @Binding var folded: Bool
 
     init(server: ResearchServerController, launch: ResearchServerLaunchController,
-         locked: Bool, questionBusy: Bool, promptBudget: Int?) {
+         locked: Bool, questionBusy: Bool, promptBudget: Int?, folded: Binding<Bool>) {
+        _folded = folded
         self.server = server
         self.launch = launch
         self.locked = locked
@@ -37,6 +41,16 @@ struct ConnectionCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
+            if !folded { details }
+        }
+        .cardStyle()
+        .onChange(of: server.addressText) { draft = server.addressText }
+    }
+
+    /// Everything under the title row; hidden while the card is folded.
+    @ViewBuilder
+    private var details: some View {
+        VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 12) {
                 Picker("Server", selection: Binding(
                     get: { server.serverType },
@@ -89,13 +103,7 @@ struct ConnectionCard: View {
             if server.serverType == .llamacpp {
                 llamaCommand
             }
-            Text(ResearchServerController.memoryNote)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
         }
-        .cardStyle()
-        .onChange(of: server.addressText) { draft = server.addressText }
     }
 
     /// The type, the address and Check stay as they are while a question runs
@@ -106,15 +114,28 @@ struct ConnectionCard: View {
     // MARK: - Parts
 
     private var header: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "desktopcomputer")
-                .font(.title3)
-                .foregroundStyle(.secondary)
-            Text("Model server").font(.headline)
-            StatusBadge(label: badge.label, color: badge.color)
-            if server.state.isBusy { ProgressView().controlSize(.small) }
-            Spacer()
+        FoldingCardHeader(
+            icon: "desktopcomputer", title: "Model server", subject: "model server",
+            badge: badge, folded: $folded,
+            summary: { EmptyView() },
+            accessory: {
+                if server.state.isBusy { ProgressView().controlSize(.small) }
+                HelpPopoverButton(label: "About the model server") { helpText }
+            })
+    }
+
+    /// The longer explanations, kept out of the card itself.
+    @ViewBuilder
+    private var helpText: some View {
+        HelpParagraph(text: ResearchServerController.memoryNote)
+        if server.serverType == .tuff {
+            HelpParagraph(text: "TUFF does not check which web page a request comes from. "
+                + "Quit the server when you are not using it.")
         }
+        if server.serverType == .llamacpp {
+            HelpParagraph(text: ResearchServerController.keyNote)
+        }
+        HelpParagraph(text: server.startHint)
     }
 
     private var badge: (label: String, color: Color) {
@@ -159,7 +180,7 @@ struct ConnectionCard: View {
             }
             hint
         case .notChecked, .checking:
-            hint
+            EmptyView()
         }
     }
 
@@ -257,10 +278,6 @@ struct ConnectionCard: View {
                     .help("The command names the key file; it holds no key.")
                 }
             }
-            Text(ResearchServerController.keyNote)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
             if let problem = server.keyProblem {
                 Text(problem)
                     .font(.caption)

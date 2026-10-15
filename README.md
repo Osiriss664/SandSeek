@@ -119,10 +119,16 @@ ad hoc. There is no Sparkle update and no notarization yet. `swift run
 SandSeekApp` also opens the window, but a bare executable has no sandbox
 files inside it (see below).
 
-The window has a sidebar (Research, Reports, Settings, the last few reports),
-a card for the model server, a card for the sandbox with a Security check, a
-question field with a model picker and a Quick answer / Thorough switch, and
-progress and answer side by side. Stop is visible while a question runs.
+The window has a sidebar (Research, Reports, Settings, the last few reports).
+The Research screen starts with the question field, a model picker and a Quick
+answer / Thorough switch. Below it are a card for the model server and a card
+for the sandbox with a Security check; click the arrow by a card's title to
+fold it. Both fold on their own once everything is ready, and a card opens
+again when it stops being ready. While something is not ready, **Start
+everything** starts the model server (if you chose a program for it), then the
+sandbox, then runs the security check. Progress and answer come below, side by
+side. Stop is visible while a question runs. A saved report opened while a
+question runs gets a window of its own.
 
 - **Model server.** Pick TUFF (127.0.0.1:8080) or llama.cpp (127.0.0.1:8081);
   Ollama and LM Studio are listed as "later". The address can be edited but

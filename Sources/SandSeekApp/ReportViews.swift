@@ -168,9 +168,13 @@ struct ResearchReportView: View {
             }
             if !report.sources.isEmpty {
                 Text("Sources").font(.headline)
-                VStack(alignment: .leading, spacing: 6) {
+                // Small cards side by side when there is room.
+                LazyVGrid(
+                    columns: [GridItem(.adaptive(minimum: 230), spacing: 10, alignment: .top)],
+                    alignment: .leading, spacing: 10
+                ) {
                     ForEach(report.sources) { source in
-                        sourceRow(source).id("research-source-\(source.number)")
+                        sourceCard(source).id("research-source-\(source.number)")
                     }
                 }
             }
@@ -194,6 +198,14 @@ struct ResearchReportView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
             HStack(spacing: 10) {
+                Button("Copy answer") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(
+                        ResearchAnswerFormatter.plainText(report.answer), forType: .string)
+                    note = "Copied."
+                }
+                .disabled(report.answer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .help("Copies the answer as plain text, without the sources.")
                 Button("Copy as Markdown") {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(report.markdown, forType: .string)
@@ -236,29 +248,41 @@ struct ResearchReportView: View {
             + "). Check the sources before you rely on it."
     }
 
-    private func sourceRow(_ source: SavedResearchReport.Source) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Text("\(source.number)")
-                .font(.callout.monospacedDigit().weight(.semibold))
-                .foregroundStyle(AppTheme.accent)
-                .frame(minWidth: 18, alignment: .trailing)
-            VStack(alignment: .leading, spacing: 2) {
+    /// One source as a small card: its number, the page's title, the site and
+    /// the button that asks before opening it. Nothing from the page is loaded.
+    private func sourceCard(_ source: SavedResearchReport.Source) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text("\(source.number)")
+                    .font(.caption.monospacedDigit().weight(.bold))
+                    .foregroundStyle(.white)
+                    .frame(minWidth: 20, minHeight: 20)
+                    .background(AppTheme.accent, in: Circle())
+                    .accessibilityLabel("Source \(source.number)")
                 Text(source.title.isEmpty ? source.host : source.title)
                     .font(.callout.weight(.medium))
+                    .lineLimit(2)
+                    .truncationMode(.tail)
+                    .help(source.title.isEmpty ? source.host : source.title)
                     .textSelection(.enabled)
-                Text(source.host)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
             }
-            Spacer(minLength: 8)
-            Button("Open…") { sourceToOpen = source }
+            Text(source.host)
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .help(ResearchText.url(source.url))
+            Button("Open\u{2026}") { sourceToOpen = source }
+                .controlSize(.small)
                 .disabled(source.webURL == nil)
         }
-        .padding(8)
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             highlighted == source.number
                 ? AppTheme.accent.opacity(0.14) : Color.secondary.opacity(0.06),
-            in: RoundedRectangle(cornerRadius: 8))
+            in: RoundedRectangle(cornerRadius: 10))
     }
 
     private func show(_ number: Int) {

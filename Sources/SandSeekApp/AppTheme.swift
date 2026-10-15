@@ -47,3 +47,107 @@ struct StatusBadge: View {
             .background(color.opacity(0.14), in: Capsule())
     }
 }
+
+/// The title row of a card that folds: an arrow, an icon, the title and a
+/// status badge, with room for a short summary after the badge. Clicking
+/// anywhere on that part of the row (the arrow, the icon, the title) folds or
+/// opens the card. `accessory` sits to the right and does not fold it (a
+/// spinner, the help button).
+struct FoldingCardHeader<Summary: View, Accessory: View>: View {
+    let icon: String
+    let title: String
+    /// What the card is about, for the screen reader: "Show model server details".
+    let subject: String
+    let badge: (label: String, color: Color)
+    @Binding var folded: Bool
+    let summary: Summary
+    let accessory: Accessory
+
+    init(icon: String, title: String, subject: String, badge: (label: String, color: Color),
+         folded: Binding<Bool>,
+         @ViewBuilder summary: () -> Summary,
+         @ViewBuilder accessory: () -> Accessory) {
+        self.icon = icon
+        self.title = title
+        self.subject = subject
+        self.badge = badge
+        _folded = folded
+        self.summary = summary()
+        self.accessory = accessory()
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Button {
+                withAnimation(.easeOut(duration: 0.15)) { folded.toggle() }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "chevron.right")
+                        .rotationEffect(.degrees(folded ? 0 : 90))
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 10)
+                    Image(systemName: icon)
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                    Text(title).font(.headline)
+                    StatusBadge(label: badge.label, color: badge.color)
+                    summary
+                    Spacer(minLength: 8)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(folded ? "Show the details" : "Hide the details")
+            .accessibilityLabel((folded ? "Show " : "Hide ") + subject + " details")
+            accessory
+        }
+    }
+}
+
+/// A small (i) button that opens a popover with the longer explanations of a
+/// card, so the card itself stays short.
+struct HelpPopoverButton<Content: View>: View {
+    /// What the button is for, e.g. "About the model server".
+    let label: String
+    let content: Content
+    @State private var shown = false
+
+    init(label: String, @ViewBuilder content: () -> Content) {
+        self.label = label
+        self.content = content()
+    }
+
+    var body: some View {
+        Button {
+            shown.toggle()
+        } label: {
+            Image(systemName: "info.circle")
+                .foregroundStyle(.secondary)
+        }
+        .buttonStyle(.plain)
+        .help(label)
+        .accessibilityLabel(label)
+        .popover(isPresented: $shown, arrowEdge: .bottom) {
+            VStack(alignment: .leading, spacing: 10) {
+                content
+            }
+            .font(.callout)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(16)
+            .frame(width: 360, alignment: .leading)
+        }
+    }
+}
+
+/// One paragraph in a help popover.
+struct HelpParagraph: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}

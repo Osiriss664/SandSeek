@@ -5,27 +5,40 @@ import SwiftUI
 /// Mac. The card starts and stops it and runs its security check.
 struct SandboxCard: View {
     let workspace: ResearchWorkspace
+    /// Whether the card shows only its title row. Kept by the window, which
+    /// also folds it on its own when the sandbox is ready.
+    @Binding var folded: Bool
 
     private var sandbox: ResearchSandboxController { workspace.sandbox }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                Image(systemName: "shippingbox.and.arrow.backward")
-                    .font(.title3)
-                    .foregroundStyle(.secondary)
-                Text("Web sandbox").font(.headline)
-                StatusBadge(label: badge.label, color: badge.color)
-                if sandbox.state.isBusy || sandbox.isRunningSelfTest {
-                    ProgressView().controlSize(.small)
-                }
-                Spacer()
+            FoldingCardHeader(
+                icon: "shippingbox.and.arrow.backward", title: "Web sandbox",
+                subject: "web sandbox", badge: badge, folded: $folded,
+                summary: { signedSummary },
+                accessory: {
+                    if sandbox.state.isBusy || sandbox.isRunningSelfTest {
+                        ProgressView().controlSize(.small)
+                    }
+                    HelpPopoverButton(label: "About the web sandbox") { helpText }
+                })
+            if !folded { details }
+        }
+        .cardStyle()
+    }
+
+    /// Everything under the title row; hidden while the card is folded.
+    @ViewBuilder
+    private var details: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if let detail {
+                Text(detail)
+                    .font(.callout)
+                    .foregroundStyle(detailColor)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            Text(detail)
-                .font(.callout)
-                .foregroundStyle(.secondary)
-                .textSelection(.enabled)
-                .fixedSize(horizontal: false, vertical: true)
             if sandbox.files?.origin == .checkout {
                 Text("Using the files in \(SandboxResources.overrideVariable), not the copy that came with the app.")
                     .font(.caption)
@@ -49,7 +62,6 @@ struct SandboxCard: View {
                 ResearchSelfTestView(result: result)
             }
         }
-        .cardStyle()
     }
 
     private var badge: (label: String, color: Color) {
@@ -70,41 +82,85 @@ struct SandboxCard: View {
         }
     }
 
-    private var detail: String {
+    /// After the badge, also on the folded row: "Signed" with a checkmark and
+    /// the time of the last signed health check, or, if that check failed,
+    /// a plain "Check failed".
+    @ViewBuilder
+    private var signedSummary: some View {
+        if sandbox.state == .ready, let checked = sandbox.lastSignedCheck {
+            Label {
+                Text("Signed").font(.caption.weight(.semibold))
+                    + Text(" \u{00B7} ").font(.caption)
+                    + Text(ResearchSandboxController.checkedLabel(for: checked)).font(.caption)
+            } icon: {
+                Image(systemName: "checkmark.seal.fill")
+            }
+            .foregroundStyle(.green)
+            .help("The sandbox answered the last health check with a signature that only it can make.")
+        } else if sandbox.lastCheckFailure != nil {
+            Label("Check failed", systemImage: "xmark.seal.fill")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.red)
+        }
+    }
+
+    /// The short line under the title row; nil when the badge says it all.
+    private var detail: String? {
+        if let failure = sandbox.lastCheckFailure, sandbox.state == .off { return failure }
         switch sandbox.state {
         case .failed(let message):
             return message
         case .preparing:
-            if let note = sandbox.restartNote { return note + "…" }
+            if let note = sandbox.restartNote { return note + "\u{2026}" }
             return "Building the sandbox image. The first time takes a few minutes."
         case .starting:
-            if let note = sandbox.restartNote { return note + "…" }
-            return "Starting a fresh Linux VM…"
+            if let note = sandbox.restartNote { return note + "\u{2026}" }
+            return "Starting a fresh Linux VM\u{2026}"
         case .stopping:
-            return "Stopping the VM…"
+            return "Stopping the VM\u{2026}"
         case .ready:
             let leftOver = sandbox.adoptedFromLastRun
                 ? " It was left running when SandSeek last closed unexpectedly; it stops when SandSeek quits." : ""
             switch sandbox.protection {
             case .verified:
-                return "Ready on 127.0.0.1:\(ResearchSandboxController.port), with no Mac folders. "
-                    + "Checked: its firewall is on and the web server runs without privileges. "
-                    + "It can reach public web addresses, and on this Mac only the DNS port when it "
-                    + "uses the Mac's DNS." + leftOver
+                return "Ready on 127.0.0.1:\(ResearchSandboxController.port), with no Mac folders."
+                    + leftOver
             case .checking, .unknown:
-                return "Checking the sandbox's firewall and privileges…" + leftOver
+                return "Checking the sandbox\u{2019}s firewall and privileges\u{2026}" + leftOver
             case .notVerified(let message):
                 return "Not verified: " + message + " Questions stay off until the check passes."
             }
         case .off:
-            return "A fresh Linux VM in Apple container fetches pages. It cannot see your files."
+            return nil
         }
+    }
+
+    private var detailColor: Color {
+        if sandbox.state == .off && sandbox.lastCheckFailure != nil { return .red }
+        return .secondary
+    }
+
+    /// The longer explanations, kept out of the card itself.
+    @ViewBuilder
+    private var helpText: some View {
+        HelpParagraph(text: "A fresh Linux VM in Apple container fetches pages. It cannot see your files.")
+        HelpParagraph(text: "When it is ready, its firewall is on and its web server runs without privileges. "
+            + "It can reach public web addresses, and on this Mac only the DNS port when it "
+            + "uses the Mac\u{2019}s DNS.")
+        HelpParagraph(text: "\u{201C}Signed\u{201D} means the sandbox answered SandSeek\u{2019}s last health check "
+            + "with a signature only it can make, so it is the SandSeek sandbox and not another program on its port.")
     }
 }
 
 struct ResearchSelfTestView: View {
     let result: ResearchSelfTestResult
-    @State private var showsChecks = true
+    /// Open when something failed; a result that passed starts folded.
+    @State private var showsChecks: Bool
+
+    init(result: ResearchSelfTestResult) {
+        self.result = result
+        _showsChecks = State(initialValue: !result.passed)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
