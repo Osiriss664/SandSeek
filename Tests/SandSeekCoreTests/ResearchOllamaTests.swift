@@ -2,14 +2,19 @@ import Foundation
 import Testing
 @testable import SandSeekCore
 
-// Ollama's native chat API. The stream fixtures in Tests/Fixtures/streams
-// (ollama-*.ndjson) are written by hand after Ollama's own types (api/types.go:
-// ChatResponse, Message, ToolCall) and routes (server/routes.go): one JSON
-// object per line, text and reasoning in `message.content` and
-// `message.thinking`, whole tool calls with an `id` and an object for
-// `arguments`, a last line with `done: true`, `done_reason` and
-// `prompt_eval_count`, and an error inside the stream as `{"error":"..."}`.
-// They are not recordings of a real server.
+// Ollama's native chat API. The fixtures in Tests/Fixtures/streams are of two
+// kinds.
+// - ollama-real-*: recorded from Ollama 0.40.4 on a Mac with the model
+//   gemma4:12b-mlx (a tool-call stream, a text stream, and the /api/show
+//   answer). They hold model output, timestamps and durations only.
+// - The other ollama-*.ndjson files are written by hand after Ollama's own
+//   types (api/types.go: ChatResponse, Message, ToolCall) and routes
+//   (server/routes.go), for what the recordings do not cover: `thinking`
+//   pieces, `done_reason` length, a cut-off stream, an error inside the stream
+//   as `{"error":"..."}`, and several tool calls in one turn.
+// Every stream is one JSON object per line, whole tool calls with an `id` and
+// an object for `arguments`, and a last line with `done: true`, `done_reason`
+// and `prompt_eval_count`.
 
 private let ollamaURL = URL(string: "http://127.0.0.1:11434")!
 
@@ -20,8 +25,8 @@ private enum OllamaFixture {
         .deletingLastPathComponent()   // Tests
         .appendingPathComponent("Fixtures/streams")
 
-    static func data(_ name: String) throws -> Data {
-        try Data(contentsOf: directory.appendingPathComponent(name + ".ndjson"))
+    static func data(_ name: String, ext: String = "ndjson") throws -> Data {
+        try Data(contentsOf: directory.appendingPathComponent(name + "." + ext))
     }
 
     static func text(_ name: String) throws -> String {
@@ -110,7 +115,7 @@ private func ollamaClient(_ transport: any ResearchHTTPTransport,
 }
 
 private let userMessage: [ResearchJSON] = [
-    .object(["role": .string("user"), "content": .string("Hallo")]),
+    .object(["role": .string("user"), "content": .string("Hello")]),
 ]
 
 private func complete(_ client: ResearchChatClient) async throws -> ResearchAssistantTurn {
@@ -150,7 +155,7 @@ struct ResearchOllamaRequestTests {
     /// whose arguments are a JSON string and reasoning in `reasoning_content`.
     private let conversation: [ResearchJSON] = [
         .object(["role": .string("system"), "content": .string("You research.")]),
-        .object(["role": .string("user"), "content": .string("Wie funktioniert eine Wärmepumpe?")]),
+        .object(["role": .string("user"), "content": .string("How does a heat pump work?")]),
         .object([
             "role": .string("assistant"),
             "tool_calls": .array([.object([
@@ -158,7 +163,7 @@ struct ResearchOllamaRequestTests {
                 "type": .string("function"),
                 "function": .object([
                     "name": .string("web_search"),
-                    "arguments": .string(#"{"query":"Wärmepumpe"}"#),
+                    "arguments": .string(#"{"query":"heat pump"}"#),
                 ]),
             ])]),
             "reasoning_content": .string("I should search first.\n"),
@@ -170,7 +175,7 @@ struct ResearchOllamaRequestTests {
         ]),
         .object([
             "role": .string("assistant"),
-            "content": .string("Eine Antwort."),
+            "content": .string("An answer."),
             "reasoning_content": .string("Done."),
         ]),
     ]
@@ -227,7 +232,7 @@ struct ResearchOllamaRequestTests {
         #expect(call["function"]?["name"] == ResearchJSON.string("web_search"))
         #expect(call["function"]?["index"] == ResearchJSON.integer(0))
         #expect(call["function"]?["arguments"]
-            == ResearchJSON.object(["query": .string("Wärmepumpe")]))
+            == ResearchJSON.object(["query": .string("heat pump")]))
         // The OpenAI-style `type` is not part of Ollama's tool call.
         #expect(call["type"] == nil)
     }
@@ -257,7 +262,7 @@ struct ResearchOllamaRequestTests {
         #expect(messages[2]["reasoning_content"] == nil)
         #expect(messages[4]["thinking"] == ResearchJSON.string("Done."))
         #expect(messages[4]["reasoning_content"] == nil)
-        #expect(messages[4]["content"] == ResearchJSON.string("Eine Antwort."))
+        #expect(messages[4]["content"] == ResearchJSON.string("An answer."))
         // System and user messages are passed on as they are.
         #expect(messages[0] == conversation[0])
         #expect(messages[1] == conversation[1])
@@ -340,10 +345,10 @@ struct ResearchOllamaRequestTests {
 struct ResearchOllamaPlainReplyTests {
     @Test func aTextReplyBecomesATurn() async throws {
         let fake = OllamaFake { _, _ in
-            ok(#"{"model":"qwen3:8b","created_at":"2026-10-15T09:30:01Z","message":{"role":"assistant","content":"Eine Antwort.","thinking":"Hmm."},"done":true,"done_reason":"stop","total_duration":1,"prompt_eval_count":321,"eval_count":9}"#)
+            ok(#"{"model":"qwen3:8b","created_at":"2026-10-15T09:30:01Z","message":{"role":"assistant","content":"An answer.","thinking":"Hmm."},"done":true,"done_reason":"stop","total_duration":1,"prompt_eval_count":321,"eval_count":9}"#)
         }
         let turn = try await complete(ollamaClient(fake, streaming: false))
-        #expect(turn.content == "Eine Antwort.")
+        #expect(turn.content == "An answer.")
         #expect(turn.reasoning == "Hmm.")
         #expect(turn.toolCalls.isEmpty)
         #expect(turn.finishReason == "stop")
@@ -413,7 +418,7 @@ struct ResearchOllamaPlainReplyTests {
 struct ResearchOllamaStreamTests {
     @Test func textAndReasoningAreJoinedExactlyAsTheyArrive() throws {
         let turn = try ResearchOllamaStreamAssembler.assemble(lines: try OllamaFixture.lines("ollama-answer"))
-        #expect(turn.content == "\n\nEine Wärmepumpe nutzt Umgebungswärme. [1]\n")
+        #expect(turn.content == "\n\nA heat pump uses ambient heat, as in Zürich. [1]\n")
         #expect(turn.reasoning == "Okay, the user wants a short answer.\n")
         #expect(turn.toolCalls.isEmpty)
         #expect(turn.finishReason == "stop")
@@ -424,7 +429,7 @@ struct ResearchOllamaStreamTests {
     @Test func theClientGivesTheSameTurnWhateverThePiecesAreCutAt() async throws {
         let bytes = try OllamaFixture.data("ollama-answer")
         let expected = try ResearchOllamaStreamAssembler.assemble(lines: try OllamaFixture.lines("ollama-answer"))
-        // Cut anywhere, also inside the two bytes of "ä".
+        // Cut anywhere, also inside the two bytes of "ü".
         for size in [1, 7, 64, bytes.count] {
             var chunks: [Data] = []
             var start = bytes.startIndex
@@ -443,7 +448,7 @@ struct ResearchOllamaStreamTests {
         let streamed = try await complete(ollamaClient(OllamaFake { _, _ in
             ResearchHTTPResponse(status: 200, body: try OllamaFixture.data("ollama-answer"))
         }))
-        let whole = #"{"model":"qwen3:8b","message":{"role":"assistant","content":"\n\nEine Wärmepumpe nutzt Umgebungswärme. [1]\n","thinking":"Okay, the user wants a short answer.\n"},"done":true,"done_reason":"stop","prompt_eval_count":1834}"#
+        let whole = #"{"model":"qwen3:8b","message":{"role":"assistant","content":"\n\nA heat pump uses ambient heat, as in Zürich. [1]\n","thinking":"Okay, the user wants a short answer.\n"},"done":true,"done_reason":"stop","prompt_eval_count":1834}"#
         let plain = try await complete(ollamaClient(OllamaFake { _, _ in ok(whole) }, streaming: false))
         #expect(streamed == plain)
     }
@@ -452,7 +457,7 @@ struct ResearchOllamaStreamTests {
         let turn = try ResearchOllamaStreamAssembler.assemble(lines: try OllamaFixture.lines("ollama-tool-call"))
         #expect(turn.toolCalls == [
             ResearchToolCall(id: "call_k3x9q2ab", name: "web_search",
-                             arguments: #"{"query":"Wärmepumpe Förderung 2026"}"#),
+                             arguments: #"{"query":"heat pump subsidy 2026"}"#),
             ResearchToolCall(id: "call_p7m1d5ze", name: "open_page",
                              arguments: #"{"max_chars":3000,"url":"https://example.org/a"}"#),
         ])
@@ -460,6 +465,45 @@ struct ResearchOllamaStreamTests {
         #expect(turn.content == nil)
         #expect(turn.reasoning == "I should search first.\n")
         #expect(turn.promptTokens == 2048)
+    }
+
+    @Test func aRecordedToolCallStreamIsAssembled() throws {
+        let lines = try OllamaFixture.lines("ollama-real-tool-call")
+        let turn = try ResearchOllamaStreamAssembler.assemble(lines: lines)
+        let expectedCall = ResearchToolCall(
+            id: "call_ewvfjjhb", name: "web_search",
+            arguments: #"{"query":"population of Berlin"}"#)
+        #expect(turn.toolCalls == [expectedCall])
+        // The recorded stream ends with done_reason "stop"; the turn holds a
+        // tool call, so the loop is told `tool_calls`.
+        #expect(turn.finishReason == "tool_calls")
+        #expect(turn.content == nil)
+        #expect(turn.reasoning == nil)
+        #expect(turn.promptTokens == 72)
+        #expect(turn.model == "gemma4:12b-mlx")
+    }
+
+    @Test func aRecordedTextStreamIsAssembledAndTheCachedCountChangesNothing() throws {
+        let lines = try OllamaFixture.lines("ollama-real-answer")
+        let turn = try ResearchOllamaStreamAssembler.assemble(lines: lines)
+        #expect(turn.content == "The capital of Germany is Berlin.")
+        #expect(turn.toolCalls.isEmpty)
+        #expect(turn.finishReason == "stop")
+        // prompt_eval_count already counts the cached tokens (2 of the 24).
+        #expect(turn.promptTokens == 24)
+        #expect(turn.model == "gemma4:12b-mlx")
+    }
+
+    @Test func theRecordedStreamsGiveTheSameTurnThroughTheClient() async throws {
+        for name in ["ollama-real-tool-call", "ollama-real-answer"] {
+            let expected = try ResearchOllamaStreamAssembler.assemble(
+                lines: try OllamaFixture.lines(name))
+            let fake = OllamaFake { _, _ in
+                ResearchHTTPResponse(status: 200, body: try OllamaFixture.data(name))
+            }
+            let turn = try await complete(ollamaClient(fake))
+            #expect(turn == expected, "\(name)")
+        }
     }
 
     @Test func callsWithoutAnIdAreNumberedFromTheGivenNumber() throws {
@@ -687,6 +731,20 @@ struct ResearchOllamaDetectionTests {
         #expect(connection.withContextTokens(nil).progressLine == "server: Ollama 0.40.2, streaming")
     }
 
+    @Test func theProgressLineSaysWhetherThinkingIsOnOrOff() {
+        let connection = ResearchServerConnection(kind: .ollama, version: "0.40.4", streaming: true)
+            .withContextTokens(32_768)
+        let off = connection.progressLine(enableThinking: false)
+        let on = connection.progressLine(enableThinking: true)
+        let none = connection.progressLine(enableThinking: nil)
+        #expect(off == "server: Ollama 0.40.4, streaming, context 32768 tokens, thinking off")
+        #expect(on == "server: Ollama 0.40.4, streaming, context 32768 tokens, thinking on")
+        #expect(none == connection.progressLine)
+        // Not for the other servers, where an unset switch is the model's own.
+        let tuff = ResearchServerConnection(kind: .tuff, version: "8.3.1", streaming: true)
+        #expect(tuff.progressLine(enableThinking: false) == tuff.progressLine)
+    }
+
     @Test func autoFindsOllamaWhenTUFFsStatusRouteIsNotThere() async throws {
         let fake = OllamaFake.version("0.40.2")
         let connection = try await ResearchServerConnection.establish(
@@ -828,6 +886,25 @@ struct ResearchOllamaModelTests {
             #"{"remote_host":"https://ollama.com:443","capabilities":["completion"]}"#.utf8)))
         #expect(cloud.isCloud)
         #expect(!cloud.canCallTools)
+    }
+
+    @Test func aRecordedShowAnswerOfAnMLXModelIsRead() async throws {
+        let data = try OllamaFixture.data("ollama-real-api-show-gemma4-12b-mlx", ext: "json")
+        let info = ResearchOllama.modelInfo(fromShow: try ResearchJSON.decode(data))
+        let expectedCapabilities = ["completion", "vision", "audio", "tools", "thinking"]
+        #expect(info.capabilities == expectedCapabilities)
+        #expect(info.canCallTools)
+        #expect(!info.isCloud)
+        // general.architecture names the key; the top-level `thinking` object
+        // of the answer is not read.
+        #expect(info.trainedContextTokens == 262_144)
+        #expect(ResearchOllama.contextTokens(requested: nil, trained: info.trainedContextTokens) == 32_768)
+        let text = String(decoding: data, as: UTF8.self)
+        let prepared = try await ResearchOllama.prepare(
+            base, model: "gemma4:12b-mlx", requestedContextTokens: nil, serverURL: ollamaURL,
+            transport: show(text))
+        #expect(prepared.contextTokens == 32_768)
+        #expect(prepared.thinkingSupported == true)
     }
 
     @Test func prepareChoosesTheContextFromTheModelsMaximum() async throws {

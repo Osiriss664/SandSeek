@@ -79,7 +79,14 @@ public struct ResearchServerConnection: Equatable, Sendable {
     }
 
     /// The one progress line a run prints before it starts.
-    public var progressLine: String {
+    public var progressLine: String { progressLine(enableThinking: nil) }
+
+    /// The same line for a run whose request carries `think` as
+    /// `enableThinking` (see `ResearchOllama.thinking`): for Ollama it ends
+    /// with `thinking on` or `thinking off`, because an unset switch means
+    /// off there, unlike TUFF, where it means the model's own choice. Nil
+    /// (no `think` is sent) adds nothing.
+    public func progressLine(enableThinking: Bool?) -> String {
         var line = "server: " + kind.displayName
         if let version, !version.isEmpty { line += " " + version }
         switch kind {
@@ -90,6 +97,7 @@ public struct ResearchServerConnection: Equatable, Sendable {
         case .ollama:
             line += streaming ? ", streaming" : ", no streaming"
             if let contextTokens { line += ", context \(contextTokens) tokens" }
+            if let enableThinking { line += enableThinking ? ", thinking on" : ", thinking off" }
         }
         return line
     }

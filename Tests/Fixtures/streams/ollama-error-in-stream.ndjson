@@ -1,2 +1,2 @@
-{"model":"qwen3:8b","created_at":"2026-10-15T09:32:20.101000Z","message":{"role":"assistant","content":"Die Antwort beginnt "},"done":false}
+{"model":"qwen3:8b","created_at":"2026-10-15T09:32:20.101000Z","message":{"role":"assistant","content":"The answer begins "},"done":false}
 {"error":"model runner has unexpectedly stopped, this may be due to resource limitations or an internal error"}

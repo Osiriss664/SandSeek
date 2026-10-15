@@ -123,10 +123,10 @@ do {
     exit(2)
 }
 if let warning = connection.warning { writeProgress("warning: \(warning)") }
-if !quiet { writeProgress(connection.progressLine) }
 // Ollama: `think` follows what the model can do (see `ResearchOllama.thinking`).
 let enableThinking = ResearchOllama.thinking(
     requested: arguments.enableThinking, connection: connection)
+if !quiet { writeProgress(connection.progressLine(enableThinking: enableThinking)) }
 if !quiet, let note = ResearchOllama.thinkingNote(
     requested: arguments.enableThinking, model: arguments.model, connection: connection) {
     writeProgress(note)
