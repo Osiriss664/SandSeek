@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import os
 import SandSeekCore
 
 /// Everything the Research screen works with: the model server connection,
@@ -126,17 +127,21 @@ public final class ResearchWorkspace {
         !servicesReady || isStartingEverything
     }
 
-    /// Whether "Start everything" can be clicked.
+    /// Whether "Start everything" can be clicked. Not while "Stop everything"
+    /// runs.
     public var canStartEverything: Bool {
         !run.isRunning && !isPreparingQuestion && !isStartingEverything
+            && !isStoppingEverything
     }
 
     /// Whether "Stop everything" can be clicked: there is a sandbox that is not
-    /// off, or a model server that SandSeek started, and neither a start nor
-    /// a stop is under way. A server started by hand does not count.
+    /// off, or a model server that SandSeek started, and no start or stop is
+    /// under way. A sandbox that is starting, preparing or stopping cannot be
+    /// stopped (`stop` returns at once then), and neither can anything while a
+    /// question is being prepared. A server started by hand does not count.
     public var canStopEverything: Bool {
-        guard !isStartingEverything, !isStoppingEverything else { return false }
-        guard sandbox.state != .stopping, launch.state != .stopping else { return false }
+        guard !isStartingEverything, !isStoppingEverything, !isPreparingQuestion else { return false }
+        guard !sandbox.state.isBusy, launch.state != .stopping else { return false }
         return sandbox.state != .off || launch.owned != nil
     }
 
@@ -187,7 +192,7 @@ public final class ResearchWorkspace {
     /// last check is not used on the old result.
     public func ask(_ question: String, settings: ResearchRunSettings) async {
         guard servicesReady, !run.isRunning, !isPreparingQuestion,
-              !isStartingEverything else { return }
+              !isStartingEverything, !isStoppingEverything else { return }
         isPreparingQuestion = true
         defer { isPreparingQuestion = false }
         if sandbox.startedByApp && sandboxUsed {
@@ -230,9 +235,11 @@ public final class ResearchWorkspace {
         guard canStartEverything else { return }
         isStartingEverything = true
         startEverythingStopNote = nil
+        ServiceLog.logger.notice("Start everything begins")
         defer {
             isStartingEverything = false
             startEverythingNote = nil
+            ServiceLog.logger.notice("Start everything ends")
         }
 
         // 1. The model server. A start, stop or Check under way (from the
@@ -348,23 +355,38 @@ public final class ResearchWorkspace {
         if run.report?.id == report.id { run.reset() }
     }
 
-    /// Stops the question and the sandbox this app started.
+    /// Stops the question that is running, and the sandbox. Any sandbox: one
+    /// started by hand is stopped too, because `ResearchSandboxController.stop`
+    /// does not look at who started it.
     public func stopSandbox() async {
+        ServiceLog.logger.notice(
+            "Stopping the question and the sandbox (question running: \(self.run.isRunning, privacy: .public))")
         run.stop()
         await sandbox.stop()
     }
 
-    /// Stops the question in progress, the sandbox, and the model server, but
-    /// the server only if SandSeek started it; one started by hand keeps
-    /// running. Does nothing while `startEverything` runs or a stop is under
-    /// way.
+    /// Stops the question in progress, the sandbox (any sandbox, also one
+    /// started by hand), and the model server, but the server only if SandSeek
+    /// started it; one started by hand keeps running. The server and the
+    /// sandbox are stopped together, so the slower one does not wait for the
+    /// other. Does nothing while `startEverything` runs, a stop is under way,
+    /// or the sandbox is busy.
     public func stopEverything() async {
         guard canStopEverything else { return }
         isStoppingEverything = true
-        defer { isStoppingEverything = false }
-        await stopSandbox()
-        if launch.owned != nil {
-            await launch.stop(using: server)
+        let stopsServer = launch.owned != nil
+        ServiceLog.logger.notice(
+            "Stop everything begins (SandSeek started the server: \(stopsServer, privacy: .public))")
+        defer {
+            isStoppingEverything = false
+            ServiceLog.logger.notice("Stop everything ends")
+        }
+        if stopsServer {
+            async let serverStop: Void = launch.stop(using: server)
+            async let sandboxStop: Void = stopSandbox()
+            _ = await (serverStop, sandboxStop)
+        } else {
+            await stopSandbox()
         }
     }
 

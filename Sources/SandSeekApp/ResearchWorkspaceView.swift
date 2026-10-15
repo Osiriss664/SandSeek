@@ -36,6 +36,7 @@ struct ResearchWorkspaceView: View {
                         ConnectionCard(
                             server: workspace.server, launch: workspace.launch, locked: running,
                             questionBusy: running || workspace.isPreparingQuestion,
+                            stoppingEverything: workspace.isStoppingEverything,
                             promptBudget: workspace.presets.llamaPromptBudget,
                             folded: $serverFolded)
                         SandboxCard(workspace: workspace, folded: $sandboxFolded)
@@ -95,8 +96,8 @@ struct ResearchWorkspaceView: View {
                 .buttonStyle(.borderedProminent)
                 .disabled(!workspace.canStartEverything)
                 .help("Starts the model server if you chose a program for it, then the sandbox, then runs the security check.")
-                if workspace.canStopEverything {
-                    stopEverythingButton
+                if workspace.canStopEverything || workspace.isStoppingEverything {
+                    stopEverythingControls
                 }
                 if workspace.isStartingEverything {
                     ProgressView().controlSize(.small)
@@ -112,11 +113,24 @@ struct ResearchWorkspaceView: View {
                 }
                 Spacer(minLength: 0)
             }
-        } else if workspace.canStopEverything {
+        } else if workspace.canStopEverything || workspace.isStoppingEverything {
             HStack(spacing: 12) {
-                stopEverythingButton
+                stopEverythingControls
                 Spacer(minLength: 0)
             }
+        }
+    }
+
+    /// The Stop everything button, and while it works a small spinner with
+    /// "Stopping\u{2026}" beside it.
+    @ViewBuilder
+    private var stopEverythingControls: some View {
+        stopEverythingButton
+        if workspace.isStoppingEverything {
+            ProgressView().controlSize(.small)
+            Text("Stopping\u{2026}")
+                .font(.callout)
+                .foregroundStyle(.secondary)
         }
     }
 

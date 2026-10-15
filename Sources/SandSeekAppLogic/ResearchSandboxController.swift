@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import Observation
+import os
 import SandSeekCore
 
 /// The few string settings the controllers remember (the sandbox image's
@@ -515,6 +516,10 @@ public final class ResearchSandboxController {
     /// since the last build, then starts a fresh VM.
     public func start() async {
         guard !state.isBusy, state != .ready else { return }
+        ServiceLog.logger.notice("Sandbox start requested")
+        defer {
+            ServiceLog.logger.notice("Sandbox start ended: \(self.state.logName, privacy: .public)")
+        }
         guard let files = prepareFiles(reportFailure: true) else { return }
         let script = files.script
         selfTest = nil
@@ -598,7 +603,15 @@ public final class ResearchSandboxController {
     }
 
     public func stop() async {
-        guard !state.isBusy else { return }
+        guard !state.isBusy else {
+            ServiceLog.logger.notice(
+                "Sandbox stop ignored, it is \(self.state.logName, privacy: .public)")
+            return
+        }
+        ServiceLog.logger.notice("Sandbox stop requested")
+        defer {
+            ServiceLog.logger.notice("Sandbox stop ended: \(self.state.logName, privacy: .public)")
+        }
         guard let script = prepareFiles(reportFailure: false)?.script else {
             state = .off
             return

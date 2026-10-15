@@ -71,6 +71,7 @@ private final class GatedRunner: ResearchProcessRunning, @unchecked Sendable {
     let inner: FakeProcessRunner
     let holdStart = LockedFlag()
     let holdFirewallLook = LockedFlag()
+    let holdStop = LockedFlag()
 
     init(_ inner: FakeProcessRunner) { self.inner = inner }
 
@@ -78,6 +79,9 @@ private final class GatedRunner: ResearchProcessRunning, @unchecked Sendable {
              timeout: TimeInterval) async throws -> ResearchProcessResult {
         if arguments.last == "start" {
             while holdStart.value { try await Task.sleep(for: .milliseconds(10)) }
+        }
+        if arguments.last == "stop" {
+            while holdStop.value { try await Task.sleep(for: .milliseconds(10)) }
         }
         if arguments.contains("nft") {
             while holdFirewallLook.value { try await Task.sleep(for: .milliseconds(10)) }
@@ -213,6 +217,34 @@ private final class FakeClock: @unchecked Sendable {
         #expect(rig.launch.owned == nil)
         #expect(rig.launcher.servers.isEmpty)
         #expect(rig.server.state == .ready)
+    }
+
+    @Test func startIsRefusedWhileStoppingEverything() async throws {
+        let rig = try await Rig.make(serverUp: true)
+        await rig.workspace.startEverything()
+        rig.gate.holdStop.value = true
+        let stopping = Task { await rig.workspace.stopEverything() }
+        await waitUntil { rig.workspace.isStoppingEverything }
+        #expect(rig.workspace.isStoppingEverything)
+        #expect(!rig.workspace.canStartEverything)
+        #expect(!rig.workspace.canStopEverything)
+
+        rig.gate.holdStop.value = false
+        await stopping.value
+        #expect(!rig.workspace.isStoppingEverything)
+        #expect(rig.sandbox.state == .off)
+    }
+
+    @Test func cannotStopWhileTheSandboxIsBusy() async throws {
+        let rig = try await Rig.make(serverUp: true, sandboxUp: true)
+        await rig.sandbox.refresh()
+        #expect(rig.workspace.canStopEverything)
+        rig.gate.holdStop.value = true
+        let stopping = Task { await rig.sandbox.stop() }
+        await waitUntil { rig.sandbox.state.isBusy }
+        #expect(!rig.workspace.canStopEverything)
+        rig.gate.holdStop.value = false
+        await stopping.value
     }
 
     @Test func cannotStopWhenNothingRuns() async throws {

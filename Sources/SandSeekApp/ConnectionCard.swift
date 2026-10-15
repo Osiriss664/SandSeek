@@ -16,6 +16,8 @@ struct ConnectionCard: View {
     /// True while a question runs or is being prepared, which also keeps Start
     /// server and Stop server as they are.
     let questionBusy: Bool
+    /// True while "Stop everything" runs: Start server and Stop server wait.
+    let stoppingEverything: Bool
     /// The prompt budget set in Settings for a llama.cpp server that does not
     /// say how large its context is.
     let promptBudget: Int?
@@ -28,12 +30,14 @@ struct ConnectionCard: View {
     @Binding var folded: Bool
 
     init(server: ResearchServerController, launch: ResearchServerLaunchController,
-         locked: Bool, questionBusy: Bool, promptBudget: Int?, folded: Binding<Bool>) {
+         locked: Bool, questionBusy: Bool, stoppingEverything: Bool, promptBudget: Int?,
+         folded: Binding<Bool>) {
         _folded = folded
         self.server = server
         self.launch = launch
         self.locked = locked
         self.questionBusy = questionBusy
+        self.stoppingEverything = stoppingEverything
         self.promptBudget = promptBudget
         _draft = State(initialValue: server.addressText)
     }
@@ -101,7 +105,9 @@ struct ConnectionCard: View {
             }
             detail
             exposureNotice
-            ServerStartSection(server: server, launch: launch, questionBusy: questionBusy)
+            ServerStartSection(
+                server: server, launch: launch, questionBusy: questionBusy,
+                stoppingEverything: stoppingEverything)
             if server.serverType == .llamacpp {
                 llamaCommand
             }

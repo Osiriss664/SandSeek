@@ -36,8 +36,13 @@ A better window.
   saying where to look. It waits for a start or check that is already under
   way, never starts a second server or sandbox, and does not start a server
   you just stopped.
-- **Stop everything** stops the question, the sandbox, and the model server
-  if SandSeek started it. A server you started yourself keeps running.
+- **Stop everything** stops the question, the sandbox (also one you started
+  yourself), and the model server if SandSeek started it. A server you started
+  yourself keeps running. The server and the sandbox are stopped together, and
+  the start and stop buttons wait while it works. SandSeek writes when it
+  starts and stops things to the system log (subsystem
+  `io.github.osiriss664.sandseek`), without secrets, to help find out why
+  something ended.
 - Less text on the cards: the longer explanations and notes are behind an (i)
   button on each card. The one security warning about TUFF (it does not check
   which web page a request comes from) stays on the card as a short line while

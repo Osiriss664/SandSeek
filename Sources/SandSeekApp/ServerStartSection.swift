@@ -13,6 +13,8 @@ struct ServerStartSection: View {
     /// True while a question runs or is being prepared: the server stays as it
     /// is, so the question does not lose it.
     let questionBusy: Bool
+    /// True while "Stop everything" runs: Start server and Stop server wait.
+    let stoppingEverything: Bool
 
     private var type: ResearchServerType { server.serverType }
     private var blocker: String? { launch.startBlocker(for: server) }
@@ -57,11 +59,11 @@ struct ServerStartSection: View {
     private var controls: some View {
         HStack(spacing: 10) {
             Button("Start server") { Task { await launch.start(using: server) } }
-                .disabled(questionBusy || launch.state.isBusy || blocker != nil)
+                .disabled(questionBusy || stoppingEverything || launch.state.isBusy || blocker != nil)
                 .help("Starts the program above on 127.0.0.1. SandSeek stops it again when you quit.")
             if let owned = launch.owned {
                 Button("Stop server") { Task { await launch.stop(using: server) } }
-                    .disabled(questionBusy || launch.state == .stopping)
+                    .disabled(questionBusy || stoppingEverything || launch.state == .stopping)
                 Text("SandSeek started \(owned.type.displayName) on 127.0.0.1:\(owned.port) "
                     + "(\(owned.path))")
                     .font(.caption)

@@ -50,13 +50,15 @@ struct SandboxCard: View {
                 if sandbox.state == .off {
                     Button("Start Sandbox") { Task { await sandbox.start() } }
                         .buttonStyle(.borderedProminent)
+                        .disabled(workspace.isStoppingEverything)
                 } else {
                     Button("Stop Sandbox") { Task { await workspace.stopSandbox() } }
-                        .disabled(sandbox.state.isBusy)
-                        .help("Stops the question that is running, and the sandbox if SandSeek started it.")
+                        .disabled(sandbox.state.isBusy || workspace.isStoppingEverything)
+                        .help("Stops the question that is running, and the sandbox.")
                 }
                 Button("Security check") { Task { await sandbox.runSelfTest() } }
-                    .disabled(sandbox.state != .ready || sandbox.isRunningSelfTest)
+                    .disabled(sandbox.state != .ready || sandbox.isRunningSelfTest
+                              || workspace.isStoppingEverything)
                     .help("Checks from outside the VM that the sandbox cannot reach this Mac or your local network, and can still reach the web.")
             }
             if let result = sandbox.selfTest {
