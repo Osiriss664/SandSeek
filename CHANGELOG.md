@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 (unreleased)
+## 0.2.0 (15 October 2026)
 
 The sandbox image must be rebuilt: the app does it by itself on the first Start;
 from the command line, run `Scripts/research_sandbox.sh build`.

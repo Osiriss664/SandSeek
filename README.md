@@ -12,11 +12,12 @@ exactly two tools, `web_search` and `open_page`: no shell, no file access, no
 network tool. `open_page` reads web pages and text PDFs (up to 5 MB and 50
 pages, no OCR), parsed inside the VM.
 
-Status: 0.1.0, the first release. SandSeek began in a fork of TUFF. The command-line tool,
+Status: 0.2.0. SandSeek began in a fork of TUFF. The command-line tool,
 the core library and the Mac app (a window with the same research loop) are one
 Swift package. Built, tested and tried by hand on a Mac with macOS 27, TUFF
-8.3.1 and Qwen3.6 35B (11 October 2026); Start server was tried with TUFF 8.3.11
-and llama.cpp.
+9.3.0 and Qwen3.6 35B (15 October 2026), including the safety test
+([docs/SAFETY_TEST.md](docs/SAFETY_TEST.md)); Start server was tried with TUFF
+8.3.11 and llama.cpp for 0.1.0.
 
 ![The SandSeek window: the question box with model and mode, Stop everything, the folded Model server and Web sandbox cards showing Connected, Ready and Signed, then an answer with its folded Figure check and Pages that could not be read lists, the sources and the searches](docs/assets/sandseek-app.png)
 
@@ -38,17 +39,17 @@ addresses go to the internet. More in [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.m
 ## Quick start
 
 1. Install [Apple `container`](https://github.com/apple/container) and a local
-   model server. SandSeek 0.1.0 works with two:
+   model server. SandSeek 0.2.0 works with two:
    - **TUFF** 8.3.1 or newer (tested with Qwen3.6 35B).
-   - **llama.cpp** (`llama-server`), experimental in 0.1.0.
+   - **llama.cpp** (`llama-server`), experimental in 0.2.0.
 
    Ollama and LM Studio are planned; other servers are not supported yet.
 2. Get the app, in one of two ways:
-   - **Download:** `SandSeek-0.1.0.zip` from the release page, unzip it and
+   - **Download:** `SandSeek-0.2.0.zip` from the release page, unzip it and
      move SandSeek to Applications. It is not notarized: on first launch
      choose System Settings → Privacy & Security → Open Anyway.
    - **Build it yourself:** with Xcode 26 or its command line tools (Swift
-     6.2 or newer; 0.1.0 was built on macOS 27):
+     6.2 or newer; 0.2.0 was built on macOS 27):
 
          git clone https://github.com/Osiriss664/SandSeek.git
          cd SandSeek
@@ -98,7 +99,7 @@ above all test reports.
 - A local model server on 127.0.0.1: TUFF 8.3.1 or newer, or llama.cpp
   (experimental, see below). Streaming is on by
   default for TUFF, so that Stop and the time limits make it stop generating.
-  llama.cpp (`llama-server`) is experimental in 0.1.0: it works through
+  llama.cpp (`llama-server`) is experimental in 0.2.0: it works through
   `--server-type llamacpp` with plain requests (no streaming), the app's
   Thinking switch has no effect on it yet, and it was probed but not measured
   with a research run. The app connects to a
