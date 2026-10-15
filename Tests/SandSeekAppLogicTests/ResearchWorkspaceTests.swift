@@ -134,9 +134,13 @@ private final class BusyRunServices: ResearchHTTPTransport, @unchecked Sendable 
             defaults: MemorySettings(), keyStore: MemoryKeyStore(key: "test-key"),
             transport: services, tuffStreaming: false)
         let reports = ResearchReportStore(directory: temporaryDirectory())
+        // The quit path runs the tool itself, not through the fake runner. A
+        // path with no tool keeps this test away from a real `container` on
+        // the Mac, whose empty list would end the first quit's ownership.
+        let noTool = marks.appendingPathComponent("no-container").path
         let sandbox = ResearchSandboxController(
-            runner: FakeProcessRunner(), containerTool: .trustedForTests(), transport: FakeResearchServices(),
-            defaults: MemorySettings(), environment: [:],
+            runner: FakeProcessRunner(), containerTool: .trustedForTests(path: noTool),
+            transport: FakeResearchServices(), defaults: MemorySettings(), environment: [:],
             resources: try testResources(bundle: bundle), stateDirectory: temporaryDirectory(), secretFile: TestSandboxSecret.file)
         await sandbox.start()
         let workspace = ResearchWorkspace(

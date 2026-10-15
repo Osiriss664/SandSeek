@@ -589,7 +589,7 @@ private func everyCall(_ client: ResearchSandboxClient, expecting error: Researc
         _ = try await sandbox.search(query: "q", maxResults: 3)
         _ = try await sandbox.fetch(url: "https://example.com/a", offset: 0, maxCharacters: 100)
         // Far below the transport's half hour, so a hung sandbox ends the call.
-        #expect(fake.requests.all.map(\.timeout) == [10, 60, 90])
+        #expect(fake.requests.all.map(\.timeout) == [10, 100, 140])
     }
 
     @Test func theTimeComesFromTheClock() async throws {

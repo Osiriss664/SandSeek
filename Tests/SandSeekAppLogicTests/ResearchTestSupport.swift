@@ -549,9 +549,10 @@ extension ResearchContainerTool {
     /// A tool that passes `verify()` without looking at this Mac: the file
     /// counts as root's, and the commands it runs (`codesign`, `--version`)
     /// are answered by `runner` (a fake that says "Apple, 1.5.0" by default).
-    static func trustedForTests(runner: (any ResearchProcessRunning)? = nil) -> ResearchContainerTool {
+    static func trustedForTests(runner: (any ResearchProcessRunning)? = nil,
+                                path: String = ResearchContainerTool.installedPath) -> ResearchContainerTool {
         ResearchContainerTool(
-            runner: runner ?? FakeProcessRunner(), environment: [:],
+            runner: runner ?? FakeProcessRunner(), path: path, environment: [:],
             untrustedPath: { _ in nil }, fileExists: { _ in true }, identity: { _ in "test" })
     }
 }
