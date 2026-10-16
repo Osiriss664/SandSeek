@@ -12,14 +12,14 @@ tool. The model has exactly two tools, `web_search` and `open_page`: no shell,
 no file access, no network tool. `open_page` reads web pages and text PDFs (up
 to 5 MB and 50 pages, no OCR), parsed inside the VM.
 
-Status: 0.4.0. SandSeek began in a fork of TUFF. The command-line tool,
+Status: 0.4.1. SandSeek began in a fork of TUFF. The command-line tool,
 the core library and the Mac app (a window with the same research loop) are one
 Swift package. 0.2.0 was built, tested and tried by hand on a Mac with macOS
 27, TUFF 9.3.0 and Qwen3.6 35B (15 October 2026), including the safety test
 ([docs/SAFETY_TEST.md](docs/SAFETY_TEST.md)); Start server was tried with TUFF
 8.3.11 and llama.cpp for 0.1.0. 0.3.0 added experimental Ollama support,
 tested on a Mac with Ollama 0.40.4 and Gemma 4 12B from the command line
-(October 2026). 0.4.0 lets the app start and stop Ollama and list the models
+(October 2026). 0.4.1 lets the app start and stop Ollama and list the models
 already on this Mac, and adds a Tips page and a Light/Dark choice; all of
 these were tried by hand on a Mac.
 
@@ -51,11 +51,11 @@ addresses go to the internet. More in [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.m
 
    LM Studio is planned; other servers are not supported yet.
 2. Get the app, in one of two ways:
-   - **Download:** `SandSeek-0.4.0.zip` from the release page, unzip it and
+   - **Download:** `SandSeek-0.4.1.zip` from the release page, unzip it and
      move SandSeek to Applications. It is not notarized: on first launch
      choose System Settings → Privacy & Security → Open Anyway.
    - **Build it yourself:** with Xcode 26 or its command line tools (Swift
-     6.2 or newer; 0.4.0 was built on macOS 27):
+     6.2 or newer; 0.4.1 was built on macOS 27):
 
          git clone https://github.com/Osiriss664/SandSeek.git
          cd SandSeek
@@ -106,7 +106,7 @@ above all test reports.
 - A local model server on 127.0.0.1: TUFF 8.3.1 or newer, or llama.cpp or
   Ollama (both experimental, see below). Streaming is on by
   default for TUFF, so that Stop and the time limits make it stop generating.
-  llama.cpp (`llama-server`) is experimental in 0.4.0: it works through
+  llama.cpp (`llama-server`) is experimental in 0.4.1: it works through
   `--server-type llamacpp` with plain requests (no streaming), the app's
   Thinking switch has no effect on it yet, and it was probed but not measured
   with a research run. The app connects to a
