@@ -2,7 +2,7 @@
 
 ## 0.4.0 (16 October 2026)
 
-New: the app starts and stops Ollama, a Tips page and a Light/Dark choice.
+New: the app starts and stops Ollama, lists the models already on this Mac, and has a Tips page and a Light/Dark choice.
 The sandbox image changes (three small package updates), so the first Start
 after updating rebuilds it, which takes a few minutes.
 
