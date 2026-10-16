@@ -70,8 +70,8 @@ struct ServerStartSection: View {
                 status
             }
             // Looks when the card appears, and again when another server type,
-            // program (TUFF: the clone's `scratch`) or llama.cpp model (its
-            // folder) is chosen.
+            // program (TUFF: the clone's `scratch`) or llama.cpp model (listed
+            // in the menu) is chosen.
             .task(id: foundKey) {
                 await launch.refreshFound(for: type)
             }

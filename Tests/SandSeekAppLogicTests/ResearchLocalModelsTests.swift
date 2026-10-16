@@ -120,9 +120,6 @@ import Testing
         #expect(roots.contains("/Users/test/Library/Caches/llama.cpp"))
         #expect(roots.contains("/Users/test/.cache/huggingface/hub"))
         #expect(roots.count == 5)
-        #expect(ResearchLocalModels.chosenModelFolder("/Volumes/Big/models/x.gguf") == "/Volumes/Big/models")
-        #expect(ResearchLocalModels.chosenModelFolder(nil) == nil)
-        #expect(ResearchLocalModels.chosenModelFolder("") == nil)
     }
 
     @Test func hiddenFilesAndAppleDoubleFilesAreLeftOut() throws {
@@ -158,16 +155,31 @@ import Testing
         #expect(ResearchLocalModels.findGGUF(roots: [root.path]).isEmpty)
     }
 
-    @Test func aFlatFolderIsSearchedWithoutItsSubfolders() throws {
+    @Test func theChosenFileIsListedOnceEvenWhenACacheHoldsIt() throws {
         let root = try makeRoot()
-        try write("Chosen.gguf", in: root)
-        try write("Sibling.gguf", in: root)
-        try write("sub/Below.gguf", in: root)
-        #expect(names(ResearchLocalModels.findGGUF(roots: [], flatFolders: [root.path]))
-            == ["Chosen", "Sibling"])
+        let chosen = try write("Chosen.gguf", in: root)
+        try FileManager.default.createSymbolicLink(
+            atPath: root.appendingPathComponent("Chosen-link.gguf").path, withDestinationPath: chosen.path)
+        try write("Other.gguf", in: root)
+        let found = ResearchLocalModels.findGGUF(roots: [root.path], chosenModel: chosen.path)
+        #expect(names(found) == ["Chosen", "Other"])
+        #expect(found.first?.path == chosen.path)
     }
 
-    @MainActor @Test func refreshFoundListsTheCachesAndTheChosenModelsFolder() async throws {
+    @Test func aChosenModelThatIsGoneRefusedOrNotAFileIsLeftOut() throws {
+        let root = try makeRoot()
+        let folder = root.appendingPathComponent("Folder.gguf", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        #expect(ResearchLocalModels.findGGUF(roots: [], chosenModel: folder.path).isEmpty)
+        #expect(ResearchLocalModels.findGGUF(
+            roots: [], chosenModel: root.appendingPathComponent("Gone.gguf").path).isEmpty)
+        #expect(ResearchLocalModels.findGGUF(roots: [], chosenModel: "relative/Model.gguf").isEmpty)
+        let text = try write("notes.txt", in: root)
+        #expect(ResearchLocalModels.findGGUF(roots: [], chosenModel: text.path).isEmpty)
+        #expect(ResearchLocalModels.findGGUF(roots: [], chosenModel: nil).isEmpty)
+    }
+
+    @MainActor @Test func refreshFoundListsTheCachesAndTheChosenFileButNotItsFolder() async throws {
         let home = try makeRoot()
         try write(".cache/llama.cpp/org_repo_Cached-Q4.gguf", in: home)
         let elsewhere = try makeRoot()
@@ -177,9 +189,43 @@ import Testing
         let launch = testLaunchController()
         launch.chooseModel(chosen.path, for: .llamacpp)
         await launch.refreshFound(for: .llamacpp, home: home.path)
-        #expect(names(launch.foundGGUF) == ["Chosen", "org_repo_Cached-Q4", "Sibling"])
+        #expect(names(launch.foundGGUF) == ["Chosen", "org_repo_Cached-Q4"])
         #expect(!launch.isLookingForModels)
     }
+
+    @MainActor @Test func refreshFoundListsTheChosenFileInACacheOnce() async throws {
+        let home = try makeRoot()
+        let chosen = try write(".cache/llama.cpp/Cached-Q4.gguf", in: home)
+        let launch = testLaunchController()
+        launch.chooseModel(chosen.path, for: .llamacpp)
+        await launch.refreshFound(for: .llamacpp, home: home.path)
+        #expect(launch.foundGGUF.map(\.path) == [chosen.path])
+    }
+
+    @MainActor @Test func aSavedModelPathThatTheCheckRefusesIsNotListed() async throws {
+        let home = try makeRoot()
+        let settings = MemorySettings()
+        settings.save("relative/Model.gguf", forKey: ResearchServerLaunchController.modelKey(.llamacpp))
+        let launch = testLaunchController(settings: settings)
+        await launch.refreshFound(for: .llamacpp, home: home.path)
+        #expect(launch.foundGGUF.isEmpty)
+        #expect(!launch.isLookingForModels)
+    }
+
+    #if canImport(Darwin)
+    @Test func aDatalessFileIsRecognisedByItsFlag() {
+        var info = stat()
+        #expect(!ResearchLocalModels.isDataless(info))
+        info.st_flags = 0x4000_0000
+        #expect(ResearchLocalModels.isDataless(info))
+    }
+
+    @Test func aTemporaryFolderIsOnALocalVolume() throws {
+        let folder = try makeRoot()
+        #expect(ResearchLocalModels.isOnLocalVolume(folder.path))
+        #expect(!ResearchLocalModels.isOnLocalVolume(temporaryDirectory("SandSeekMissing").path))
+    }
+    #endif
 
     // MARK: - TUFF
 
@@ -224,7 +270,7 @@ import Testing
         let root = try makeRoot()
         try installModel("piped-folder", in: root, manifest: nil)
         let folder = root.appendingPathComponent("piped-folder")
-        // A pipe would block the read for ever; a link is followed to it.
+        // A pipe would block a read for ever; the link to it is not followed.
         let pipe = root.appendingPathComponent("pipe").path
         #expect(mkfifo(pipe, 0o600) == 0)
         try FileManager.default.createSymbolicLink(
@@ -239,5 +285,55 @@ import Testing
         #expect(folders == ["/Users/test/Library/Application Support/TUFF/Models",
                             "/Code/TUFF/scratch"])
         #expect(ResearchLocalModels.defaultTUFFFolders(home: "/Users/test", program: nil).count == 1)
+    }
+
+    @Test func aTUFFChildThatIsALinkToAFolderIsSkipped() throws {
+        let root = try makeRoot()
+        let outside = try makeRoot()
+        try installModel("foreign", in: outside, manifest: #"{"modelID": "foreign-model"}"#)
+        try FileManager.default.createSymbolicLink(
+            atPath: root.appendingPathComponent("linked").path,
+            withDestinationPath: outside.appendingPathComponent("foreign").path)
+        try installModel("own", in: root, manifest: #"{"modelID": "own-model"}"#)
+        let found = ResearchLocalModels.findTUFFModels(folders: [root.path])
+        #expect(found.first?.models == ["own-model"])
+    }
+
+    @Test func aManifestIsReadThroughOneDescriptorAndALinkIsNotFollowed() throws {
+        let root = try makeRoot()
+        let manifest = root.appendingPathComponent("manifest.json")
+        try Data(#"{"modelID": "direct"}"#.utf8).write(to: manifest)
+        #expect(ResearchLocalModels.modelID(manifest: manifest.path) == "direct")
+        // A link to a good manifest is refused by `O_NOFOLLOW`.
+        let link = root.appendingPathComponent("link.json")
+        try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: manifest.path)
+        #expect(ResearchLocalModels.modelID(manifest: link.path) == nil)
+        // A pipe does not block the open (`O_NONBLOCK`) and is not read.
+        let pipe = root.appendingPathComponent("pipe.json").path
+        #expect(mkfifo(pipe, 0o600) == 0)
+        #expect(ResearchLocalModels.modelID(manifest: pipe) == nil)
+        // A folder and a file over the limit are not read either.
+        let folder = root.appendingPathComponent("folder.json", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        #expect(ResearchLocalModels.modelID(manifest: folder.path) == nil)
+        let big = root.appendingPathComponent("big.json")
+        var text = #"{"modelID": "big", "pad": ""#
+        text += String(repeating: "x", count: ResearchLocalModels.maxManifestBytes) + #""}"#
+        try Data(text.utf8).write(to: big)
+        #expect(ResearchLocalModels.modelID(manifest: big.path) == nil)
+        #expect(ResearchLocalModels.modelID(manifest: root.appendingPathComponent("none.json").path) == nil)
+    }
+
+    @Test func aLinkedManifestInATUFFModelFallsBackToTheFolderName() throws {
+        let root = try makeRoot()
+        let outside = try makeRoot()
+        let foreign = outside.appendingPathComponent("manifest.json")
+        try Data(#"{"modelID": "foreign-model"}"#.utf8).write(to: foreign)
+        try installModel("model-folder", in: root, manifest: nil)
+        try FileManager.default.createSymbolicLink(
+            atPath: root.appendingPathComponent("model-folder/manifest.json").path,
+            withDestinationPath: foreign.path)
+        let found = ResearchLocalModels.findTUFFModels(folders: [root.path])
+        #expect(found.first?.models == ["model-folder"])
     }
 }

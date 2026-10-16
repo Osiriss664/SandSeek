@@ -97,17 +97,19 @@ stop it when it quits.
 For llama.cpp and TUFF, the card also has a **Models on this Mac** menu, so you
 do not have to find the model in a file dialog. It lists the `.gguf` files in
 `~/Library/Caches/llama.cpp`, `~/.cache/llama.cpp`, `~/.lmstudio/models`,
-`~/.cache/lm-studio/models`, `~/.cache/huggingface/hub` and the folder of the
-model you chose last (that folder only, not its subfolders). Vision projector
+`~/.cache/lm-studio/models` and `~/.cache/huggingface/hub`, and the model you
+chose last (that file only: its folder is not searched). Vision projector
 files, the later parts of split models and hidden files are left out. For TUFF
 it lists the models folders with their installed models
 (`~/Library/Application Support/TUFF/Models`, and `scratch` in the clone your
 TUFFServer was built in). Picking an entry does the same as **Choose model…** or
 **Choose models folder…**; **Look again** searches again. The search only reads
-folder listings, file sizes and two small files per TUFF model, never writes or
-downloads anything, and is limited in depth and number of entries. Ollama lists
-its own models after Check. **Choose model…** still works for anything the menu
-misses.
+folder listings, file sizes and one small file per TUFF model, never writes or
+downloads anything, and is limited in depth and number of entries. A folder on
+a network share is not searched, and a file that is only in iCloud (not
+downloaded to this Mac) is left out; a TUFF model whose manifest is only in
+iCloud is listed by its folder name. Ollama lists its own models after Check.
+**Choose model…** still works for anything the menu misses.
 
 **The server must listen on 127.0.0.1 only**, never on all addresses: a server
 that listens on the network can be used by every machine on it. Started from

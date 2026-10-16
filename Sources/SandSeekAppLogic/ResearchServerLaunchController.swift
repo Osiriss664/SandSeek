@@ -109,6 +109,11 @@ public final class ResearchServerLaunchController {
     @ObservationIgnored private var quitDeadline: Date?
     /// Counts the searches for models, so only the latest sets the results.
     @ObservationIgnored private var findAttempt = 0
+    /// True while a search runs on `ResearchLocalModels`' queue.
+    @ObservationIgnored private var isFinding = false
+    /// A search asked for while one ran: the running one searches once more
+    /// when it ends, for the latest request, instead of starting another.
+    @ObservationIgnored private var findAgain: (type: ResearchServerType, home: String)?
 
     public init(defaults: any ResearchSettingsStore = UserDefaults.standard,
                 launcher: any ResearchServerLaunching = FoundationServerLauncher(),
@@ -204,34 +209,42 @@ public final class ResearchServerLaunchController {
         }
     }
 
-    /// Looks for models already on this Mac: `.gguf` files for llama.cpp, TUFF
-    /// models folders for TUFF (nothing for Ollama, which lists its own). The
-    /// search only reads folders and runs off the main actor. Only the latest
-    /// search sets the results, so one that was started earlier (for another
-    /// type or an older model) and ends later changes nothing. `home` is a
-    /// parameter so a test can use a temporary folder.
+    /// Looks for models already on this Mac: `.gguf` files for llama.cpp (and
+    /// the chosen model file itself), TUFF models folders for TUFF (nothing
+    /// for Ollama, which lists its own). The search only reads folders and
+    /// runs on a queue of its own, one at a time: a request while one runs is
+    /// noted, and the running one searches once more when it ends. Only the
+    /// latest search sets the results, so one that was asked for earlier (for
+    /// another type or an older model) changes nothing. A saved model path
+    /// that `checkedPath` refuses is not looked at. `home` is a parameter so a
+    /// test can use a temporary folder.
     public func refreshFound(for type: ResearchServerType,
                              home: String = ResearchServerLaunchPlan.userHome()) async {
         guard type == .llamacpp || type == .tuff else { return }
         findAttempt += 1
-        let mine = findAttempt
         isLookingForModels = true
-        if type == .llamacpp {
-            let roots = ResearchLocalModels.defaultGGUFRoots(home: home)
-            let flat = ResearchLocalModels.chosenModelFolder(models[type]).map { [$0] } ?? []
-            let files = await Task.detached(priority: .utility) {
-                ResearchLocalModels.findGGUF(roots: roots, flatFolders: flat)
-            }.value
-            guard findAttempt == mine else { return }
-            foundGGUF = files
-        } else {
-            let folders = ResearchLocalModels.defaultTUFFFolders(home: home, program: programs[type])
-            let found = await Task.detached(priority: .utility) {
-                ResearchLocalModels.findTUFFModels(folders: folders)
-            }.value
-            guard findAttempt == mine else { return }
-            foundTUFF = found
+        findAgain = (type, home)
+        guard !isFinding else { return }
+        isFinding = true
+        while let request = findAgain {
+            findAgain = nil
+            let mine = findAttempt
+            if request.type == .llamacpp {
+                let roots = ResearchLocalModels.defaultGGUFRoots(home: request.home)
+                let chosen = models[.llamacpp].flatMap { try? ResearchServerLaunchPlan.checkedPath($0, "") }
+                let files = await ResearchLocalModels.onSearchQueue {
+                    ResearchLocalModels.findGGUF(roots: roots, chosenModel: chosen)
+                }
+                if findAttempt == mine { foundGGUF = files }
+            } else {
+                let folders = ResearchLocalModels.defaultTUFFFolders(home: request.home, program: programs[.tuff])
+                let found = await ResearchLocalModels.onSearchQueue {
+                    ResearchLocalModels.findTUFFModels(folders: folders)
+                }
+                if findAttempt == mine { foundTUFF = found }
+            }
         }
+        isFinding = false
         isLookingForModels = false
     }
 
