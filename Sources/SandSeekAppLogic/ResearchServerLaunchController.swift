@@ -583,6 +583,8 @@ public final class ResearchServerLaunchController {
             TimeInterval(timing.stopGrace.components.seconds)
                 + Double(timing.stopGrace.components.attoseconds) / 1e18)
         state = .stopping
+        let pid = launched.pid
+        ServiceLog.logger.notice("Server stop when quitting: pid \(pid, privacy: .public)")
         launched.terminate()
     }
 
@@ -593,6 +595,7 @@ public final class ResearchServerLaunchController {
     /// confirmed.
     public func finishStopWhenQuitting() {
         guard let launched = current else { return }
+        let pid = launched.pid
         if quitDeadline == nil { beginStopWhenQuitting() }
         while !launched.hasExited, Date() < (quitDeadline ?? Date()) {
             Thread.sleep(forTimeInterval: 0.05)
@@ -605,6 +608,9 @@ public final class ResearchServerLaunchController {
         if launched.hasExited {
             clearOwned()
             state = .idle
+            ServiceLog.logger.notice("Server stopped when quitting: pid \(pid, privacy: .public)")
+        } else {
+            ServiceLog.logger.notice("Server did not stop when quitting: pid \(pid, privacy: .public)")
         }
     }
 
