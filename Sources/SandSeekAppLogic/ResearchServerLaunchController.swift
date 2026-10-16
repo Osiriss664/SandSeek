@@ -74,6 +74,11 @@ public final class ResearchServerLaunchController {
     public private(set) var choiceProblem: String?
     public private(set) var programs: [ResearchServerType: String] = [:]
     public private(set) var models: [ResearchServerType: String] = [:]
+    /// Counts the ends of a server SandSeek started that SandSeek did not ask
+    /// for. Whatever answers on the port afterwards is not SandSeek's (for
+    /// Ollama it is often the menu-bar app's own server), so the workspace
+    /// runs the card's Check once more when it sees this change.
+    public private(set) var unaskedEnds = 0
 
     private let defaults: any ResearchSettingsStore
     private let launcher: any ResearchServerLaunching
@@ -83,6 +88,11 @@ public final class ResearchServerLaunchController {
     private let timing: Timing
     private let identityOf: @Sendable (Int32) -> ResearchProcessIdentity?
     private let checkProgram: @Sendable (String) -> Result<String, ResearchLaunchProblem>
+    /// The children of a process, and how a signal is sent to a process id:
+    /// for Ollama's model runners after a SIGKILL (see `forceKill`). The tests
+    /// replace both, so they never look at or signal a real process.
+    private let childrenOf: @Sendable (Int32) -> [Int32]
+    private let sendSignal: @Sendable (Int32, Int32) -> Int32
     /// The running (or being stopped) process. Read by the quit path.
     @ObservationIgnored private var current: (any ResearchLaunchedServer)?
     /// Counts starts and stops, so a start that was stopped meanwhile ends
@@ -100,7 +110,10 @@ public final class ResearchServerLaunchController {
                 identityOf: @escaping @Sendable (Int32) -> ResearchProcessIdentity? =
                     { ResearchProcessIdentity.read(pid: $0) },
                 checkProgram: @escaping @Sendable (String) -> Result<String, ResearchLaunchProblem> =
-                    { ResearchExecutableCheck.resolveAndCheck($0) }) {
+                    { ResearchExecutableCheck.resolveAndCheck($0) },
+                childrenOf: @escaping @Sendable (Int32) -> [Int32] =
+                    { ResearchProcessIdentity.childPIDs(of: $0) },
+                sendSignal: @escaping @Sendable (Int32, Int32) -> Int32 = { kill($0, $1) }) {
         self.defaults = defaults
         self.launcher = launcher
         self.transport = transport
@@ -109,6 +122,8 @@ public final class ResearchServerLaunchController {
         self.timing = timing
         self.identityOf = identityOf
         self.checkProgram = checkProgram
+        self.childrenOf = childrenOf
+        self.sendSignal = sendSignal
         for type in ResearchServerType.allCases where type.canStart {
             programs[type] = Self.saved(defaults, Self.programKey(type))
             // Ollama has no model setting; `modelKey` would name llama.cpp's.
@@ -193,8 +208,15 @@ public final class ResearchServerLaunchController {
         guard let url = server.serverURL, let port = url.port else {
             return server.addressProblem ?? "The server address needs a port."
         }
-        guard ["127.0.0.1", "localhost"].contains(url.host ?? "") else {
-            return "Start uses 127.0.0.1; use the default address."
+        // Ollama is started on IPv4 loopback only, and `localhost` can reach
+        // `::1` first, where another program may listen; so for Ollama the
+        // address must say 127.0.0.1. TUFF and llama.cpp still take
+        // `localhost` as before.
+        let hosts = type == .ollama ? ["127.0.0.1"] : ["127.0.0.1", "localhost"]
+        guard hosts.contains(url.host ?? "") else {
+            return type == .ollama
+                ? "Start uses 127.0.0.1; set the address to http://127.0.0.1:\(port)."
+                : "Start uses 127.0.0.1; use the default address."
         }
         guard port >= ResearchServerLaunchPlan.lowestPort else {
             return "Start needs a port from \(ResearchServerLaunchPlan.lowestPort) up."
@@ -259,9 +281,16 @@ public final class ResearchServerLaunchController {
         owned = Owned(type: type, port: port, pid: pid, path: resolved, adopted: false)
         ServiceLog.logger.notice(
             "Server started: \(type.rawValue, privacy: .public), pid \(pid, privacy: .public)")
+        // The marker names only the program SandSeek started: a process
+        // that runs anything else is never taken over after a crash.
         if let identity = launched.identity {
-            try? ResearchServerMarker(type: type.rawValue, port: port, pid: pid, identity: identity)
-                .write(to: stateDirectory)
+            if identity.path == plan.executable {
+                try? ResearchServerMarker(type: type.rawValue, port: port, pid: pid, identity: identity)
+                    .write(to: stateDirectory)
+            } else {
+                ServiceLog.logger.notice(
+                    "No server marker: the running program is not the one started, pid \(pid, privacy: .public)")
+            }
         }
         launched.onExit { [weak self] exit in
             Task { @MainActor in self?.serverEnded(pid: pid, exit: exit) }
@@ -284,8 +313,12 @@ public final class ResearchServerLaunchController {
             }
             lastStatus = await answerStatus(port: port, path: readyPath)
             if lastStatus == 200 {
-                // Only counts while our own process still runs: something
-                // else may have answered on the port.
+                // Only counts if our own process still runs one poll later.
+                // Another program can take the port between the look at it
+                // and our server's start, and answer here, while our server
+                // fails to bind and ends a moment later; that end is seen
+                // here, not taken for a server that is ready.
+                try? await Task.sleep(for: timing.poll)
                 guard attempt == mine, state == .starting else { return }
                 if let exit = launched.exit {
                     serverEnded(pid: pid, exit: exit)
@@ -420,12 +453,20 @@ public final class ResearchServerLaunchController {
         clearOwned()
         guard !asked else { return }
         attempt += 1
+        unaskedEnds += 1
         logTail = owned.adopted ? "" : ResearchServerLog.tail(at: logURL)
-        state = .failed(Self.endedMessage(exit, secondsSinceStart: started))
+        state = .failed(Self.endedMessage(
+            exit, secondsSinceStart: started, type: owned.type, port: owned.port))
     }
 
+    /// How long after its start an Ollama that ends with exit code 1 is taken
+    /// to have found its port taken: it binds the port first thing.
+    nonisolated static let earlyEnd: TimeInterval = 5
+
     nonisolated static func endedMessage(_ exit: ResearchServerExit,
-                                         secondsSinceStart: TimeInterval?) -> String {
+                                         secondsSinceStart: TimeInterval?,
+                                         type: ResearchServerType? = nil,
+                                         port: Int? = nil) -> String {
         var text = "The server SandSeek started ended"
         if let code = exit.code {
             text += exit.bySignal ? " (signal \(code))" : " (exit \(code))"
@@ -435,6 +476,19 @@ public final class ResearchServerLaunchController {
             text += " macOS ended it at once. That usually means Gatekeeper blocked the program, "
                 + "or the Mac ran out of memory."
         }
+        guard type == .ollama else { return text }
+        let address = port.map { "127.0.0.1:\($0)" } ?? "its port"
+        if !exit.bySignal, exit.code == 1, let seconds = secondsSinceStart, seconds < earlyEnd {
+            text += " Another program most likely took \(address) meanwhile, between SandSeek's "
+                + "look at the port and the start (often the Ollama menu-bar app, which can open "
+                + "at login)."
+        } else {
+            text += " If the Ollama menu-bar app was opened: it ends any other `ollama serve` "
+                + "it finds and starts its own Ollama, with its own settings."
+        }
+        text += " An Ollama that answers on \(address) now was not started by SandSeek; it may "
+            + "allow cloud models and listen on the network. Quit the Ollama menu-bar app and "
+            + "start again from here, or press Check."
         return text
     }
 
@@ -470,8 +524,41 @@ public final class ResearchServerLaunchController {
     private func terminateAndWait(_ launched: any ResearchLaunchedServer) async -> Bool {
         launched.terminate()
         if await waitForExit(launched, timing.stopGrace) { return true }
-        launched.forceKill()
+        forceKill(launched)
         return await waitForExit(launched, timing.killGrace)
+    }
+
+    /// SIGKILL for the server, and for the children it started from its own
+    /// program: Ollama's model runners (`ollama runner`). On SIGTERM Ollama
+    /// ends them itself; after a SIGKILL a runner would live on, on macOS, as
+    /// an HTTP server on 127.0.0.1 without a key, with the model in memory.
+    /// The children are listed while the server still runs (afterwards they
+    /// belong to launchd), and each one is killed only if its id still names
+    /// the same process (start time and program). TUFFServer and
+    /// llama-server start no such children, so for them this finds nothing.
+    /// A runner that the server starts between the listing and its own kill
+    /// is not found; the log names every runner that was killed or could not
+    /// be.
+    private func forceKill(_ launched: any ResearchLaunchedServer) {
+        var runners: [(pid: Int32, identity: ResearchProcessIdentity)] = []
+        if !launched.hasExited, let path = launched.identity?.path {
+            for child in childrenOf(launched.pid) {
+                if let identity = identityOf(child), identity.path == path {
+                    runners.append((pid: child, identity: identity))
+                }
+            }
+        }
+        launched.forceKill()
+        for runner in runners {
+            guard identityOf(runner.pid) == runner.identity else { continue }
+            if sendSignal(runner.pid, SIGKILL) == 0 {
+                ServiceLog.logger.notice(
+                    "Server runner killed after the server: pid \(runner.pid, privacy: .public)")
+            } else {
+                ServiceLog.logger.warning(
+                    "Server runner may be left running: pid \(runner.pid, privacy: .public)")
+            }
+        }
     }
 
     private func waitForExit(_ launched: any ResearchLaunchedServer,
@@ -511,7 +598,7 @@ public final class ResearchServerLaunchController {
             Thread.sleep(forTimeInterval: 0.05)
         }
         if !launched.hasExited {
-            launched.forceKill()
+            forceKill(launched)
             let end = Date().addingTimeInterval(1)
             while !launched.hasExited, Date() < end { Thread.sleep(forTimeInterval: 0.05) }
         }

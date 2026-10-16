@@ -147,7 +147,15 @@ Ollama card, including **Start server**, was not tried by hand, and no other mod
    `OLLAMA_NO_CLOUD=1` and nothing else from its own environment, and stops
    only an Ollama it started (when you press **Stop server**, **Stop
    everything**, or quit SandSeek normally). Quit the Ollama menu-bar app first:
-   it holds port 11434, and Start then refuses to start a second one. A copy
+   it holds port 11434, and Start then refuses to start a second one. Keep it
+   closed while SandSeek's Ollama runs: when the menu-bar app opens (also at
+   login) and finds the port busy, it ends the Ollama SandSeek started and
+   starts its own, with the app's settings (which may allow cloud models and
+   the network). The card then says that the server SandSeek started ended and
+   checks the Ollama that answers instead; that one is not SandSeek's. If the
+   app is installed, take Ollama out of the login items (System Settings,
+   General, Login Items). For Start the address on the card must be
+   `http://127.0.0.1:<port>`, not `localhost`. A copy
    of Ollama inside `Ollama.app` updates itself, and so does an `ollama` that
    links into it (the one the app puts in `/usr/local/bin`, or the Homebrew
    cask's); the card says so. The Homebrew formula does not. The models stay

@@ -499,8 +499,25 @@ does not control.
   makes Ollama itself refuse remote models. Start Ollama with
   `OLLAMA_HOST=127.0.0.1:11434` too; the exposure check says so when it finds
   Ollama listening beyond loopback. Ollama checks the `Host` header of requests
-  that arrive on loopback, which answers DNS rebinding. Tested once on a Mac
-  from the command line; not measured against the injection pages.
+  that arrive on loopback: a page that uses DNS rebinding arrives with its own
+  name there and gets 403. The check covers rebinding only. Ollama lets
+  through a `Host` that is an IP address (loopback, private, or one of this
+  Mac's own), `localhost`, this Mac's name, and names ending in `.localhost`,
+  `.local` or `.internal`. It does not stop a page from sending a plain
+  "no-cors" POST straight to `http://127.0.0.1:11434` without rebinding. The
+  page cannot read the answer, but Ollama runs the request: it can start a
+  chat that keeps the Mac busy, pull a large model, or delete or copy an
+  installed one. Chrome's Local Network Access blocks or asks before such a
+  request; Safari does not. This is the same for an Ollama you start yourself,
+  and SandSeek cannot add a key to Ollama. Quit Ollama when you are not
+  researching. Ollama's default `OLLAMA_ORIGINS` also lets pages served from
+  `http(s)://localhost`, `127.0.0.1` or `0.0.0.0` on any port, and `app://`,
+  `file://`, `tauri://`, `vscode-webview://` and `vscode-file://` pages, read
+  its answers, so any web app served from a local port on this Mac can use
+  Ollama. SandSeek does not narrow `OLLAMA_ORIGINS` (Ollama always adds its
+  defaults to the list), and an `OLLAMA_ORIGINS` of your own does not reach
+  the Ollama SandSeek starts. Tested once on a Mac from the command line; not
+  measured against the injection pages.
 - **llama.cpp** is used only with `--host 127.0.0.1` and `--api-key-file`. The
   key makes rebinding useless (the page does not have it). The app makes the
   key itself, keeps it in a file only you can read (mode 0600 in a folder with
@@ -581,14 +598,45 @@ does and does not do:
   `LLAMA_ARG_*`, `DYLD_*` and `TUFF_*` settings in your environment do not reach
   it. Ollama gets two more, `OLLAMA_HOST=127.0.0.1:<port>` and
   `OLLAMA_NO_CLOUD=1`; `OLLAMA_ORIGINS`, `OLLAMA_MODELS` and the like in your
-  environment do not reach it. Its output goes to a log file readable only by you, replaced at every
-  start.
+  environment do not reach it, so `OLLAMA_ORIGINS` keeps Ollama's default list
+  (above). Ollama also reads `~/.ollama/server.json`, but only for its cloud
+  switch. Its output goes to a log file readable only by you, replaced at
+  every start.
 - If something already answers on the port (for example the Ollama menu-bar
   app), Start says so and starts nothing, and SandSeek never stops an Ollama it
-  did not start. Ollama ends its model runners (the `ollama runner` processes
-  that hold a loaded model) itself when it gets SIGTERM. If it has to be ended
-  with SIGKILL, a runner may be left running; this was not tried on a Mac yet,
-  so look for a leftover `ollama` in Activity Monitor then.
+  did not start. For Ollama the address must be `http://127.0.0.1:<port>`:
+  Ollama is started on IPv4 loopback only, and `localhost` can reach `::1`
+  first, where another program may listen. TUFF and llama.cpp still accept
+  `localhost` there.
+- **The Ollama menu-bar app does stop SandSeek's Ollama.** When the app opens
+  (by hand, or at login) and finds its port busy, it ends every other
+  `ollama serve` it finds (SIGINT, then SIGKILL after 5 seconds), including
+  the one SandSeek started, and starts its own Ollama with its own settings:
+  on all network interfaces if "Expose to network" is on, readable by any
+  page if "Allow browser access" is on, and with cloud models unless its own
+  cloud switch is off. SandSeek then reports that the server it started
+  ended and that an Ollama that answers now is not SandSeek's, and it runs
+  the card's full Check once on whatever answers next, so that a replacement
+  reachable from the network is flagged without a click. SandSeek's own check
+  for cloud models still runs before every question, but `OLLAMA_NO_CLOUD=1`
+  and the loopback address no longer apply. Quit the menu-bar app while you
+  use the Ollama SandSeek started. Something similar can happen between the
+  look at the port and the start: if another program takes the port then,
+  SandSeek's Ollama ends with exit code 1. Start waits one more poll after
+  the first answer, so this end is reported ("another program most likely
+  took the port") and the other server is not taken for SandSeek's.
+- Ollama ends its model runners (the `ollama runner` processes that hold a
+  loaded model) itself when it gets SIGTERM. When SandSeek has to end it with
+  SIGKILL (it did not stop within 5 seconds), a runner would live on: on
+  macOS it gets no signal when its parent dies, and it is an HTTP server on a
+  random port of 127.0.0.1, without a key, with the model in memory. So right
+  before the SIGKILL SandSeek lists the children of its Ollama that run the
+  same program, and right after it kills each one whose process id still has
+  the same start time and program. Only children of SandSeek's own server are
+  looked at. A runner that Ollama starts in the moment between the listing
+  and the SIGKILL is not found; the system log names each runner that was
+  killed or could not be. This was not tried on a Mac yet: after a stop that
+  needed SIGKILL, look for a leftover `ollama` in Activity Monitor.
 - After the server answers, the network check runs; if the server turns out to be
   reachable from the network, SandSeek stops it.
 - SandSeek stops a server it started (SIGTERM, then SIGKILL after 5 seconds) on
@@ -600,7 +648,11 @@ does and does not do:
   chance to stop it. (In the Mac test a Force Quit from the Dock ended the server
   together with the app; do not rely on that.) The next launch finds it again if
   the process id, start time and program match, and offers Stop; it never stops
-  it by itself. TUFF has no `Host` header check (above), so quit the server when
+  it by itself. The marker is written only when the started process is
+  SandSeek's own child and runs the program SandSeek chose. It sits in a
+  folder only you can use, so another account cannot plant one; a program of
+  your own could (and could just as well stop a server itself, see *Who is
+  trusted*). TUFF has no `Host` header check (above), so quit the server when
   you are not using it.
 
 ## Known limits

@@ -496,7 +496,8 @@ struct HookedLauncher: ResearchServerLaunching {
 }
 
 /// A launch controller that starts nothing and touches no real settings,
-/// state folder or log.
+/// state folder or log. It never lists or signals a real process apart from
+/// a server it started itself: `childrenOf` and `sendSignal` are fakes.
 @MainActor
 func testLaunchController(settings: MemorySettings = MemorySettings(),
                           launcher: any ResearchServerLaunching = FakeServerLauncher(),
@@ -505,12 +506,34 @@ func testLaunchController(settings: MemorySettings = MemorySettings(),
                           logURL: URL = temporaryDirectory("SandSeekLog")
                               .appendingPathComponent("model-server.log"),
                           timing: ResearchServerLaunchController.Timing = .init(),
-                          identityOf: @escaping @Sendable (Int32) -> ResearchProcessIdentity? = { _ in nil }
+                          identityOf: @escaping @Sendable (Int32) -> ResearchProcessIdentity? = { _ in nil },
+                          childrenOf: @escaping @Sendable (Int32) -> [Int32] = { _ in [] },
+                          sendSignal: @escaping @Sendable (Int32, Int32) -> Int32 = { _, _ in 0 }
 ) -> ResearchServerLaunchController {
     ResearchServerLaunchController(
         defaults: settings, launcher: launcher, transport: transport,
         stateDirectory: stateDirectory, logURL: logURL,
-        timing: timing, identityOf: identityOf, checkProgram: { .success($0) })
+        timing: timing, identityOf: identityOf, checkProgram: { .success($0) },
+        childrenOf: childrenOf, sendSignal: sendSignal)
+}
+
+/// The signals a launch controller sent to process ids other than its
+/// server's, in order.
+final class SentSignals: @unchecked Sendable {
+    struct Sent: Equatable {
+        let pid: Int32
+        let signal: Int32
+    }
+
+    private let lock = NSLock()
+    private var recorded: [Sent] = []
+
+    var all: [Sent] { lock.withLock { recorded } }
+
+    func send(_ pid: Int32, _ signal: Int32) -> Int32 {
+        lock.withLock { recorded.append(Sent(pid: pid, signal: signal)) }
+        return 0
+    }
 }
 
 /// The secret that tests sign with: one file for the whole test run, written

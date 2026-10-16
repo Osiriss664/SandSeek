@@ -10,6 +10,15 @@
   other servers). If something already listens on the port, for example the
   Ollama menu-bar app, Start refuses. The copy inside `Ollama.app` updates
   itself; the card says so, and the Homebrew version does not.
+- Start and Stop for Ollama, after a security review: when the Ollama
+  menu-bar app ends the Ollama SandSeek started and starts its own, the card
+  says that the Ollama answering now is not SandSeek's and runs its full Check
+  (with the network check) on it once. Start waits one more poll after the
+  first answer, so a server that took the port meanwhile is not taken for
+  SandSeek's. A stop that needs SIGKILL also ends that Ollama's model runners.
+  For Ollama, Start needs the address `http://127.0.0.1:<port>`, not
+  `localhost`. SECURITY.md says what Ollama's `Host` check does and does not
+  stop.
 
 ## 0.3.0 (16 October 2026)
 

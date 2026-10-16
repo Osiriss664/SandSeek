@@ -35,7 +35,9 @@ public protocol ResearchLaunchedServer: AnyObject, Sendable {
     /// Sends SIGTERM. Does nothing once the process has ended.
     func terminate()
     /// Sends SIGKILL. Does nothing once the process has ended, so a reused
-    /// process id is never signalled.
+    /// process id is never signalled. The server's own children (Ollama's
+    /// model runners) are not touched here; see
+    /// `ResearchServerLaunchController.forceKill`.
     func forceKill()
     /// Calls `handler` once, on a background thread, when the process ends
     /// (at once if it already has).
@@ -96,9 +98,15 @@ final class FoundationLaunchedServer: ResearchLaunchedServer, @unchecked Sendabl
     var pid: Int32 { process.processIdentifier }
     var exit: ResearchServerExit? { lock.withLock { ended } }
 
-    /// Called right after `run()`, before anyone else sees the server.
+    /// Called right after `run()`, before anyone else sees the server. The
+    /// identity is kept only if the process is still this app's child after
+    /// it was read: had the server already ended and its id been given to
+    /// another process, the identity would describe that one.
     func recordIdentity() {
-        identity = ResearchProcessIdentity.read(pid: process.processIdentifier)
+        let pid = process.processIdentifier
+        let found = ResearchProcessIdentity.read(pid: pid)
+        guard ResearchProcessIdentity.parentPID(of: pid) == getpid() else { return }
+        identity = found
     }
 
     /// The termination handler: Foundation calls it on its own thread, not on

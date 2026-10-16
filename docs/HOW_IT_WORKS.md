@@ -265,8 +265,12 @@ if it calls itself OpenAI-compatible.
   `think` is sent only to a model that can think, and then always as true or
   false. Ollama has no key and no default model; cloud models are refused.
   **Start server** (experimental too) runs `ollama serve` with `OLLAMA_HOST=127.0.0.1:<port>` and
-  `OLLAMA_NO_CLOUD=1`; it is ready when `/api/version` answers, with the same
-  time limit as llama.cpp. SandSeek stops only an Ollama it started.
+  `OLLAMA_NO_CLOUD=1`; it is ready when `/api/version` answers and the
+  process still runs one poll later, with the same time limit as llama.cpp.
+  SandSeek stops only an Ollama it started; a stop that needs SIGKILL also
+  ends its model runners. The Ollama menu-bar app can end SandSeek's Ollama
+  and start its own; the card then says so and checks the new one once
+  (see [SECURITY.md](SECURITY.md)).
 
 On a Mac with 16 GB, run only one model server with a loaded model at a time.
 
