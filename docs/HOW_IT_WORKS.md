@@ -24,7 +24,7 @@ Linux VM (Apple container)
 - **The model server** is TUFF (8.3.1 or newer), llama.cpp's `llama-server` or
   Ollama (experimental).
   You can start it yourself, or let SandSeek start it with **Start server**
-  (only `TUFFServer` or `llama-server`, on 127.0.0.1, without a shell). SandSeek
+  (only `TUFFServer`, `llama-server` or `ollama serve`, on 127.0.0.1, without a shell). SandSeek
   stops a server it started when you quit it normally, and never stops one you
   started. SandSeek talks to it only on 127.0.0.1. Start it so that it listens on
   127.0.0.1 only (see [INSTALL.md](INSTALL.md)); SandSeek's **Check** warns if it
@@ -264,7 +264,13 @@ if it calls itself OpenAI-compatible.
   never above the model's maximum), and that number is also the prompt budget.
   `think` is sent only to a model that can think, and then always as true or
   false. Ollama has no key and no default model; cloud models are refused.
-  SandSeek never starts or stops Ollama.
+  **Start server** (experimental too) runs `ollama serve` with `OLLAMA_HOST=127.0.0.1:<port>` and
+  `OLLAMA_NO_CLOUD=1`; it is ready when `/api/version` answers and the
+  process still runs one poll later, with the same time limit as llama.cpp.
+  SandSeek stops only an Ollama it started; a stop that needs SIGKILL also
+  ends its model runners. The Ollama menu-bar app can end SandSeek's Ollama
+  and start its own; the card then says so and checks the new one once
+  (see [SECURITY.md](SECURITY.md)).
 
 On a Mac with 16 GB, run only one model server with a loaded model at a time.
 

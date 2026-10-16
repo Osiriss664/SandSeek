@@ -20,25 +20,29 @@ struct ServerStartSection: View {
     private var blocker: String? { launch.startBlocker(for: server) }
 
     var body: some View {
-        if type == .ollama {
-            // Ollama is started by the person; there is nothing to start here.
-            VStack(alignment: .leading, spacing: 8) {
-                Divider()
-                Text("Ollama is started by you").font(.subheadline.weight(.semibold))
-                Text("Start Ollama yourself: ollama serve. SandSeek does not start or stop Ollama.")
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        } else if type.canStart {
+        if type.canStart {
             VStack(alignment: .leading, spacing: 8) {
                 Divider()
                 Text("Start it from SandSeek").font(.subheadline.weight(.semibold))
                 chosenRow(
-                    label: type == .tuff ? "TUFFServer" : "llama-server",
+                    label: programLabel,
                     path: launch.programs[type], placeholder: "not chosen",
                     button: "Choose program…", action: chooseProgram)
-                if type == .tuff {
+                if type == .ollama {
+                    Text("Starting and stopping Ollama is experimental.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    // Resolved first: `/usr/local/bin/ollama` (made by the app) and the
+                    // Homebrew cask's `ollama` are links into Ollama.app.
+                    if let program = launch.programs[type],
+                       ResearchServerLaunchPlan.isInsideApp(
+                           URL(fileURLWithPath: program).resolvingSymlinksInPath().path) {
+                        Text(ResearchServerLaunchPlan.ollamaAppNote)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                } else if type == .tuff {
                     chosenRow(
                         label: "Models folder (optional)", path: launch.models[type],
                         placeholder: "TUFF's own folder", button: "Choose models folder…",
@@ -63,6 +67,15 @@ struct ServerStartSection: View {
                 controls
                 status
             }
+        }
+    }
+
+    private var programLabel: String {
+        switch type {
+        case .tuff: "TUFFServer"
+        case .llamacpp: "llama-server"
+        case .ollama: "ollama"
+        case .lmstudio: "program"
         }
     }
 
@@ -102,7 +115,9 @@ struct ServerStartSection: View {
         case .starting:
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
-                Text("Starting the server. Loading the model can take minutes.")
+                Text(type == .ollama
+                    ? "Starting Ollama."
+                    : "Starting the server. Loading the model can take minutes.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -157,10 +172,20 @@ struct ServerStartSection: View {
     // MARK: - File dialogs
 
     private func chooseProgram() {
-        let message = type == .tuff
-            ? "Choose TUFFServer, tuff or TUFF.app. SandSeek starts the TUFFServer beside it."
-            : "Choose llama-server."
-        guard let path = pick(files: true, hidden: true, message: message) else { return }
+        let message: String
+        var start: URL?
+        switch type {
+        case .tuff:
+            message = "Choose TUFFServer, tuff or TUFF.app. SandSeek starts the TUFFServer beside it."
+        case .ollama:
+            message = "Choose ollama (for example the Homebrew one) or Ollama.app."
+            // Opens in the Homebrew folder when the program is there.
+            start = ResearchServerLaunchPlan.ollamaSuggestion()
+                .map { URL(fileURLWithPath: $0).deletingLastPathComponent() }
+        case .llamacpp, .lmstudio:
+            message = "Choose llama-server."
+        }
+        guard let path = pick(files: true, start: start, hidden: true, message: message) else { return }
         launch.chooseProgram(path, for: type)
     }
 

@@ -110,6 +110,40 @@ public struct ResearchProcessIdentity: Equatable, Sendable {
         return nil
         #endif
     }
+
+    /// The process id of the parent of the live process `pid`, or nil when
+    /// there is no such process (or on a system without `proc_pidinfo`).
+    public static func parentPID(of pid: Int32) -> Int32? {
+        #if canImport(Darwin)
+        var info = proc_bsdinfo()
+        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
+        guard pid > 0, proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else { return nil }
+        return Int32(bitPattern: info.pbi_ppid)
+        #else
+        return nil
+        #endif
+    }
+
+    /// The ids of the live processes whose parent is `pid`: empty when there
+    /// are none (or on a system without `proc_listchildpids`). Each id is
+    /// checked again to have `pid` as its parent, so the list never names a
+    /// process that is not a child of `pid` at the time of the call.
+    public static func childPIDs(of pid: Int32) -> [Int32] {
+        #if canImport(Darwin)
+        guard pid > 0 else { return [] }
+        let capacity = 256
+        var buffer = [pid_t](repeating: 0, count: capacity)
+        let listed = proc_listchildpids(pid, &buffer, Int32(capacity * MemoryLayout<pid_t>.stride))
+        guard listed > 0 else { return [] }
+        // The answer is read as a number of ids. The buffer starts zeroed and
+        // every id is checked, so an answer in bytes would only add zeros,
+        // which are left out.
+        return Array(buffer.prefix(min(Int(listed), capacity)))
+            .filter { $0 > 0 && $0 != pid && ResearchProcessIdentity.parentPID(of: $0) == pid }
+        #else
+        return []
+        #endif
+    }
 }
 
 // MARK: - Marker
@@ -121,7 +155,7 @@ public struct ResearchProcessIdentity: Equatable, Sendable {
 public struct ResearchServerMarker: Codable, Equatable, Sendable {
     public static let fileName = "model-server-started-by-app.json"
 
-    /// `ResearchServerType.rawValue`: "tuff" or "llamacpp".
+    /// `ResearchServerType.rawValue`: "tuff", "llamacpp" or "ollama".
     public let type: String
     public let port: Int
     public let pid: Int32

@@ -92,10 +92,10 @@ private final class FixedPropsServices: ResearchHTTPTransport, @unchecked Sendab
         #expect(server.serverType == .tuff)
     }
 
-    @Test func ollamaCanBeChosenButSandSeekNeverStartsIt() {
+    @Test func ollamaCanBeChosenAndStartedFromTheCard() {
         #expect(ResearchServerType.ollama.isAvailable)
         #expect(ResearchServerType.ollama.pickerLabel == "Ollama")
-        #expect(ResearchServerType.allCases.filter(\.canStart) == [.tuff, .llamacpp])
+        #expect(ResearchServerType.allCases.filter(\.canStart) == [.tuff, .llamacpp, .ollama])
         let server = controller()
         server.select(.ollama)
         #expect(server.serverType == .ollama)
@@ -104,7 +104,8 @@ private final class FixedPropsServices: ResearchHTTPTransport, @unchecked Sendab
         #expect(server.startCommand == nil)
         #expect(server.needsPromptBudget == false)
         #expect(server.startHint.contains("ollama serve"))
-        #expect(server.startHint.contains("does not start or stop Ollama"))
+        #expect(server.startHint.contains("click Start server"))
+        #expect(server.startHint.contains("stops only an Ollama it started"))
         #expect(server.startHint.contains("experimental"))
     }
 

@@ -37,6 +37,8 @@ public final class ResearchWorkspace {
     /// which both are ready. Kept here, not in a screen, so switching to
     /// Reports or Settings and back does not fold an opened card again.
     @ObservationIgnored private var cardFolding = ResearchCardFolding()
+    /// The `launch.unaskedEnds` that the Check after such an end was run for.
+    @ObservationIgnored private var checkedUnaskedEnds = 0
 
     public init(sandbox: ResearchSandboxController,
                 server: ResearchServerController,
@@ -165,6 +167,45 @@ public final class ResearchWorkspace {
             async let sandboxRefresh: Void = sandbox.refresh()
             async let serverRefresh: Void = server.refresh()
             _ = await (sandboxRefresh, serverRefresh)
+            await checkAfterUnaskedEnd()
+        }
+    }
+
+    /// After a server SandSeek started ended without being asked to (a
+    /// crash, or the Ollama menu-bar app ending it and starting its own),
+    /// whatever answers on the port next is not SandSeek's. The periodic look
+    /// would show it as connected with no more than its status route, so the
+    /// card's full Check, with the network check, runs on it once: a
+    /// replacement that listens beyond loopback is flagged without a click.
+    private func checkAfterUnaskedEnd() async {
+        let ends = launch.unaskedEnds
+        guard ends != checkedUnaskedEnds else { return }
+        guard launch.owned == nil else {
+            // SandSeek started a server again; its start ran the Check.
+            checkedUnaskedEnds = ends
+            return
+        }
+        // A start under way runs the Check itself once its server answers.
+        guard launch.state != .starting else { return }
+        switch server.state {
+        case .ready, .problem:
+            // Marked first, so a second look that comes in meanwhile does
+            // not run the Check twice.
+            let before = checkedUnaskedEnds
+            checkedUnaskedEnds = ends
+            await server.check()
+            switch server.state {
+            case .ready, .problem:
+                break
+            case .notChecked, .checking, .off:
+                // The look a moment ago still saw the server that ended, or
+                // the address changed meanwhile: nothing was checked, so the
+                // next look tries again.
+                if checkedUnaskedEnds == ends { checkedUnaskedEnds = before }
+            }
+        case .notChecked, .checking, .off:
+            // Nothing answers yet; the next look tries again.
+            return
         }
     }
 
