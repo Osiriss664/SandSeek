@@ -106,10 +106,10 @@ TUFFServer was built in). Picking an entry does the same as **Choose model…** 
 **Choose models folder…**; **Look again** searches again. The search only reads
 folder listings, file sizes and one small file per TUFF model, never writes or
 downloads anything, and is limited in depth and number of entries. A folder on
-a network share is not searched, and a file that is only in iCloud (not
-downloaded to this Mac) is left out; a TUFF model whose manifest is only in
-iCloud is listed by its folder name. Ollama lists its own models after Check.
-**Choose model…** still works for anything the menu misses.
+a network share or only in iCloud is not searched, and a file that is only in
+iCloud (not downloaded to this Mac) is left out; a TUFF model whose manifest
+is only in iCloud is listed by its folder name. Ollama lists its own models
+after Check. **Choose model…** still works for anything the menu misses.
 
 **The server must listen on 127.0.0.1 only**, never on all addresses: a server
 that listens on the network can be used by every machine on it. Started from

@@ -212,6 +212,17 @@ import Testing
         #expect(!launch.isLookingForModels)
     }
 
+    @Test func onlyAFolderOrALinkToOneCanBeListed() throws {
+        let root = try makeRoot()
+        let file = try write("file.gguf", in: root)
+        let link = root.appendingPathComponent("link").path
+        try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: root.path)
+        #expect(ResearchLocalModels.isListableFolder(root.path))
+        #expect(ResearchLocalModels.isListableFolder(link))
+        #expect(!ResearchLocalModels.isListableFolder(file.path))
+        #expect(!ResearchLocalModels.isListableFolder(temporaryDirectory("SandSeekMissing").path))
+    }
+
     #if canImport(Darwin)
     @Test func aDatalessFileIsRecognisedByItsFlag() {
         var info = stat()

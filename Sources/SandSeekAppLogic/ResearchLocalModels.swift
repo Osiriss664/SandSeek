@@ -47,9 +47,9 @@ public struct ResearchTUFFModelsFolder: Equatable, Sendable, Identifiable {
 /// can offer them instead of a file dialog. It only lists folders, looks at
 /// the chosen model file and reads one small JSON file per TUFF model: it
 /// never writes, downloads or runs anything. A folder that is not on a disk
-/// of this Mac (a network share) is not listed, and a file that is only in
-/// iCloud (dataless: reading it would download it) is left out. The folders
-/// are passed in, so the tests use temporary ones.
+/// of this Mac (a network share) is not listed, and a file or folder that is
+/// only in iCloud (dataless: reading or listing it would download it) is left
+/// out. The folders are passed in, so the tests use temporary ones.
 public enum ResearchLocalModels {
     /// How deep below a root a file may be, and how many entries the search
     /// looks at in each root. Both keep a search through a big folder short;
@@ -111,7 +111,7 @@ public enum ResearchLocalModels {
     /// blobs; a link to a folder is not entered. Vision projectors (`mmproj`)
     /// and the later parts of a split model are left out, and so is a path
     /// `checkedPath` would refuse. A root that is not on a disk of this Mac
-    /// is not searched.
+    /// is not searched, and neither is a folder that is only in iCloud.
     public static func findGGUF(roots: [String], chosenModel: String? = nil) -> [ResearchLocalGGUF] {
         let manager = FileManager.default
         var found: [ResearchLocalGGUF] = []
@@ -131,7 +131,7 @@ public enum ResearchLocalModels {
         }
 
         func scan(_ folder: String, depth: Int) {
-            guard depth <= maxDepth,
+            guard depth <= maxDepth, isListableFolder(folder),
                   let names = try? manager.contentsOfDirectory(atPath: folder) else { return }
             for name in names.sorted() where !name.hasPrefix(".") {
                 visited += 1
@@ -191,8 +191,8 @@ public enum ResearchLocalModels {
     /// A child that is a link is not entered (`lstat`), so both files are
     /// always the folder's own. A model whose `verified-install.json` is only
     /// in iCloud is left out; a manifest that is only in iCloud is not read.
-    /// Folders without a model, and folders not on a disk of this Mac, are
-    /// left out.
+    /// Folders without a model, folders not on a disk of this Mac and folders
+    /// (or model folders) that are only in iCloud are left out.
     public static func findTUFFModels(folders: [String]) -> [ResearchTUFFModelsFolder] {
         let manager = FileManager.default
         var result: [ResearchTUFFModelsFolder] = []
@@ -200,12 +200,12 @@ public enum ResearchLocalModels {
         for folder in folders {
             guard (try? ResearchServerLaunchPlan.checkedPath(folder, "")) != nil,
                   seen.insert(URL(fileURLWithPath: folder).standardizedFileURL.path).inserted,
-                  isOnLocalVolume(folder),
+                  isOnLocalVolume(folder), isListableFolder(folder),
                   let children = try? manager.contentsOfDirectory(atPath: folder) else { continue }
             var names: [String] = []
             for child in children.sorted().prefix(maxEntries) where !child.hasPrefix(".") {
                 let path = folder + "/" + child
-                guard let entry = entryInfo(path), entry.st_mode & S_IFMT == S_IFDIR,
+                guard let entry = entryInfo(path), entry.st_mode & S_IFMT == S_IFDIR, !isDataless(entry),
                       let verified = entryInfo(path + "/verified-install.json"),
                       verified.st_mode & S_IFMT == S_IFREG, !isDataless(verified),
                       let manifest = entryInfo(path + "/manifest.json") else { continue }
@@ -260,6 +260,14 @@ public enum ResearchLocalModels {
     static func entryInfo(_ path: String) -> stat? {
         var info = stat()
         return lstat(path, &info) == 0 ? info : nil
+    }
+
+    /// True when `path` (a link followed) is a folder whose listing is on this
+    /// Mac. A folder that is only in iCloud is dataless too, and listing it,
+    /// or looking up a name in it, would download its listing.
+    static func isListableFolder(_ path: String) -> Bool {
+        var info = stat()
+        return stat(path, &info) == 0 && info.st_mode & S_IFMT == S_IFDIR && !isDataless(info)
     }
 
     /// True when the contents of the file are not on this Mac (`SF_DATALESS`):
