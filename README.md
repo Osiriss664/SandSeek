@@ -19,8 +19,9 @@ Swift package. 0.2.0 was built, tested and tried by hand on a Mac with macOS
 ([docs/SAFETY_TEST.md](docs/SAFETY_TEST.md)); Start server was tried with TUFF
 8.3.11 and llama.cpp for 0.1.0. 0.3.0 added experimental Ollama support,
 tested on a Mac with Ollama 0.40.4 and Gemma 4 12B from the command line
-(October 2026). 0.4.0 lets the app start and stop Ollama, and adds a Tips
-page and a Light/Dark choice; all three were tried by hand on a Mac.
+(October 2026). 0.4.0 lets the app start and stop Ollama and list the models
+already on this Mac, and adds a Tips page and a Light/Dark choice; all of
+these were tried by hand on a Mac.
 
 ![The SandSeek window: the question box with model and mode, Stop everything, the folded Model server and Web sandbox cards showing Connected, Ready and Signed, then an answer with its folded Figure check and Pages that could not be read lists, the sources and the searches](docs/assets/sandseek-app.png)
 
@@ -158,7 +159,9 @@ and a model server SandSeek started.
 
 - **Model server.** Pick TUFF (127.0.0.1:8080), llama.cpp (127.0.0.1:8081) or Ollama
   (127.0.0.1:11434, experimental; the model list shows only local models with
-  tool support); LM Studio is listed as "later". The address can be edited but
+  tool support); LM Studio is listed as "later". For llama.cpp and TUFF,
+  **Models on this Mac** lists the models already on disk (read-only, nothing
+  is downloaded) and picking one fills in the model or models folder. The address can be edited but
   must be on this Mac's loopback interface, with a port (not the sandbox's,
   which each start picks and records). A ready server is asked only its status route every ten seconds
   (TUFF `/tuff/v1/status`, llama.cpp `/health`, Ollama `/api/version`); the
