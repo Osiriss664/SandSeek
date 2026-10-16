@@ -121,7 +121,7 @@ public struct ResearchProcessIdentity: Equatable, Sendable {
 public struct ResearchServerMarker: Codable, Equatable, Sendable {
     public static let fileName = "model-server-started-by-app.json"
 
-    /// `ResearchServerType.rawValue`: "tuff" or "llamacpp".
+    /// `ResearchServerType.rawValue`: "tuff", "llamacpp" or "ollama".
     public let type: String
     public let port: Int
     public let pid: Int32

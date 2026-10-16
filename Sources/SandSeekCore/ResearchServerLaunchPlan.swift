@@ -9,8 +9,8 @@ import Musl
 
 // What SandSeek runs to start a model server, as plain data.
 //
-// SandSeek starts only two programs: TUFF's `TUFFServer` and llama.cpp's
-// `llama-server`. It runs the program itself with a fixed list of arguments
+// SandSeek starts only three programs: TUFF's `TUFFServer`, llama.cpp's
+// `llama-server` and Ollama's `ollama` (as `ollama serve`). It runs the program itself with a fixed list of arguments
 // (no shell, so nothing in a path or a model name can become a command), on
 // 127.0.0.1 only, and with an environment built from scratch. This file is
 // pure, so the argument lists and the rules around them are tested on any
@@ -46,6 +46,12 @@ public struct ResearchServerLaunchPlan: Equatable, Sendable {
     public static let host = "127.0.0.1"
     public static let tuffProgramName = "TUFFServer"
     public static let llamaProgramName = "llama-server"
+    public static let ollamaProgramName = "ollama"
+    /// The folder name of the Ollama desktop app.
+    public static let ollamaAppName = "Ollama.app"
+    /// Shown on the card when the chosen Ollama is the one inside Ollama.app.
+    public static let ollamaAppNote =
+        "This copy of Ollama updates itself. The Homebrew version (brew install ollama) does not."
     /// Start ports below this are refused: a server SandSeek starts is never
     /// a system service.
     public static let lowestPort = 1_024
@@ -92,6 +98,21 @@ public struct ResearchServerLaunchPlan: Equatable, Sendable {
                 model: model, alias: alias(fromModelFile: model), host: host, port: port,
                 keyFile: keyFile),
             environment: environment())
+    }
+
+    /// `ollama serve`, listening on 127.0.0.1 at `port` only. Besides the three
+    /// variables of `environment()` it gets `OLLAMA_HOST` (the address to
+    /// listen on) and `OLLAMA_NO_CLOUD` (no cloud models). Nothing else of the
+    /// app's own environment is passed on, so `OLLAMA_ORIGINS`, `OLLAMA_MODELS`
+    /// and the like from a session cannot reach it.
+    public static func ollama(server: String, port: Int) throws -> ResearchServerLaunchPlan {
+        try checkedPath(server, "The Ollama program")
+        try checkedPort(port)
+        var variables = environment()
+        variables["OLLAMA_HOST"] = "\(host):\(port)"
+        variables["OLLAMA_NO_CLOUD"] = "1"
+        return ResearchServerLaunchPlan(
+            executable: server, arguments: ["serve"], environment: variables)
     }
 
     /// The one list of llama-server arguments. The launch runs it as it is,
@@ -218,5 +239,43 @@ public struct ResearchServerLaunchPlan: Equatable, Sendable {
             throw ResearchLaunchProblem("Choose the program called \(llamaProgramName).")
         }
         return pick
+    }
+
+    /// The `ollama` program to start for what the person picked: a file called
+    /// `ollama`, or Ollama.app, which maps to the program inside it
+    /// (`Contents/Resources/ollama`). Any other name is refused.
+    public static func ollamaPath(
+        forPick pick: String, fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+    ) throws -> String {
+        try checkedPath(pick, "The program")
+        var path = pick
+        while path.count > 1, path.hasSuffix("/") { path.removeLast() }
+        let name = (path as NSString).lastPathComponent
+        if name == ollamaAppName {
+            let program = path + "/Contents/Resources/" + ollamaProgramName
+            guard fileExists(program) else {
+                throw ResearchLaunchProblem("\(program) does not exist.")
+            }
+            return program
+        }
+        guard name == ollamaProgramName else {
+            throw ResearchLaunchProblem(
+                "Choose the program called \(ollamaProgramName), or \(ollamaAppName).")
+        }
+        return path
+    }
+
+    /// True when the program is inside an app, such as Ollama.app, which
+    /// updates itself.
+    public static func isInsideApp(_ path: String) -> Bool {
+        path.contains(".app/")
+    }
+
+    /// Where the folder chooser for Ollama opens: the Homebrew program if it
+    /// exists (Apple silicon, then Intel). Nothing is chosen for the person.
+    public static func ollamaSuggestion(
+        fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+    ) -> String? {
+        ["/opt/homebrew/bin/ollama", "/usr/local/bin/ollama"].first(where: fileExists)
     }
 }

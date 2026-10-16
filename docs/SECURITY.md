@@ -545,10 +545,17 @@ does not control.
 does and does not do:
 
 - It starts only a program called `TUFFServer` (a pick of `tuff` or `TUFF.app`
-  becomes the `TUFFServer` beside it) or `llama-server`, which you choose by its
-  full path. There is no shell: the arguments are a fixed list, a path with a
-  newline or control character is refused, and `--host` is always 127.0.0.1
-  (TUFFServer has no host option and always binds loopback).
+  becomes the `TUFFServer` beside it), `llama-server` or `ollama` (a pick of
+  `Ollama.app` becomes the `ollama` inside it), which you choose by its full
+  path. Ollama is run as `ollama serve` and nothing else (Start and Stop for
+  Ollama are experimental, like the rest of the Ollama support). The copy inside
+  `Ollama.app` updates itself, and so does an `ollama` that is a link into it
+  (the one the app puts in `/usr/local/bin`, or the Homebrew cask's); the card
+  says so. The Homebrew formula (`brew install ollama`) does not. There is no
+  shell: the arguments are a fixed list, a path with a newline or control
+  character is refused, and the address is always 127.0.0.1 (`--host` for
+  llama-server, `OLLAMA_HOST` for Ollama; TUFFServer has no host option and
+  always binds loopback).
 - Before each start it follows symbolic links and checks the program: a regular
   file you can run, owned by you or root, not writable by group or others, and
   no folder from `/` down to it owned by another user or writable by others
@@ -572,8 +579,16 @@ does and does not do:
   `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`), `HOME` (your home folder from the
   account database) and `TMPDIR` (the temporary folder from `confstr`). So
   `LLAMA_ARG_*`, `DYLD_*` and `TUFF_*` settings in your environment do not reach
-  it. Its output goes to a log file readable only by you, replaced at every
+  it. Ollama gets two more, `OLLAMA_HOST=127.0.0.1:<port>` and
+  `OLLAMA_NO_CLOUD=1`; `OLLAMA_ORIGINS`, `OLLAMA_MODELS` and the like in your
+  environment do not reach it. Its output goes to a log file readable only by you, replaced at every
   start.
+- If something already answers on the port (for example the Ollama menu-bar
+  app), Start says so and starts nothing, and SandSeek never stops an Ollama it
+  did not start. Ollama ends its model runners (the `ollama runner` processes
+  that hold a loaded model) itself when it gets SIGTERM. If it has to be ended
+  with SIGKILL, a runner may be left running; this was not tried on a Mac yet,
+  so look for a leftover `ollama` in Activity Monitor then.
 - After the server answers, the network check runs; if the server turns out to be
   reachable from the network, SandSeek stops it.
 - SandSeek stops a server it started (SIGTERM, then SIGKILL after 5 seconds) on

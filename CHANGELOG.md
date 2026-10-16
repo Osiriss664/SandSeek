@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- The model server card can now start and stop Ollama (experimental, like the rest of the Ollama support): **Choose program…**,
+  **Start server** and **Stop server**, like TUFF and llama.cpp. SandSeek runs
+  `ollama serve` with `OLLAMA_HOST=127.0.0.1:<port>` and `OLLAMA_NO_CLOUD=1`
+  and no other variable from its own environment. It stops only an Ollama it
+  started (also on **Stop everything**, on quit, and after a crash, as for the
+  other servers). If something already listens on the port, for example the
+  Ollama menu-bar app, Start refuses. The copy inside `Ollama.app` updates
+  itself; the card says so, and the Homebrew version does not.
+
 ## 0.3.0 (16 October 2026)
 
 New: Ollama as a third model server, next to TUFF and llama.cpp. The sandbox

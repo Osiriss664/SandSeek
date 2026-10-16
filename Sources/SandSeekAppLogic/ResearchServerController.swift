@@ -36,10 +36,9 @@ public enum ResearchServerType: String, CaseIterable, Identifiable, Sendable {
 
     public var isAvailable: Bool { kind != nil }
 
-    /// Whether "Start server" can start a server of this type. Ollama is
-    /// started by the person (`ollama serve`); SandSeek never starts or
-    /// stops it.
-    public var canStart: Bool { self == .tuff || self == .llamacpp }
+    /// Whether "Start server" can start a server of this type. LM Studio has
+    /// no connector yet.
+    public var canStart: Bool { self == .tuff || self == .llamacpp || self == .ollama }
 
     public var displayName: String {
         switch self {
@@ -420,9 +419,11 @@ public final class ResearchServerController {
                 + "with the command below. Replace <model.gguf> with your model "
                 + "file and <name> with the name you want in the model list."
         case .ollama:
-            "Start Ollama yourself: run `ollama serve` (it listens on 127.0.0.1:11434) and "
-                + "install a model that can call tools with `ollama pull <name>`. "
-                + "SandSeek does not start or stop Ollama. Ollama support is experimental."
+            "Choose the ollama program below and click Start server, or run `ollama serve` "
+                + "yourself (it listens on 127.0.0.1:11434). Install a model that can call tools "
+                + "with `ollama pull <name>`. SandSeek stops only an Ollama it started. "
+                + "If the Ollama menu-bar app is open, quit it first: it holds the port. "
+                + "Ollama support is experimental."
         case .lmstudio:
             "\(serverType.displayName) support comes later."
         }

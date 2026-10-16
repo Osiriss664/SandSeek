@@ -84,8 +84,8 @@ such a debug build at your checkout.
 
 SandSeek connects to a model server on this Mac's loopback address (127.0.0.1)
 only. You can start the server yourself, or click **Start server** on the model
-server card: SandSeek then runs the program you chose (`TUFFServer` or
-`llama-server`) without a shell, on 127.0.0.1 and the port of the card's
+server card: SandSeek then runs the program you chose (`TUFFServer`,
+`llama-server` or `ollama serve`) without a shell, on 127.0.0.1 and the port of the card's
 address, and **Stop server** (or quitting SandSeek normally) stops it again. It
 stops only a server it started. After a crash or `kill -9` a server SandSeek
 started can keep running (in our test a Force Quit from the Dock ended it with
@@ -135,21 +135,33 @@ are done.
 SandSeek talks to Ollama's own API (`/api/chat`) on `127.0.0.1:11434`. It was
 tested once on a Mac (Ollama 0.40.4, `gemma4:12b-mlx`, from the command line:
 the automatic test's quick question and one research question). The app's
-Ollama card was not tried by hand, and no other model was tried.
+Ollama card, including **Start server**, was not tried by hand, and no other model was tried.
 
 1. Install Ollama. Two ways, which differ in updates: the app from
    ollama.com updates itself; `brew install ollama` does **not** update itself,
    so run `brew upgrade ollama` now and then.
-2. Start it yourself: the Ollama menu-bar app starts the server by itself;
-   with Homebrew run `ollama serve`. To make sure it listens on this Mac only
+2. Start it. The easiest way (Start and Stop for Ollama are experimental too): on the model server card choose **Ollama**,
+   press **Choose program…** (pick `ollama`, for example the Homebrew one in
+   `/opt/homebrew/bin`, or `Ollama.app`) and press **Start server**. SandSeek
+   runs `ollama serve` with `OLLAMA_HOST=127.0.0.1:<port>` and
+   `OLLAMA_NO_CLOUD=1` and nothing else from its own environment, and stops
+   only an Ollama it started (when you press **Stop server**, **Stop
+   everything**, or quit SandSeek normally). Quit the Ollama menu-bar app first:
+   it holds port 11434, and Start then refuses to start a second one. A copy
+   of Ollama inside `Ollama.app` updates itself, and so does an `ollama` that
+   links into it (the one the app puts in `/usr/local/bin`, or the Homebrew
+   cask's); the card says so. The Homebrew formula does not. The models stay
+   where Ollama keeps them (`~/.ollama/models`); an `OLLAMA_MODELS` setting of
+   yours does not reach the Ollama SandSeek starts.
+   You can still start Ollama yourself: the Ollama menu-bar app starts the
+   server by itself; with Homebrew run `ollama serve`. To make sure it listens on this Mac only
    and never runs cloud models, start it from a terminal as
    `OLLAMA_NO_CLOUD=1 OLLAMA_HOST=127.0.0.1:11434 ollama serve`.
    `OLLAMA_NO_CLOUD=1` makes Ollama itself refuse cloud models, as a second
    lock beside SandSeek's own check (see [SECURITY.md](SECURITY.md)). The
    menu-bar app does not read these variables from your shell; its own
    settings decide, so `ollama serve` in a terminal is the way to be sure.
-   SandSeek never starts or stops Ollama; the **Start server** button is not
-   offered for it.
+   An Ollama that you started yourself is never stopped by SandSeek.
 3. Pull a model that supports tool calls, for example `ollama pull gemma4:12b-mlx` (the model that was tried) or
    `ollama pull qwen3:8b` (not tried).
    `ollama show <model>` lists "tools" under Capabilities. Models without it
@@ -323,8 +335,8 @@ them with a command**, so you can still get them back.
 
 1. Quit SandSeek. Stop the sandbox with **Stop Sandbox** or
    `Scripts/research_sandbox.sh stop`, and the model server (**Stop server**, or
-   its own window). Check that no `TUFFServer` or `llama-server` is left in
-   Activity Monitor.
+   its own window). Check that no `TUFFServer`, `llama-server` or `ollama`
+   that SandSeek started is left in Activity Monitor.
 2. Remove the sandbox image. List the images with `container image list`, then
    remove `sandseek-sandbox:latest` with `container image delete
    sandseek-sandbox:latest` (see `container image --help` if your version names

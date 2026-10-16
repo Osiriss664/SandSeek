@@ -145,6 +145,65 @@ import Testing
             forProgram: "/Applications/TUFF.app/Contents/Resources/bin/TUFFServer") == nil)
     }
 
+    @Test func ollamaServeGetsTheHostAndNoCloudAndNothingElse() throws {
+        let plan = try ResearchServerLaunchPlan.ollama(server: "/opt/homebrew/bin/ollama", port: 11_434)
+        #expect(plan.executable == "/opt/homebrew/bin/ollama")
+        #expect(plan.arguments == ["serve"])
+        var expected = ResearchServerLaunchPlan.environment()
+        expected["OLLAMA_HOST"] = "127.0.0.1:11434"
+        expected["OLLAMA_NO_CLOUD"] = "1"
+        #expect(plan.environment == expected)
+        #expect(Set(plan.environment.keys)
+            == ["PATH", "HOME", "TMPDIR", "OLLAMA_HOST", "OLLAMA_NO_CLOUD"])
+        let other = try ResearchServerLaunchPlan.ollama(server: "/x/ollama", port: 11_500)
+        #expect(other.environment["OLLAMA_HOST"] == "127.0.0.1:11500")
+        // The same checks as the other plans: a full path, a port from 1024 up.
+        #expect(throws: ResearchLaunchProblem.self) {
+            _ = try ResearchServerLaunchPlan.ollama(server: "ollama", port: 11_434)
+        }
+        #expect(throws: ResearchLaunchProblem.self) {
+            _ = try ResearchServerLaunchPlan.ollama(server: "/x/ollama", port: 80)
+        }
+        #expect(throws: ResearchLaunchProblem.self) {
+            _ = try ResearchServerLaunchPlan.ollama(server: "/x/ollama", port: 70_000)
+        }
+    }
+
+    @Test func anOllamaPickIsTheProgramOrTheOneInsideTheApp() throws {
+        let exists: (String) -> Bool = { _ in true }
+        func program(_ pick: String) throws -> String {
+            try ResearchServerLaunchPlan.ollamaPath(forPick: pick, fileExists: exists)
+        }
+        #expect(try program("/opt/homebrew/bin/ollama") == "/opt/homebrew/bin/ollama")
+        #expect(try program("/Applications/Ollama.app")
+            == "/Applications/Ollama.app/Contents/Resources/ollama")
+        #expect(try program("/Applications/Ollama.app/")
+            == "/Applications/Ollama.app/Contents/Resources/ollama")
+        for bad in ["/usr/bin/true", "/x/ollama.sh", "/x/Ollama", "/x/Other.app", "ollama",
+                    "/x/ollama\nserve"] {
+            #expect(throws: ResearchLaunchProblem.self) { _ = try program(bad) }
+        }
+        #expect(throws: ResearchLaunchProblem.self) {
+            _ = try ResearchServerLaunchPlan.ollamaPath(
+                forPick: "/Applications/Ollama.app", fileExists: { _ in false })
+        }
+    }
+
+    @Test func theUpdateNoteAppliesOnlyToAProgramInsideAnApp() {
+        #expect(ResearchServerLaunchPlan.isInsideApp("/Applications/Ollama.app/Contents/Resources/ollama"))
+        #expect(!ResearchServerLaunchPlan.isInsideApp("/opt/homebrew/bin/ollama"))
+        #expect(ResearchServerLaunchPlan.ollamaAppNote
+            == "This copy of Ollama updates itself. The Homebrew version (brew install ollama) does not.")
+    }
+
+    @Test func theOllamaSuggestionIsHomebrewAndOnlyWhenItExists() {
+        #expect(ResearchServerLaunchPlan.ollamaSuggestion(fileExists: { _ in true })
+            == "/opt/homebrew/bin/ollama")
+        #expect(ResearchServerLaunchPlan.ollamaSuggestion(
+            fileExists: { $0 == "/usr/local/bin/ollama" }) == "/usr/local/bin/ollama")
+        #expect(ResearchServerLaunchPlan.ollamaSuggestion(fileExists: { _ in false }) == nil)
+    }
+
     @Test func llamaCppMustBeCalledLlamaServer() throws {
         #expect(try ResearchServerLaunchPlan.llamaServerPath(forPick: "/opt/homebrew/bin/llama-server")
             == "/opt/homebrew/bin/llama-server")

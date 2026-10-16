@@ -4,8 +4,8 @@ import os
 import SandSeekCore
 
 /// Starts and stops the model server from the card, and remembers which
-/// program and model to use. It starts only TUFFServer or llama-server, with
-/// the fixed arguments of `ResearchServerLaunchPlan`, and it stops only a
+/// program and model to use. It starts only TUFFServer, llama-server or
+/// `ollama serve`, with the fixed arguments of `ResearchServerLaunchPlan`, and it stops only a
 /// server it started itself (or took over after a crash, see
 /// `adoptLeftover`). A server started by hand is never touched.
 ///
@@ -111,7 +111,8 @@ public final class ResearchServerLaunchController {
         self.checkProgram = checkProgram
         for type in ResearchServerType.allCases where type.canStart {
             programs[type] = Self.saved(defaults, Self.programKey(type))
-            models[type] = Self.saved(defaults, Self.modelKey(type))
+            // Ollama has no model setting; `modelKey` would name llama.cpp's.
+            if type != .ollama { models[type] = Self.saved(defaults, Self.modelKey(type)) }
         }
         adoptLeftover()
     }
@@ -132,7 +133,8 @@ public final class ResearchServerLaunchController {
             switch type {
             case .tuff: path = try ResearchServerLaunchPlan.tuffServerPath(forPick: pick)
             case .llamacpp: path = try ResearchServerLaunchPlan.llamaServerPath(forPick: pick)
-            case .ollama, .lmstudio: return
+            case .ollama: path = try ResearchServerLaunchPlan.ollamaPath(forPick: pick)
+            case .lmstudio: return
             }
             if case .failure(let problem) = checkProgram(path) { throw problem }
             programs[type] = path
@@ -147,7 +149,8 @@ public final class ResearchServerLaunchController {
     /// (TUFF). An empty `pick` forgets the models folder; TUFFServer then uses
     /// the folder of the installed TUFF.
     public func chooseModel(_ pick: String, for type: ResearchServerType) {
-        guard type.canStart else { return }
+        // Ollama keeps its models itself: there is nothing to choose.
+        guard type.canStart, type != .ollama else { return }
         if pick.isEmpty, type == .tuff {
             models[type] = nil
             defaults.save("", forKey: Self.modelKey(type))
@@ -235,7 +238,11 @@ public final class ResearchServerLaunchController {
         }
         // A fresh look at the port, not the card's last state, which can be
         // ten seconds old.
-        if let problem = await portProblem(port) { return fail(problem) }
+        if let problem = await portProblem(port) {
+            return fail(type == .ollama
+                ? problem + " If it is the Ollama menu-bar app, quit it from its menu first."
+                : problem)
+        }
         guard attempt == mine else { return }
 
         let launched: any ResearchLaunchedServer
@@ -261,7 +268,12 @@ public final class ResearchServerLaunchController {
         }
 
         let timeout = kind == .tuff ? timing.tuffReady : timing.llamaReady
-        let readyPath = kind == .tuff ? "/tuff/v1/status" : "/health"
+        let readyPath: String
+        switch kind {
+        case .tuff: readyPath = "/tuff/v1/status"
+        case .llamacpp: readyPath = "/health"
+        case .ollama: readyPath = "/api/version"
+        }
         let deadline = ContinuousClock.now + timeout
         var lastStatus: Int?
         while true {
@@ -345,17 +357,18 @@ public final class ResearchServerLaunchController {
             }
             return try .llamacpp(
                 server: program, model: model, port: port, keyFile: server.keyFilePath ?? "")
-        case .ollama, .lmstudio:
+        case .ollama:
+            // No model and no key: Ollama has neither a model to name nor an
+            // API key; it keeps its models in its own folder.
+            return try .ollama(server: program, port: port)
+        case .lmstudio:
             throw ResearchLaunchProblem(Self.cannotStartMessage(type))
         }
     }
 
-    /// Why Start is not offered for a type: Ollama is started by the person,
-    /// and the others have no connector yet.
+    /// Why Start is not offered for a type: it has no connector yet (LM Studio).
     static func cannotStartMessage(_ type: ResearchServerType) -> String {
-        type == .ollama
-            ? "SandSeek does not start Ollama. Run `ollama serve` yourself."
-            : "\(type.displayName) support comes later."
+        "\(type.displayName) support comes later."
     }
 
     /// Nil when nothing answers on the port and the connection was refused;

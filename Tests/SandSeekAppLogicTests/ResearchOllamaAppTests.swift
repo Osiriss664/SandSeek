@@ -405,49 +405,188 @@ private final class NothingListens: ResearchHTTPTransport, @unchecked Sendable {
     }
 }
 
+/// Ollama that is not there until `open()` is called, as before `ollama serve`
+/// runs. Everything is then answered by the scripted Ollama.
+private final class GatedOllama: ResearchHTTPTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private var isOpen: Bool
+    let inner = FakeOllamaServices()
+
+    init(open: Bool = false) { isOpen = open }
+
+    func open() { lock.withLock { isOpen = true } }
+
+    func send(method: String, url: URL, body: Data?) async throws -> ResearchHTTPResponse {
+        if !lock.withLock({ isOpen }) { throw URLError(.cannotConnectToHost) }
+        return try await inner.send(method: method, url: url, body: body)
+    }
+}
+
 @Suite @MainActor struct ResearchOllamaLaunchTests {
-    @Test func startServerNeverPlansAnOllamaLaunch() async {
-        let launcher = FakeServerLauncher()
-        let launch = testLaunchController(launcher: launcher)
-        let server = ResearchServerController(
-            defaults: MemorySettings(), keyStore: MemoryKeyStore(key: "k"),
-            transport: FakeOllamaServices())
-        server.select(.ollama)
-        let blocker = launch.startBlocker(for: server)
-        #expect(blocker?.contains("does not start Ollama") == true)
-        #expect(blocker?.contains("ollama serve") == true)
-        await launch.start(using: server)
-        #expect(launcher.plans.isEmpty)
-        #expect(launch.owned == nil)
-        guard case .failed(let message) = launch.state else {
-            Issue.record("expected the start to fail, got \(launch.state)")
-            return
-        }
-        #expect(message.contains("ollama serve"), "\(message)")
+    private static let fast = ResearchServerLaunchController.Timing(
+        poll: .milliseconds(5), tuffReady: .seconds(5), llamaReady: .seconds(5),
+        stopGrace: .milliseconds(150), killGrace: .milliseconds(150))
+
+    private struct Rig {
+        let launch: ResearchServerLaunchController
+        let server: ResearchServerController
+        let launcher: FakeServerLauncher
+        let ollama: GatedOllama
+        let stateDirectory: URL
+        var markerExists: Bool { ResearchServerMarker.load(from: stateDirectory) != nil }
     }
 
-    @Test func noProgramOrModelCanBeChosenForOllama() {
+    /// A card with Ollama chosen and a program chosen, a fake launcher, and an
+    /// Ollama that answers once the launcher has started it (unless `answering`
+    /// from the start).
+    private func makeRig(program: String? = "/opt/homebrew/bin/ollama",
+                         answering: Bool = false, exposed: Bool = false) -> Rig {
+        let ollama = GatedOllama(open: answering)
+        let settings = MemorySettings()
+        if let program { settings.save(program, forKey: "ResearchServerProgram-ollama") }
+        let server = ResearchServerController(
+            defaults: MemorySettings(), keyStore: MemoryKeyStore(key: nil), transport: ollama,
+            exposureCheck: { port in
+                ResearchExposureReport(
+                    port: port, loopbackAnswered: true,
+                    checked: [.ipv4(192, 168, 1, 5)], reachable: exposed ? [.ipv4(192, 168, 1, 5)] : [])
+            })
+        server.select(.ollama)
+        let launcher = FakeServerLauncher()
+        let hooked = HookedLauncher(inner: launcher, after: { ollama.open() })
+        let state = temporaryDirectory("SandSeekOllamaState")
+        let launch = testLaunchController(
+            settings: settings, launcher: hooked, transport: ollama,
+            stateDirectory: state, timing: ResearchOllamaLaunchTests.fast)
+        return Rig(launch: launch, server: server, launcher: launcher, ollama: ollama,
+                   stateDirectory: state)
+    }
+
+    @Test func ollamaCanBeStartedWithoutAModel() {
+        #expect(ResearchServerType.ollama.canStart)
+        let rig = makeRig()
+        #expect(rig.launch.startBlocker(for: rig.server) == nil)
+        let none = makeRig(program: nil)
+        #expect(none.launch.startBlocker(for: none.server) == "Choose the program first.")
+    }
+
+    @Test func startRunsOllamaServeAndWaitsForTheVersionRoute() async {
+        let rig = makeRig()
+        await rig.launch.start(using: rig.server)
+        #expect(rig.launch.state == .running)
+        #expect(rig.launcher.plans.count == 1)
+        let plan = rig.launcher.plans[0]
+        #expect(plan.executable == "/opt/homebrew/bin/ollama")
+        #expect(plan.arguments == ["serve"])
+        #expect(plan.environment["OLLAMA_HOST"] == "127.0.0.1:11434")
+        #expect(plan.environment["OLLAMA_NO_CLOUD"] == "1")
+        #expect(Set(plan.environment.keys)
+            == ["PATH", "HOME", "TMPDIR", "OLLAMA_HOST", "OLLAMA_NO_CLOUD"])
+        // The version route answered, then the normal Check ran.
+        #expect(rig.ollama.inner.paths.first == "/api/version")
+        #expect(rig.server.state == .ready)
+        #expect(rig.launch.owned?.type == .ollama)
+        #expect(rig.launch.owned?.port == 11_434)
+        #expect(rig.markerExists)
+    }
+
+    @Test func startIsRefusedWhenSomethingAlreadyListensOnThePort() async {
+        let rig = makeRig(answering: true)
+        await rig.launch.start(using: rig.server)
+        guard case .failed(let message) = rig.launch.state else {
+            Issue.record("expected the start to fail, got \(rig.launch.state)")
+            return
+        }
+        #expect(message.contains("already answers on 127.0.0.1:11434"), "\(message)")
+        #expect(message.contains("Ollama menu-bar app"), "\(message)")
+        #expect(rig.launcher.plans.isEmpty)
+        #expect(rig.launch.owned == nil)
+        #expect(!rig.markerExists)
+    }
+
+    @Test func anOllamaReachableFromTheNetworkIsStopped() async {
+        let rig = makeRig(exposed: true)
+        await rig.launch.start(using: rig.server)
+        guard case .failed(let message) = rig.launch.state else {
+            Issue.record("expected the start to fail, got \(rig.launch.state)")
+            return
+        }
+        #expect(message.contains("Another program may be listening"), "\(message)")
+        #expect(rig.launcher.servers[0].signals == ["TERM"])
+        #expect(rig.launch.owned == nil)
+        #expect(!rig.markerExists)
+    }
+
+    @Test func stopEndsOnlyTheOllamaSandSeekStarted() async {
+        let rig = makeRig()
+        // Nothing started by SandSeek: Stop does nothing.
+        await rig.launch.stop(using: rig.server)
+        #expect(rig.launcher.servers.isEmpty)
+        await rig.launch.start(using: rig.server)
+        #expect(rig.launch.owned?.type == .ollama)
+        await rig.launch.stop(using: rig.server)
+        #expect(rig.launcher.servers[0].signals == ["TERM"])
+        #expect(rig.launch.state == .idle)
+        #expect(rig.launch.owned == nil)
+        #expect(!rig.markerExists)
+    }
+
+    @Test func aProgramPickMustBeCalledOllamaOrBeOllamaApp() {
         let launch = testLaunchController()
         launch.chooseProgram("/opt/homebrew/bin/ollama", for: .ollama)
+        #expect(launch.programs[.ollama] == "/opt/homebrew/bin/ollama")
+        #expect(launch.choiceProblem == nil)
+        launch.chooseProgram("/bin/sh", for: .ollama)
+        #expect(launch.choiceProblem?.contains("ollama") == true)
+        #expect(launch.programs[.ollama] == "/opt/homebrew/bin/ollama")
+    }
+
+    @Test func noModelCanBeChosenForOllama() {
+        // A saved llama.cpp model is not read as Ollama's.
+        let settings = MemorySettings()
+        settings.save("/x/model.gguf", forKey: "ResearchServerModel-llamacpp")
+        let launch = testLaunchController(settings: settings)
+        #expect(launch.models[.ollama] == nil)
+        #expect(launch.models[.llamacpp] == "/x/model.gguf")
         launch.chooseModel("/tmp", for: .ollama)
-        #expect(launch.programs[.ollama] == nil)
         #expect(launch.models[.ollama] == nil)
         #expect(launch.choiceProblem == nil)
     }
 
-    @Test func aMarkerNamingOllamaIsNotTakenOver() throws {
+    @Test func aLeftoverOllamaThatMatchesIsTakenOverNotStopped() throws {
         let state = temporaryDirectory("SandSeekOllamaMarker")
         let identity = ResearchProcessIdentity(
             startSeconds: 1_000, startMicroseconds: 7, path: "/opt/homebrew/bin/ollama")
         try ResearchServerMarker(type: "ollama", port: 11_434, pid: 41_000, identity: identity)
             .write(to: state)
         let launch = testLaunchController(stateDirectory: state, identityOf: { _ in identity })
+        #expect(launch.owned?.type == .ollama)
+        #expect(launch.owned?.adopted == true)
+        #expect(launch.state == .running)
+    }
+
+    @Test func aMarkerThatDoesNotMatchIsDeleted() throws {
+        let state = temporaryDirectory("SandSeekOllamaMarker")
+        let identity = ResearchProcessIdentity(
+            startSeconds: 1_000, startMicroseconds: 7, path: "/opt/homebrew/bin/ollama")
+        try ResearchServerMarker(type: "ollama", port: 11_434, pid: 41_000, identity: identity)
+            .write(to: state)
+        let launch = testLaunchController(stateDirectory: state, identityOf: { _ in nil })
         #expect(launch.owned == nil)
+        #expect(ResearchServerMarker.load(from: state) == nil)
+
+        // The process id now belongs to a process that started at another time.
+        try ResearchServerMarker(type: "ollama", port: 11_434, pid: 41_000, identity: identity)
+            .write(to: state)
+        let reused = ResearchProcessIdentity(
+            startSeconds: 2_000, startMicroseconds: 7, path: "/opt/homebrew/bin/ollama")
+        let other = testLaunchController(stateDirectory: state, identityOf: { _ in reused })
+        #expect(other.owned == nil)
         #expect(ResearchServerMarker.load(from: state) == nil)
     }
 
-    @Test func onlyTuffAndLlamaCppCanBeStarted() {
-        #expect(ResearchServerType.allCases.filter(\.canStart) == [.tuff, .llamacpp])
+    @Test func lmStudioStillCannotBeStarted() {
+        #expect(ResearchServerType.allCases.filter(\.canStart) == [.tuff, .llamacpp, .ollama])
     }
 }
 

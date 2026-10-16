@@ -63,7 +63,7 @@ addresses go to the internet. More in [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.m
      you built yourself opens without "Open Anyway".
 3. Open SandSeek and choose your server on the **Model server** card. Either
    start the server yourself and press **Check**, or choose its program once
-   and press **Start server** (TUFF and llama.cpp; start Ollama yourself).
+   and press **Start server** (TUFF, llama.cpp or Ollama, which is experimental).
    Then press **Start Sandbox** on the **Web sandbox** card; the first start
    builds the sandbox image and takes a few minutes. Or press **Start everything**, which does
    both and runs the security check. Type your question in the box on top and
@@ -108,12 +108,13 @@ above all test reports.
   `--server-type llamacpp` with plain requests (no streaming), the app's
   Thinking switch has no effect on it yet, and it was probed but not measured
   with a research run. The app connects to a
-  server that runs on 127.0.0.1, and can also start `TUFFServer` or
-  `llama-server` itself (**Start server** on the model server card). It stops
-  only a server it started, when you quit it normally.
+  server that runs on 127.0.0.1, and can also start `TUFFServer`,
+  `llama-server` or `ollama serve` itself (**Start server** on the model
+  server card). It stops only a server it started, when you quit it normally.
   Ollama (experimental, `--server-type ollama`) uses Ollama's own `/api/chat`
-  with streaming. You start it yourself (`ollama serve`): SandSeek never
-  starts or stops Ollama. The model needs tool support; Ollama cloud models
+  with streaming. You can press **Start server** (experimental too; SandSeek runs
+  `ollama serve` on 127.0.0.1) or start it yourself; SandSeek stops only an
+  Ollama it started. The model needs tool support; Ollama cloud models
   (names ending in `:cloud` or `-cloud`) are refused, because they run on
   ollama.com. SandSeek asks for a 32,768-token context (or the model's
   maximum if that is smaller); `--context-tokens N` changes it. Ollama has no
