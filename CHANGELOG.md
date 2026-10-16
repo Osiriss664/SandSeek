@@ -22,6 +22,9 @@
 - New Tips page in the sidebar: short hints for using the app (Quick answer
   or Thorough, which model server, one model server at a time on a 16 GB Mac,
   the Figure check list) and what our own tests on a Mac found.
+- Settings has an Appearance choice: System (the default, follows the Mac),
+  Light or Dark. It applies to all SandSeek windows; printed and PDF reports
+  stay black on white.
 
 ## 0.3.0 (16 October 2026)
 

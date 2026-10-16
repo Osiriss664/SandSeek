@@ -19,6 +19,14 @@ private final class ForegroundAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Before any window exists, so the chosen look shows from the first
+    /// frame, also in a Report window macOS restores on its own.
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        MainActor.assumeIsolated {
+            NSApp.appearance = AppAppearance.stored.nsAppearance
+        }
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // An empty handler, not SIG_IGN: an ignored signal stays ignored in
         // every program the app starts (container, the sandbox script, the

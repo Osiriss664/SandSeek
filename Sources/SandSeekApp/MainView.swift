@@ -1,3 +1,4 @@
+import AppKit
 import SandSeekAppLogic
 import SwiftUI
 
@@ -13,6 +14,7 @@ enum SidebarItem: Hashable {
 struct MainView: View {
     let workspace: ResearchWorkspace
     @State private var selection: SidebarItem? = .research
+    @AppStorage(AppAppearance.storageKey) private var appearance: AppAppearance = .system
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -32,6 +34,9 @@ struct MainView: View {
             case .tips:
                 TipsScreen()
             }
+        }
+        .onChange(of: appearance, initial: true) { _, mode in
+            NSApp.appearance = mode.nsAppearance
         }
     }
 

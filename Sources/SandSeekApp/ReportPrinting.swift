@@ -85,6 +85,9 @@ enum ReportPrinting {
         view.isRichText = true
         view.drawsBackground = true
         view.backgroundColor = .white
+        // Always the light look, whatever the app's Appearance, so the
+        // printed text can never come out light on white.
+        view.appearance = NSAppearance(named: .aqua)
         view.isAutomaticLinkDetectionEnabled = false
         view.isHorizontallyResizable = false
         view.isVerticallyResizable = true
