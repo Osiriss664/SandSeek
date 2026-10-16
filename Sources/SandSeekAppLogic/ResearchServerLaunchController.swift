@@ -74,6 +74,13 @@ public final class ResearchServerLaunchController {
     public private(set) var choiceProblem: String?
     public private(set) var programs: [ResearchServerType: String] = [:]
     public private(set) var models: [ResearchServerType: String] = [:]
+    /// The `.gguf` files and the TUFF models folders found on this Mac by
+    /// `refreshFound`. They are only shown on the card; picking one goes
+    /// through `chooseModel` like a pick from the file dialog.
+    public private(set) var foundGGUF: [ResearchLocalGGUF] = []
+    public private(set) var foundTUFF: [ResearchTUFFModelsFolder] = []
+    /// True while a search for models runs.
+    public private(set) var isLookingForModels = false
     /// Counts the ends of a server SandSeek started that SandSeek did not ask
     /// for. Whatever answers on the port afterwards is not SandSeek's (for
     /// Ollama it is often the menu-bar app's own server), so the workspace
@@ -192,6 +199,34 @@ public final class ResearchServerLaunchController {
             choiceProblem = nil
         } catch {
             choiceProblem = String(describing: error)
+        }
+    }
+
+    /// Looks for models already on this Mac: `.gguf` files for llama.cpp, TUFF
+    /// models folders for TUFF (nothing for Ollama, which lists its own). The
+    /// search only reads folders and runs off the main actor. `home` is a
+    /// parameter so a test can use a temporary folder.
+    public func refreshFound(for type: ResearchServerType,
+                             home: String = ResearchServerLaunchPlan.userHome()) async {
+        switch type {
+        case .llamacpp:
+            let roots = ResearchLocalModels.defaultGGUFRoots(home: home, chosenModel: models[type])
+            isLookingForModels = true
+            let files = await Task.detached(priority: .utility) {
+                ResearchLocalModels.findGGUF(roots: roots)
+            }.value
+            foundGGUF = files
+            isLookingForModels = false
+        case .tuff:
+            let folders = ResearchLocalModels.defaultTUFFFolders(home: home, program: programs[type])
+            isLookingForModels = true
+            let found = await Task.detached(priority: .utility) {
+                ResearchLocalModels.findTUFFModels(folders: folders)
+            }.value
+            foundTUFF = found
+            isLookingForModels = false
+        case .ollama, .lmstudio:
+            break
         }
     }
 

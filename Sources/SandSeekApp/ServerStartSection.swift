@@ -47,6 +47,7 @@ struct ServerStartSection: View {
                         label: "Models folder (optional)", path: launch.models[type],
                         placeholder: "TUFF's own folder", button: "Choose models folder…",
                         action: chooseModel)
+                    foundModels
                     if launch.models[type] != nil {
                         Button("Use TUFF's own folder") { launch.chooseModel("", for: type) }
                             .buttonStyle(.link)
@@ -57,6 +58,7 @@ struct ServerStartSection: View {
                     chosenRow(
                         label: "Model", path: launch.models[type], placeholder: "not chosen",
                         button: "Choose model…", action: chooseModel)
+                    foundModels
                 }
                 if let problem = launch.choiceProblem {
                     Text(problem)
@@ -67,7 +69,60 @@ struct ServerStartSection: View {
                 controls
                 status
             }
+            // Looks when the card appears, and again when another program or
+            // server type is chosen.
+            .task(id: "\(type)|\(launch.programs[type] ?? "")") {
+                await launch.refreshFound(for: type)
+            }
         }
+    }
+
+    /// "Models on this Mac": the models already on disk, found by
+    /// `refreshFound`. A pick does what the file dialog does. Ollama lists
+    /// its own models after Check, so it shows nothing here.
+    @ViewBuilder
+    private var foundModels: some View {
+        let isEmpty = type == .tuff ? launch.foundTUFF.isEmpty : launch.foundGGUF.isEmpty
+        HStack(spacing: 10) {
+            if !isEmpty {
+                Menu("Models on this Mac") {
+                    if type == .tuff {
+                        ForEach(launch.foundTUFF) { folder in
+                            Button("\((folder.path as NSString).abbreviatingWithTildeInPath): "
+                                + folder.models.joined(separator: ", ")) {
+                                launch.chooseModel(folder.path, for: .tuff)
+                            }
+                        }
+                    } else {
+                        ForEach(launch.foundGGUF) { file in
+                            Button("\(file.name) (\(Self.sizeText(file.size)))") {
+                                launch.chooseModel(file.path, for: .llamacpp)
+                            }
+                        }
+                    }
+                }
+                .controlSize(.small)
+                .fixedSize()
+                .disabled(launch.state.isBusy || launch.owned != nil)
+            } else if launch.isLookingForModels {
+                ProgressView().controlSize(.small)
+            } else {
+                Text(type == .tuff
+                    ? "No models found in the usual folders. Use Choose models folder…"
+                    : "No models found in the usual folders. Use Choose model…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Button("Look again") { Task { await launch.refreshFound(for: type) } }
+                .buttonStyle(.link)
+                .font(.caption)
+                .disabled(launch.isLookingForModels)
+        }
+    }
+
+    private static func sizeText(_ bytes: Int64) -> String {
+        ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
     }
 
     private var programLabel: String {

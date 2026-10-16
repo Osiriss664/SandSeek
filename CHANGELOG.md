@@ -6,6 +6,13 @@ New: the app starts and stops Ollama, a Tips page and a Light/Dark choice.
 The sandbox image changes (three small package updates), so the first Start
 after updating rebuilds it, which takes a few minutes.
 
+- New **Models on this Mac** menu on the model server card, for llama.cpp and
+  TUFF. It lists the models already on disk (`.gguf` files from llama.cpp, LM
+  Studio and Hugging Face folders; installed TUFF models in TUFF's models
+  folder and the clone's `scratch`), and picking one does what **Choose
+  model…** or **Choose models folder…** does. **Look again** searches again.
+  The search is read-only, bounded and runs in the background; SandSeek never
+  downloads a model. Ollama is unchanged.
 - The model server card can now start and stop Ollama (experimental, like the rest of the Ollama support): **Choose program…**,
   **Start server** and **Stop server**, like TUFF and llama.cpp. SandSeek runs
   `ollama serve` with `OLLAMA_HOST=127.0.0.1:<port>` and `OLLAMA_NO_CLOUD=1`

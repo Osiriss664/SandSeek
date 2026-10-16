@@ -94,6 +94,19 @@ Activity Monitor. Run only one SandSeek
 at a time: a second one would take over the first one's server as a leftover and
 stop it when it quits.
 
+For llama.cpp and TUFF, the card also has a **Models on this Mac** menu, so you
+do not have to find the model in a file dialog. It lists the `.gguf` files in
+`~/Library/Caches/llama.cpp`, `~/.cache/llama.cpp`, `~/.lmstudio/models`,
+`~/.cache/lm-studio/models`, `~/.cache/huggingface/hub` and the folder of the
+model you chose last (without vision projector files and the later parts of
+split models), and, for TUFF, the models folders with their installed models
+(`~/Library/Application Support/TUFF/Models`, and `scratch` in the clone your
+TUFFServer was built in). Picking an entry does the same as **Choose model…** or
+**Choose models folder…**; **Look again** searches again. The search only reads
+folder names and two small files per TUFF model, never downloads anything, and
+is limited in depth and number of entries. Ollama lists its own models after
+Check. **Choose model…** still works for anything the menu misses.
+
 **The server must listen on 127.0.0.1 only**, never on all addresses: a server
 that listens on the network can be used by every machine on it. Started from
 the card it does. If you start it yourself, SandSeek checks this for you (see
