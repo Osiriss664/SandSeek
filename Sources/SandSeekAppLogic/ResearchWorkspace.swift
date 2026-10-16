@@ -185,10 +185,24 @@ public final class ResearchWorkspace {
             checkedUnaskedEnds = ends
             return
         }
+        // A start under way runs the Check itself once its server answers.
+        guard launch.state != .starting else { return }
         switch server.state {
         case .ready, .problem:
+            // Marked first, so a second look that comes in meanwhile does
+            // not run the Check twice.
+            let before = checkedUnaskedEnds
             checkedUnaskedEnds = ends
             await server.check()
+            switch server.state {
+            case .ready, .problem:
+                break
+            case .notChecked, .checking, .off:
+                // The look a moment ago still saw the server that ended, or
+                // the address changed meanwhile: nothing was checked, so the
+                // next look tries again.
+                if checkedUnaskedEnds == ends { checkedUnaskedEnds = before }
+            }
         case .notChecked, .checking, .off:
             // Nothing answers yet; the next look tries again.
             return

@@ -622,9 +622,11 @@ does and does not do:
   and the loopback address no longer apply. Quit the menu-bar app while you
   use the Ollama SandSeek started. Something similar can happen between the
   look at the port and the start: if another program takes the port then,
-  SandSeek's Ollama ends with exit code 1. Start waits one more poll after
-  the first answer, so this end is reported ("another program most likely
-  took the port") and the other server is not taken for SandSeek's.
+  SandSeek's Ollama ends with exit code 1. Start waits one more poll (0.7
+  seconds) after the first answer, so an end within that time is reported
+  ("another program most likely took the port") and the other server is not
+  taken for SandSeek's. An end that comes later still turns the card to the
+  "ended" message, and the Check then runs on what answers, as above.
 - Ollama ends its model runners (the `ollama runner` processes that hold a
   loaded model) itself when it gets SIGTERM. When SandSeek has to end it with
   SIGKILL (it did not stop within 5 seconds), a runner would live on: on

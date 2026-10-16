@@ -417,6 +417,8 @@ private final class GatedOllama: ResearchHTTPTransport, @unchecked Sendable {
 
     func open() { lock.withLock { isOpen = true } }
 
+    func close() { lock.withLock { isOpen = false } }
+
     /// Runs `hook` once, when `/api/version` has first answered 200.
     func afterFirstVersion(_ hook: @escaping @Sendable () -> Void) {
         lock.withLock { versionHook = hook }
@@ -747,6 +749,36 @@ private struct OtherProgramLauncher: ResearchServerLaunching {
         await workspace.refresh()
         guard case .reachable = rig.server.exposure else {
             Issue.record("expected the warning to stay, got \(rig.server.exposure)")
+            return
+        }
+    }
+
+    @Test func theCheckAfterAnUnaskedEndWaitsUntilSomethingAnswers() async throws {
+        let rig = makeRig()
+        let workspace = try makeWorkspace(for: rig)
+        await rig.launch.start(using: rig.server)
+        #expect(rig.launch.state == .running)
+
+        // SandSeek's Ollama still answers the periodic look, and ends right
+        // after it; the menu-bar app's Ollama is not up yet.
+        rig.exposedNow.value = true
+        let ollama = rig.ollama
+        let launcher = rig.launcher
+        ollama.afterFirstVersion {
+            ollama.close()
+            launcher.servers.first?.end(ResearchServerExit(code: 2, bySignal: true))
+        }
+        await workspace.refresh()
+        await waitUntil { rig.launch.owned == nil }
+        #expect(rig.launch.unaskedEnds == 1)
+        await workspace.refresh()
+        #expect(rig.server.state == .off)
+
+        // The replacement answers: the Check that found nothing is run again.
+        ollama.open()
+        await workspace.refresh()
+        guard case .reachable = rig.server.exposure else {
+            Issue.record("expected the replacement to be found reachable, got \(rig.server.exposure)")
             return
         }
     }
