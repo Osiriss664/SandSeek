@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 (16 October 2026)
+
+New: the app starts and stops Ollama, a Tips page and a Light/Dark choice.
+The sandbox image changes (three small package updates), so the first Start
+after updating rebuilds it, which takes a few minutes.
 
 - The model server card can now start and stop Ollama (experimental, like the rest of the Ollama support): **Choose program…**,
   **Start server** and **Stop server**, like TUFF and llama.cpp. SandSeek runs
@@ -25,6 +29,11 @@
 - Settings has an Appearance choice: System (the default, follows the Mac),
   Light or Dark. It applies to all SandSeek windows; printed and PDF reports
   stay black on white.
+- Sandbox packages updated: pypdf 6.20.0 to 6.20.1, trafilatura 2.3.0 to
+  2.3.1, pytz 2026.4 to 2026.5 (still pinned by hash in
+  `Sandbox/requirements.txt`). pypdf 6.20.1 includes a security fix for
+  cyclic outline trees in code SandSeek does not use (it only reads text);
+  the other two are bug fixes.
 
 ## 0.3.0 (16 October 2026)
 
