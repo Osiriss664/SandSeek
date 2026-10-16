@@ -12,14 +12,16 @@ tool. The model has exactly two tools, `web_search` and `open_page`: no shell,
 no file access, no network tool. `open_page` reads web pages and text PDFs (up
 to 5 MB and 50 pages, no OCR), parsed inside the VM.
 
-Status: 0.3.0. SandSeek began in a fork of TUFF. The command-line tool,
+Status: 0.4.1. SandSeek began in a fork of TUFF. The command-line tool,
 the core library and the Mac app (a window with the same research loop) are one
 Swift package. 0.2.0 was built, tested and tried by hand on a Mac with macOS
 27, TUFF 9.3.0 and Qwen3.6 35B (15 October 2026), including the safety test
 ([docs/SAFETY_TEST.md](docs/SAFETY_TEST.md)); Start server was tried with TUFF
-8.3.11 and llama.cpp for 0.1.0. 0.3.0 adds experimental Ollama support,
+8.3.11 and llama.cpp for 0.1.0. 0.3.0 added experimental Ollama support,
 tested on a Mac with Ollama 0.40.4 and Gemma 4 12B from the command line
-(October 2026).
+(October 2026). 0.4.1 lets the app start and stop Ollama and list the models
+already on this Mac, and adds a Tips page and a Light/Dark choice; all of
+these were tried by hand on a Mac.
 
 ![The SandSeek window: the question box with model and mode, Stop everything, the folded Model server and Web sandbox cards showing Connected, Ready and Signed, then an answer with its folded Figure check and Pages that could not be read lists, the sources and the searches](docs/assets/sandseek-app.png)
 
@@ -49,11 +51,11 @@ addresses go to the internet. More in [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.m
 
    LM Studio is planned; other servers are not supported yet.
 2. Get the app, in one of two ways:
-   - **Download:** `SandSeek-0.3.0.zip` from the release page, unzip it and
+   - **Download:** `SandSeek-0.4.1.zip` from the release page, unzip it and
      move SandSeek to Applications. It is not notarized: on first launch
      choose System Settings → Privacy & Security → Open Anyway.
    - **Build it yourself:** with Xcode 26 or its command line tools (Swift
-     6.2 or newer; 0.3.0 was built on macOS 27):
+     6.2 or newer; 0.4.1 was built on macOS 27):
 
          git clone https://github.com/Osiriss664/SandSeek.git
          cd SandSeek
@@ -104,7 +106,7 @@ above all test reports.
 - A local model server on 127.0.0.1: TUFF 8.3.1 or newer, or llama.cpp or
   Ollama (both experimental, see below). Streaming is on by
   default for TUFF, so that Stop and the time limits make it stop generating.
-  llama.cpp (`llama-server`) is experimental in 0.3.0: it works through
+  llama.cpp (`llama-server`) is experimental in 0.4.1: it works through
   `--server-type llamacpp` with plain requests (no streaming), the app's
   Thinking switch has no effect on it yet, and it was probed but not measured
   with a research run. The app connects to a
@@ -137,7 +139,10 @@ ad hoc. There is no Sparkle update and no notarization yet. `swift run
 SandSeekApp` also opens the window, but a bare executable has no sandbox
 files inside it (see below).
 
-The window has a sidebar (Research, Reports, Settings, the last few reports).
+The window has a sidebar (Research, Reports, Settings, Tips, the last few
+reports). Tips has short hints and what our own tests on a Mac found.
+Settings also has an Appearance choice: System (follows the Mac), Light or
+Dark.
 The Research screen starts with the question field, a model picker and a Quick
 answer / Thorough switch. Below it are a card for the model server and a card
 for the sandbox with a Security check; click the arrow by a card's title to
@@ -154,7 +159,9 @@ and a model server SandSeek started.
 
 - **Model server.** Pick TUFF (127.0.0.1:8080), llama.cpp (127.0.0.1:8081) or Ollama
   (127.0.0.1:11434, experimental; the model list shows only local models with
-  tool support); LM Studio is listed as "later". The address can be edited but
+  tool support); LM Studio is listed as "later". For llama.cpp and TUFF,
+  **Models on this Mac** lists the models already on disk (read-only, nothing
+  is downloaded) and picking one fills in the model or models folder. The address can be edited but
   must be on this Mac's loopback interface, with a port (not the sandbox's,
   which each start picks and records). A ready server is asked only its status route every ten seconds
   (TUFF `/tuff/v1/status`, llama.cpp `/health`, Ollama `/api/version`); the
@@ -270,9 +277,11 @@ To record real streams from a running server for test fixtures, use
   key file, `/props`, `/health`, tool calls and the context window.
 - Ollama support is experimental. It was tested once on a Mac (Ollama 0.40.4,
   `gemma4:12b-mlx`, from the command line: the automatic test's quick question
-  and one research question). The app's Ollama card has not been tried by
-  hand, no other model was tried, and Ollama was not measured against the
-  injection pages. The test fixtures include recordings of that session.
+  and one research question). The app's Ollama card, with Start and Stop,
+  was tried by hand once with Homebrew's Ollama; the Ollama.app copy and the
+  menu-bar app were not. No other model was tried, and Ollama was not
+  measured against the injection pages. The test fixtures include recordings
+  of the command-line session.
   LM Studio comes later.
 - Thorough preset values are a first guess; they will be adjusted after
   measuring.

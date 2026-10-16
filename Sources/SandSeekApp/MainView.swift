@@ -1,3 +1,4 @@
+import AppKit
 import SandSeekAppLogic
 import SwiftUI
 
@@ -5,13 +6,15 @@ enum SidebarItem: Hashable {
     case research
     case reports
     case settings
+    case tips
 }
 
-/// The window: a sidebar (Research, Reports, Settings and the last few
+/// The window: a sidebar (Research, Reports, Settings, Tips and the last few
 /// reports) and the screen it picks.
 struct MainView: View {
     let workspace: ResearchWorkspace
     @State private var selection: SidebarItem? = .research
+    @AppStorage(AppAppearance.storageKey) private var appearance: AppAppearance = .system
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -28,7 +31,12 @@ struct MainView: View {
                 }
             case .settings:
                 SettingsScreen(presets: workspace.presets, server: workspace.server)
+            case .tips:
+                TipsScreen()
             }
+        }
+        .onChange(of: appearance, initial: true) { _, mode in
+            NSApp.appearance = mode.nsAppearance
         }
     }
 
@@ -53,6 +61,8 @@ struct MainView: View {
                     .tag(SidebarItem.reports)
                 Label("Settings", systemImage: "gearshape")
                     .tag(SidebarItem.settings)
+                Label("Tips", systemImage: "lightbulb")
+                    .tag(SidebarItem.tips)
             }
             let recent = Array(workspace.reports.reports.prefix(5))
             if !recent.isEmpty {

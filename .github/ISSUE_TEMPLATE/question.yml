@@ -16,4 +16,4 @@ body:
     id: versions
     attributes:
       label: Versions (if it is about your setup)
-      placeholder: "sandseek 0.3.0, macOS 26.1, TUFF 8.3.1"
+      placeholder: "sandseek 0.4.1, macOS 26.1, TUFF 8.3.1"

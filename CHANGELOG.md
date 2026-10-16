@@ -1,7 +1,18 @@
 # Changelog
 
-## Unreleased
+## 0.4.1 (16 October 2026)
 
+New: the app starts and stops Ollama, lists the models already on this Mac, and has a Tips page and a Light/Dark choice.
+The sandbox image changes (three small package updates), so the first Start
+after updating rebuilds it, which takes a few minutes.
+
+- New **Models on this Mac** menu on the model server card, for llama.cpp and
+  TUFF. It lists the models already on disk (`.gguf` files from llama.cpp, LM
+  Studio and Hugging Face folders; installed TUFF models in TUFF's models
+  folder and the clone's `scratch`), and picking one does what **Choose
+  model…** or **Choose models folder…** does. **Look again** searches again.
+  The search is read-only, bounded and runs in the background; SandSeek never
+  downloads a model. Ollama is unchanged.
 - The model server card can now start and stop Ollama (experimental, like the rest of the Ollama support): **Choose program…**,
   **Start server** and **Stop server**, like TUFF and llama.cpp. SandSeek runs
   `ollama serve` with `OLLAMA_HOST=127.0.0.1:<port>` and `OLLAMA_NO_CLOUD=1`
@@ -19,6 +30,17 @@
   For Ollama, Start needs the address `http://127.0.0.1:<port>`, not
   `localhost`. SECURITY.md says what Ollama's `Host` check does and does not
   stop.
+- New Tips page in the sidebar: short hints for using the app (Quick answer
+  or Thorough, which model server, one model server at a time on a 16 GB Mac,
+  the Figure check list) and what our own tests on a Mac found.
+- Settings has an Appearance choice: System (the default, follows the Mac),
+  Light or Dark. It applies to all SandSeek windows; printed and PDF reports
+  stay black on white.
+- Sandbox packages updated: pypdf 6.20.0 to 6.20.1, trafilatura 2.3.0 to
+  2.3.1, pytz 2026.4 to 2026.5 (still pinned by hash in
+  `Sandbox/requirements.txt`). pypdf 6.20.1 includes a security fix for
+  cyclic outline trees in code SandSeek does not use (it only reads text);
+  the other two are bug fixes.
 
 ## 0.3.0 (16 October 2026)
 

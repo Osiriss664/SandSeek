@@ -3,7 +3,7 @@
 /// CFBundleShortVersionString (SANDSEEK_VERSION overrides it), so change it
 /// here only and keep that line in this form.
 public enum SandSeekVersion {
-    public static let current = "0.3.0"
+    public static let current = "0.4.1"
 
     /// What `sandseek --version` prints.
     public static let text = "sandseek \(current)"

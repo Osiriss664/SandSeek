@@ -13,7 +13,8 @@ struct SettingsScreen: View {
             VStack(alignment: .leading, spacing: 18) {
                 ScreenTitle(
                     title: "Settings",
-                    subtitle: "What each mode asks of the model, and the rules that are always on.")
+                    subtitle: "How the window looks, what each mode asks of the model, and the rules that are always on.")
+                AppearancePicker()
                 PresetEditor(id: .quick, preset: $presets.quick)
                 PresetEditor(id: .thorough, preset: $presets.thorough)
                 if server.needsPromptBudget {
@@ -26,6 +27,28 @@ struct SettingsScreen: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+}
+
+/// System, Light or Dark for the whole app.
+private struct AppearancePicker: View {
+    @AppStorage(AppAppearance.storageKey) private var appearance: AppAppearance = .system
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text("Appearance").font(.headline)
+            Picker("Appearance", selection: $appearance) {
+                ForEach(AppAppearance.allCases) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+            .help("System follows the Mac's own Light or Dark setting.")
+            Spacer()
+        }
+        .cardStyle()
     }
 }
 
