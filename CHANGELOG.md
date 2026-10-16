@@ -19,6 +19,9 @@
   For Ollama, Start needs the address `http://127.0.0.1:<port>`, not
   `localhost`. SECURITY.md says what Ollama's `Host` check does and does not
   stop.
+- New Tips page in the sidebar: short hints for using the app (Quick answer
+  or Thorough, which model server, one model server at a time on a 16 GB Mac,
+  the Figure check list) and what our own tests on a Mac found.
 
 ## 0.3.0 (16 October 2026)
 

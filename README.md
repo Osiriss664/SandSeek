@@ -137,7 +137,8 @@ ad hoc. There is no Sparkle update and no notarization yet. `swift run
 SandSeekApp` also opens the window, but a bare executable has no sandbox
 files inside it (see below).
 
-The window has a sidebar (Research, Reports, Settings, the last few reports).
+The window has a sidebar (Research, Reports, Settings, Tips, the last few
+reports). Tips has short hints and what our own tests on a Mac found.
 The Research screen starts with the question field, a model picker and a Quick
 answer / Thorough switch. Below it are a card for the model server and a card
 for the sandbox with a Security check; click the arrow by a card's title to
