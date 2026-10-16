@@ -69,12 +69,18 @@ struct ServerStartSection: View {
                 controls
                 status
             }
-            // Looks when the card appears, and again when another program or
-            // server type is chosen.
-            .task(id: "\(type)|\(launch.programs[type] ?? "")") {
+            // Looks when the card appears, and again when another server type,
+            // program (TUFF: the clone's `scratch`) or llama.cpp model (its
+            // folder) is chosen.
+            .task(id: foundKey) {
                 await launch.refreshFound(for: type)
             }
         }
+    }
+
+    private var foundKey: String {
+        let model = type == .llamacpp ? launch.models[type] ?? "" : ""
+        return "\(type)|\(launch.programs[type] ?? "")|\(model)"
     }
 
     /// "Models on this Mac": the models already on disk, found by

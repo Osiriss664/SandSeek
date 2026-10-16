@@ -107,6 +107,8 @@ public final class ResearchServerLaunchController {
     @ObservationIgnored private var attempt = 0
     @ObservationIgnored private var launchedAt = Date()
     @ObservationIgnored private var quitDeadline: Date?
+    /// Counts the searches for models, so only the latest sets the results.
+    @ObservationIgnored private var findAttempt = 0
 
     public init(defaults: any ResearchSettingsStore = UserDefaults.standard,
                 launcher: any ResearchServerLaunching = FoundationServerLauncher(),
@@ -204,30 +206,33 @@ public final class ResearchServerLaunchController {
 
     /// Looks for models already on this Mac: `.gguf` files for llama.cpp, TUFF
     /// models folders for TUFF (nothing for Ollama, which lists its own). The
-    /// search only reads folders and runs off the main actor. `home` is a
+    /// search only reads folders and runs off the main actor. Only the latest
+    /// search sets the results, so one that was started earlier (for another
+    /// type or an older model) and ends later changes nothing. `home` is a
     /// parameter so a test can use a temporary folder.
     public func refreshFound(for type: ResearchServerType,
                              home: String = ResearchServerLaunchPlan.userHome()) async {
-        switch type {
-        case .llamacpp:
-            let roots = ResearchLocalModels.defaultGGUFRoots(home: home, chosenModel: models[type])
-            isLookingForModels = true
+        guard type == .llamacpp || type == .tuff else { return }
+        findAttempt += 1
+        let mine = findAttempt
+        isLookingForModels = true
+        if type == .llamacpp {
+            let roots = ResearchLocalModels.defaultGGUFRoots(home: home)
+            let flat = ResearchLocalModels.chosenModelFolder(models[type]).map { [$0] } ?? []
             let files = await Task.detached(priority: .utility) {
-                ResearchLocalModels.findGGUF(roots: roots)
+                ResearchLocalModels.findGGUF(roots: roots, flatFolders: flat)
             }.value
+            guard findAttempt == mine else { return }
             foundGGUF = files
-            isLookingForModels = false
-        case .tuff:
+        } else {
             let folders = ResearchLocalModels.defaultTUFFFolders(home: home, program: programs[type])
-            isLookingForModels = true
             let found = await Task.detached(priority: .utility) {
                 ResearchLocalModels.findTUFFModels(folders: folders)
             }.value
+            guard findAttempt == mine else { return }
             foundTUFF = found
-            isLookingForModels = false
-        case .ollama, .lmstudio:
-            break
         }
+        isLookingForModels = false
     }
 
     // MARK: - Start

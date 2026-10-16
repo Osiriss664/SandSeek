@@ -115,13 +115,70 @@ import Testing
         #expect(ResearchLocalModels.findTUFFModels(folders: [empty.path, missing]).isEmpty)
     }
 
-    @Test func theDefaultRootsComeFromTheHomeAndTheChosenModel() {
-        let roots = ResearchLocalModels.defaultGGUFRoots(
-            home: "/Users/test", chosenModel: "/Volumes/Big/models/x.gguf")
+    @Test func theDefaultRootsComeFromTheHome() {
+        let roots = ResearchLocalModels.defaultGGUFRoots(home: "/Users/test")
         #expect(roots.contains("/Users/test/Library/Caches/llama.cpp"))
         #expect(roots.contains("/Users/test/.cache/huggingface/hub"))
-        #expect(roots.last == "/Volumes/Big/models")
-        #expect(ResearchLocalModels.defaultGGUFRoots(home: "/Users/test", chosenModel: nil).count == 5)
+        #expect(roots.count == 5)
+        #expect(ResearchLocalModels.chosenModelFolder("/Volumes/Big/models/x.gguf") == "/Volumes/Big/models")
+        #expect(ResearchLocalModels.chosenModelFolder(nil) == nil)
+        #expect(ResearchLocalModels.chosenModelFolder("") == nil)
+    }
+
+    @Test func hiddenFilesAndAppleDoubleFilesAreLeftOut() throws {
+        let root = try makeRoot()
+        try write("Real.gguf", in: root)
+        try write("._Real.gguf", in: root)
+        try write(".hidden.gguf", in: root)
+        #expect(names(ResearchLocalModels.findGGUF(roots: [root.path])) == ["Real"])
+    }
+
+    @Test func aRelativeLinkLikeAHuggingFaceSnapshotIsFollowed() throws {
+        let root = try makeRoot()
+        try write("models--org--repo/blobs/0123abcd", in: root, size: 777)
+        let snapshot = root.appendingPathComponent("models--org--repo/snapshots/rev1", isDirectory: true)
+        try FileManager.default.createDirectory(at: snapshot, withIntermediateDirectories: true)
+        try FileManager.default.createSymbolicLink(
+            atPath: snapshot.appendingPathComponent("Repo-Q4_K_M.gguf").path,
+            withDestinationPath: "../../blobs/0123abcd")
+        let found = ResearchLocalModels.findGGUF(roots: [root.path])
+        #expect(names(found) == ["Repo-Q4_K_M"])
+        #expect(found.first?.size == 777)
+    }
+
+    @Test func aLinkToSomethingElseThanARegularFileIsLeftOut() throws {
+        let root = try makeRoot()
+        let pipe = root.appendingPathComponent("pipe").path
+        #expect(mkfifo(pipe, 0o600) == 0)
+        try FileManager.default.createSymbolicLink(
+            atPath: root.appendingPathComponent("Pipe.gguf").path, withDestinationPath: pipe)
+        try FileManager.default.createSymbolicLink(
+            atPath: root.appendingPathComponent("Broken.gguf").path,
+            withDestinationPath: root.appendingPathComponent("missing").path)
+        #expect(ResearchLocalModels.findGGUF(roots: [root.path]).isEmpty)
+    }
+
+    @Test func aFlatFolderIsSearchedWithoutItsSubfolders() throws {
+        let root = try makeRoot()
+        try write("Chosen.gguf", in: root)
+        try write("Sibling.gguf", in: root)
+        try write("sub/Below.gguf", in: root)
+        #expect(names(ResearchLocalModels.findGGUF(roots: [], flatFolders: [root.path]))
+            == ["Chosen", "Sibling"])
+    }
+
+    @MainActor @Test func refreshFoundListsTheCachesAndTheChosenModelsFolder() async throws {
+        let home = try makeRoot()
+        try write(".cache/llama.cpp/org_repo_Cached-Q4.gguf", in: home)
+        let elsewhere = try makeRoot()
+        let chosen = try write("Chosen.gguf", in: elsewhere)
+        try write("Sibling.gguf", in: elsewhere)
+        try write("deeper/NotSearched.gguf", in: elsewhere)
+        let launch = testLaunchController()
+        launch.chooseModel(chosen.path, for: .llamacpp)
+        await launch.refreshFound(for: .llamacpp, home: home.path)
+        #expect(names(launch.foundGGUF) == ["Chosen", "org_repo_Cached-Q4", "Sibling"])
+        #expect(!launch.isLookingForModels)
     }
 
     // MARK: - TUFF
@@ -161,6 +218,19 @@ import Testing
         try installModel("incomplete", in: without, manifest: nil)
         let found = ResearchLocalModels.findTUFFModels(folders: [without.path, withModel.path])
         #expect(found.map(\.path) == [withModel.path])
+    }
+
+    @Test func aManifestThatIsNotARegularFileIsNotRead() throws {
+        let root = try makeRoot()
+        try installModel("piped-folder", in: root, manifest: nil)
+        let folder = root.appendingPathComponent("piped-folder")
+        // A pipe would block the read for ever; a link is followed to it.
+        let pipe = root.appendingPathComponent("pipe").path
+        #expect(mkfifo(pipe, 0o600) == 0)
+        try FileManager.default.createSymbolicLink(
+            atPath: folder.appendingPathComponent("manifest.json").path, withDestinationPath: pipe)
+        let found = ResearchLocalModels.findTUFFModels(folders: [root.path])
+        #expect(found.first?.models == ["piped-folder"])
     }
 
     @Test func theDefaultTUFFFoldersIncludeTheCloneScratchFolder() {
