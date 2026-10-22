@@ -4,7 +4,7 @@
 
 <h1 align="center">SandSeek</h1>
 
-**Let a local model research the web, with the web kept in a throwaway VM and away from your Mac.**
+**Let a local model research the web, with every search and page read done inside a throwaway sandbox VM.**
 
 ![The SandSeek window: the question box with model and mode, Stop everything, the folded Model server and Web sandbox cards showing Connected, Ready and Signed, then an answer with its folded Figure check and Pages that could not be read lists, the sources and the searches](docs/assets/sandseek-app.png)
 
@@ -12,7 +12,8 @@
 
 Needs an Apple silicon Mac with macOS 26, Apple
 [`container`](https://github.com/apple/container) and a local model server
-on 127.0.0.1 (TUFF, llama.cpp or Ollama).
+on 127.0.0.1 (TUFF, llama.cpp or Ollama). Building needs Xcode 26 or another
+Swift 6.2 toolchain.
 
 Download `SandSeek-0.4.1.zip` from the
 [releases page](https://github.com/Osiriss664/SandSeek/releases), or build it:
