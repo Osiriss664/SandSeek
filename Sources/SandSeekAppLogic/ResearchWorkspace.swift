@@ -62,7 +62,8 @@ public final class ResearchWorkspace {
                 defaults: defaults, secretFile: ResearchSandboxSecret.defaultFileURL),
             server: ResearchServerController(
                 defaults: defaults,
-                exposureCheck: ResearchServerController.networkExposureCheck),
+                exposureCheck: ResearchServerController.networkExposureCheck,
+                hostHeaderCheck: ResearchServerController.networkHostHeaderCheck),
             reports: reports,
             run: ResearchRunController(
                 store: reports, sandboxSecretFile: ResearchSandboxSecret.defaultFileURL),

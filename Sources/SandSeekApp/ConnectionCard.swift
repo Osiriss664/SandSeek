@@ -105,6 +105,7 @@ struct ConnectionCard: View {
             }
             detail
             exposureNotice
+            hostHeaderNotice
             ServerStartSection(
                 server: server, launch: launch, questionBusy: questionBusy,
                 stoppingEverything: stoppingEverything)
@@ -229,6 +230,40 @@ struct ConnectionCard: View {
             HStack(spacing: 6) {
                 ProgressView().controlSize(.small)
                 Text("Checking whether the server is reachable from the network…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        case .notChecked:
+            EmptyView()
+        }
+    }
+
+    /// Whether the server refuses a request that names another host (DNS
+    /// rebinding). Found by Check only, like the network check.
+    @ViewBuilder
+    private var hostHeaderNotice: some View {
+        switch server.hostHeader {
+        case .warning(let warning):
+            Label(warning, systemImage: "exclamationmark.triangle.fill")
+                .font(.callout)
+                .foregroundStyle(.orange)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        case .unclear(let note):
+            Label(note, systemImage: "questionmark.circle.fill")
+                .font(.callout)
+                .foregroundStyle(.orange)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        case .fine(let text):
+            Text(verbatim: text)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        case .checking:
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("Checking whether the server refuses requests that name another host…")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

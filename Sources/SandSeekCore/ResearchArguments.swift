@@ -34,6 +34,12 @@ public struct ResearchArguments: Equatable, Sendable {
     /// needs no question, model or sandbox, only `--server` and `--sandbox`
     /// for the ports.
     public var checkExposure = false
+    /// `--check-host-header`: send three read-only GET requests to the model
+    /// server (a normal Host, a foreign Host, a foreign Origin) and report
+    /// whether it refuses a Host it does not know. It needs no question,
+    /// model or sandbox; it takes `--server`, `--server-type`,
+    /// `--api-key-file` and `--quiet`.
+    public var checkHostHeader = false
     public var maxTokens: Int = 2_048
     public var enableThinking: Bool?
     public var showThinking = false
@@ -188,6 +194,23 @@ public struct ResearchArguments: Equatable, Sendable {
                                Ollama with OLLAMA_HOST=127.0.0.1:11434 (the
                                advice for Ollama is given when the port is
                                11434).
+      --check-host-header      Check whether the model server refuses a request
+                               that names another host (Host header), which is
+                               what stops a web page from using DNS rebinding to
+                               reach it. Sends three GET requests to one
+                               read-only path (the model list: /v1/models, or
+                               /api/tags for Ollama) over 127.0.0.1: the normal
+                               Host, a host that never resolves, and the normal
+                               Host with a foreign Origin. No prompt is sent.
+                               Takes --server, --server-type (auto asks the
+                               server, else port 11434 means Ollama),
+                               --api-key-file (sent as a Bearer token, never
+                               printed) and --quiet. Needs no question. Exit
+                               code 0 when the server refuses the other host or
+                               asks for a key, 2 for bad arguments, 3 when it
+                               answers any host and needs no key, 4 when
+                               nothing answers on the port, 5 when the answers
+                               are odd; 4 and 5 mean "cannot tell".
     """
 
     public init() {}
@@ -236,6 +259,8 @@ public struct ResearchArguments: Equatable, Sendable {
         var runOption: String?
         // The same for --check-exposure, which takes only --server, --sandbox and --quiet.
         var exposureOption: String?
+        // And for --check-host-header, which also takes --server-type and --api-key-file.
+        var hostHeaderOption: String?
         func value(_ flag: String) throws -> String {
             guard index + 1 < arguments.count else {
                 throw ResearchArgumentError("missing value for \(flag)")
@@ -267,6 +292,11 @@ public struct ResearchArguments: Equatable, Sendable {
             if argument.hasPrefix("-"), argument != "--", exposureOption == nil,
                !["--help", "-h", "--version", "--check-exposure", "--server", "--sandbox", "--quiet"].contains(argument) {
                 exposureOption = argument
+            }
+            if argument.hasPrefix("-"), argument != "--", hostHeaderOption == nil,
+               !["--help", "-h", "--version", "--check-host-header", "--server", "--server-type",
+                 "--api-key-file", "--quiet"].contains(argument) {
+                hostHeaderOption = argument
             }
             switch argument {
             case "--help", "-h":
@@ -348,6 +378,8 @@ public struct ResearchArguments: Equatable, Sendable {
                 parsed.quiet = true
             case "--check-exposure":
                 parsed.checkExposure = true
+            case "--check-host-header":
+                parsed.checkHostHeader = true
             case "--":
                 words += arguments[(index + 1)...]
                 index = arguments.count
@@ -391,6 +423,26 @@ public struct ResearchArguments: Equatable, Sendable {
                 throw ResearchArgumentError("--check-exposure takes no question")
             }
         }
+        // The Host header check looks at one port; no run goes with it.
+        if parsed.checkHostHeader, !parsed.showHelp, !parsed.showVersion {
+            if parsed.checkExposure {
+                throw ResearchArgumentError("--check-host-header cannot be combined with --check-exposure")
+            }
+            if parsed.replayFiguresPath != nil {
+                throw ResearchArgumentError("--check-host-header cannot be combined with --replay-figures")
+            }
+            if let hostHeaderOption {
+                throw ResearchArgumentError("--check-host-header cannot be combined with \(hostHeaderOption)")
+            }
+            if !words.isEmpty {
+                throw ResearchArgumentError("--check-host-header takes no question")
+            }
+            if parsed.serverType == .ollama, parsed.apiKeyFile != nil {
+                throw ResearchArgumentError(
+                    "--api-key-file cannot be used with --server-type ollama: Ollama on this Mac "
+                        + "has no key, and SandSeek sends none to it")
+            }
+        }
         if let output = parsed.outputPath, let saved = parsed.savePagesPath,
            URL(fileURLWithPath: output).standardizedFileURL
                == URL(fileURLWithPath: saved).standardizedFileURL {
@@ -402,7 +454,7 @@ public struct ResearchArguments: Equatable, Sendable {
         // Ollama has no key, and a window to set; the other servers have no
         // such window. Refused here, so that nothing is sent anywhere.
         let runs = !parsed.showHelp && !parsed.showVersion && parsed.replayFiguresPath == nil
-            && !parsed.checkExposure
+            && !parsed.checkExposure && !parsed.checkHostHeader
         // Ollama listens on 11434, not on TUFF's 8080, unless --server says otherwise.
         if parsed.serverType == .ollama, !serverGiven {
             parsed.serverURL = URL(string: "http://127.0.0.1:11434")!
@@ -423,7 +475,7 @@ public struct ResearchArguments: Equatable, Sendable {
                 "--context-tokens is only for Ollama (--server-type ollama or auto)")
         }
         if !parsed.showHelp && !parsed.showVersion && parsed.replayFiguresPath == nil && !parsed.checkExposure
-            && parsed.question.isEmpty {
+            && !parsed.checkHostHeader && parsed.question.isEmpty {
             throw ResearchArgumentError("a question is required")
         }
         return parsed
