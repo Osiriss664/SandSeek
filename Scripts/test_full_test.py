@@ -166,16 +166,21 @@ class Fixture:
             echo "1. https://example.org/canberra"
             """)
         # A model server stub as a script, started by --start-server.
+        # It says when it started and when it listens, so a failure shows
+        # how far it got (its output goes to the run's logs/6.0.log).
         write(f"{r}/server/TUFFServer", f"""\
             #!{sys.executable}
             import sys
+            print("stub started", flush=True)
             from http.server import BaseHTTPRequestHandler, HTTPServer
             port = int(sys.argv[sys.argv.index("--port") + 1])
             class H(BaseHTTPRequestHandler):
                 def do_GET(self):
                     self.send_response(200); self.end_headers(); self.wfile.write(b"{{}}")
                 def log_message(self, *a): pass
-            HTTPServer(("127.0.0.1", port), H).serve_forever()
+            server = HTTPServer(("127.0.0.1", port), H)
+            print("stub listening on", port, flush=True)
+            server.serve_forever()
             """)
 
     def env(self, **extra):
@@ -195,7 +200,8 @@ class Fixture:
             # Nothing that runs on the test machine may count: the address
             # where the script looks for Ollama is a port nobody listens on.
             "FT_OLLAMA_URL": "http://127.0.0.1:1",
-            "FT_SERVER_WAIT": "20",
+            # Generous: a stub's first start on a CI runner can be slow.
+            "FT_SERVER_WAIT": "90",
         }
         env.update(extra)
         return env
