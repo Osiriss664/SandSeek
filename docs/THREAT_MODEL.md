@@ -109,6 +109,7 @@ Tests are named in [Tests and how to run them](SECURITY.md#tests-and-how-to-run-
 | Report carries active content | Markdown images become plain links, `<` is escaped, non-http links become text, titles and addresses are cleaned | SECURITY.md "Reports load nothing" | `swift test` |
 | A different `container` program is run | SandSeek runs only `/usr/local/bin/container`, after checking owner, permissions, Apple's signature and the version | `ResearchExecutableCheck.swift`; SECURITY.md "The `container` program" | `python3 -m unittest discover -s Scripts -p 'test_*.py'`; `swift test` |
 | Model server reachable from the network | `sandseek --check-exposure` and the connection card try the Mac's own addresses on the server's port; if the server turns out to be reachable, SandSeek stops a server it started | `ResearchExposureCheck.swift`; SECURITY.md "Model servers: host check and exposure" | `ResearchExposureCheckTests`; `--check-exposure` |
+| A page in your browser uses DNS rebinding against the model server | SandSeek cannot add a host check to a server it does not control. `sandseek --check-host-header` and the connection card's Check tell whether the server refuses a request that names another host, or asks for a key | `ResearchHostHeaderCheck.swift`; SECURITY.md "Model servers: host check and exposure" | `ResearchHostHeaderCheckTests` (fake servers); `--check-host-header` |
 
 ## The prompt-injection test approach
 

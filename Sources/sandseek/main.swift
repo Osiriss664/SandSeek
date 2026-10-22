@@ -61,6 +61,49 @@ if arguments.checkExposure {
     exit(result.exitCode)
 }
 
+// The Host header check needs no model, sandbox or question either: it sends
+// three read-only GET requests to the model server's model list.
+if arguments.checkHostHeader {
+    guard let address = ResearchHostHeaderCheck.loopbackAddress(for: arguments.serverURL) else {
+        writeError("error: --check-host-header only checks a server on this Mac's loopback address "
+            + "(127.0.0.1 or ::1)")
+        exit(ResearchHostHeaderCommand.exitBadArguments)
+    }
+    let hostHeaderPort = arguments.serverURL.port ?? 80
+    let hostHeaderAuthorization: String?
+    do {
+        hostHeaderAuthorization = try arguments.apiKeyFile.map(ResearchAPIKeyFile.authorization(atPath:))
+    } catch {
+        writeError("error: \(error)")
+        exit(ResearchHostHeaderCommand.exitBadArguments)
+    }
+    // Which path is asked depends on the kind of server: Ollama has its own
+    // model list. `auto` asks the server (cheap: one status request); when it
+    // is not recognised, port 11434 means Ollama, as for --check-exposure.
+    let hostHeaderKind: ResearchServerKind?
+    switch arguments.serverType {
+    case .tuff: hostHeaderKind = .tuff
+    case .llamacpp: hostHeaderKind = .llamacpp
+    case .ollama: hostHeaderKind = .ollama
+    case .auto:
+        let detected = try? await ResearchServerConnection.establish(
+            choice: .auto, stream: nil, serverURL: arguments.serverURL,
+            transport: URLSessionResearchTransport(timeout: 5))
+        hostHeaderKind = detected?.kind ?? (hostHeaderPort == 11_434 ? ResearchServerKind.ollama : nil)
+    }
+    if hostHeaderKind == .ollama, hostHeaderAuthorization != nil {
+        writeError("error: --api-key-file cannot be used with Ollama: it has no key on this Mac, "
+            + "and SandSeek sends none to it")
+        exit(ResearchHostHeaderCommand.exitBadArguments)
+    }
+    let result = await ResearchHostHeaderCommand.run(
+        port: hostHeaderPort, serverKind: hostHeaderKind,
+        authorization: hostHeaderAuthorization, address: address,
+        prober: ResearchSocketHTTPProber(address: address))
+    print(result.text)
+    exit(result.exitCode)
+}
+
 // Refuse before any research runs, so a long run never ends in a lost report.
 if let path = arguments.outputPath, FileManager.default.fileExists(atPath: path) {
     writeError("error: \(path) already exists; choose a new --output file")

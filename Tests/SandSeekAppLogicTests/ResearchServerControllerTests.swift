@@ -787,3 +787,211 @@ private final class SlowExposure: @unchecked Sendable {
             reachable: [.ipv4(192, 168, 1, 5)])
     }
 }
+
+/// Stands in for the Host header check: remembers what it was asked (port,
+/// kind of server, whether and which `Authorization`) and answers from a script.
+private final class HostHeaderProbe: @unchecked Sendable {
+    struct Call: Equatable {
+        let port: Int
+        let kind: ResearchServerKind?
+        let authorization: String?
+    }
+
+    private let lock = NSLock()
+    private var recorded: [Call] = []
+    private let foreign: ResearchProbeAnswer
+    private let normal: ResearchProbeAnswer
+
+    init(normal: ResearchProbeAnswer = .status(code: 200, headers: [:]),
+         foreign: ResearchProbeAnswer = .status(code: 421, headers: [:])) {
+        self.normal = normal
+        self.foreign = foreign
+    }
+
+    var calls: [Call] { lock.withLock { recorded } }
+
+    func run(_ port: Int, _ kind: ResearchServerKind?, _ authorization: String?) async
+        -> ResearchHostHeaderReport {
+        lock.withLock { recorded.append(Call(port: port, kind: kind, authorization: authorization)) }
+        return ResearchHostHeaderReport(
+            port: port, path: ResearchHostHeaderCheck.requestPath(for: kind),
+            keySent: authorization != nil, control: normal, foreignHost: foreign,
+            foreignOrigin: normal, withoutKey: authorization == nil ? nil : normal)
+    }
+}
+
+/// A Host header check that waits until `release()`.
+private final class SlowHostHeader: @unchecked Sendable {
+    private let lock = NSLock()
+    private var asked = false
+    private var released = false
+
+    func waitUntilAsked() async {
+        while !lock.withLock({ asked }) { try? await Task.sleep(for: .milliseconds(5)) }
+    }
+
+    func release() { lock.withLock { released = true } }
+
+    func run(_ port: Int) async -> ResearchHostHeaderReport {
+        lock.withLock { asked = true }
+        while !lock.withLock({ released }) { try? await Task.sleep(for: .milliseconds(5)) }
+        let answer = ResearchProbeAnswer.status(code: 200, headers: [:])
+        return ResearchHostHeaderReport(
+            port: port, path: "/v1/models", keySent: false, control: answer, foreignHost: answer)
+    }
+}
+
+@Suite @MainActor struct ResearchServerHostHeaderTests {
+    private func controller(services: any ResearchHTTPTransport = FakeResearchServices(),
+                            probe: HostHeaderProbe?) -> ResearchServerController {
+        var check: (@Sendable (Int, ResearchServerKind?, String?) async
+            -> ResearchHostHeaderReport)?
+        if let probe { check = { port, kind, key in await probe.run(port, kind, key) } }
+        return ResearchServerController(
+            defaults: MemorySettings(), keyStore: MemoryKeyStore(key: "test-key"),
+            transport: services, hostHeaderCheck: check)
+    }
+
+    @Test func withoutACheckNothingIsSent() async {
+        let server = controller(probe: nil)
+        await server.check()
+        #expect(server.state == .ready)
+        #expect(server.hostHeader == .notChecked)
+    }
+
+    @Test func checkSetsTheResultFromTheProbeAndPollingDoesNot() async {
+        let probe = HostHeaderProbe()
+        let server = controller(probe: probe)
+        await server.check()
+        #expect(probe.calls.count == 1)
+        #expect(probe.calls.first?.port == 8080)
+        if case .fine(let text) = server.hostHeader {
+            #expect(text.contains("refuses (HTTP 421)"))
+        } else {
+            Issue.record("expected a fine result, got \(server.hostHeader)")
+        }
+        await server.refresh()
+        await server.refresh()
+        await server.refreshModels()
+        #expect(probe.calls.count == 1)
+        await server.check()
+        #expect(probe.calls.count == 2)
+    }
+
+    @Test func aServerThatAnswersAnyHostBecomesTheWarning() async {
+        let probe = HostHeaderProbe(foreign: .status(code: 200, headers: [:]))
+        let server = controller(probe: probe)
+        await server.check()
+        guard case .warning(let text) = server.hostHeader else {
+            Issue.record("expected a warning, got \(server.hostHeader)")
+            return
+        }
+        #expect(text.hasPrefix("The server answers requests that name another host"))
+        // TUFF gets no key advice.
+        #expect(!text.contains("--api-key-file"))
+    }
+
+    @Test func aServerThatDoesNotAnswerTheProbeIsUnclear() async {
+        let probe = HostHeaderProbe(normal: .noAnswer, foreign: .noAnswer)
+        let server = controller(probe: probe)
+        await server.check()
+        guard case .unclear(let note) = server.hostHeader else {
+            Issue.record("expected an unclear result, got \(server.hostHeader)")
+            return
+        }
+        #expect(note.contains("could not be checked"))
+    }
+
+    @Test func theKeyIsPassedForLlamaCppOnly() async {
+        let probe = HostHeaderProbe()
+        let services = FakeResearchServices(
+            tuffStatus: false, requiredKey: "test-key", llamaContext: 8192)
+        let server = controller(services: services, probe: probe)
+        await server.check()
+        // TUFF is the default type: no key.
+        server.select(.llamacpp)
+        await server.check()
+        #expect(server.state == .ready)
+        #expect(probe.calls.count == 2)
+        #expect(probe.calls[1] == HostHeaderProbe.Call(
+            port: 8081, kind: .llamacpp, authorization: "Bearer test-key"))
+    }
+
+    @Test func tuffGetsNoKey() async {
+        let probe = HostHeaderProbe()
+        let server = controller(probe: probe)
+        await server.check()
+        #expect(probe.calls == [HostHeaderProbe.Call(port: 8080, kind: .tuff, authorization: nil)])
+    }
+
+    @Test func llamaCppAdviceIsGivenWhenTheKeyIsNotEnforced() async {
+        let probe = HostHeaderProbe(foreign: .status(code: 200, headers: [:]))
+        let services = FakeResearchServices(
+            tuffStatus: false, requiredKey: "test-key", llamaContext: 8192)
+        let server = controller(services: services, probe: probe)
+        server.select(.llamacpp)
+        await server.check()
+        guard case .warning(let text) = server.hostHeader else {
+            Issue.record("expected a warning, got \(server.hostHeader)")
+            return
+        }
+        #expect(text.contains("--api-key-file"))
+        // The key itself is never part of what the card shows.
+        #expect(!text.contains("test-key"))
+    }
+
+    @Test func aServerThatDoesNotAnswerIsNotChecked() async {
+        let probe = HostHeaderProbe()
+        let server = controller(services: NothingListens(), probe: probe)
+        await server.check()
+        #expect(server.state == .off)
+        #expect(server.hostHeader == .notChecked)
+        #expect(probe.calls.isEmpty)
+    }
+
+    @Test func changingTheAddressOrTypeForgetsTheResult() async {
+        let probe = HostHeaderProbe()
+        let server = controller(probe: probe)
+        await server.check()
+        #expect(server.hostHeader != .notChecked)
+        server.setAddress("http://127.0.0.1:8090")
+        #expect(server.hostHeader == .notChecked)
+        await server.check()
+        #expect(server.hostHeader != .notChecked)
+        server.select(.llamacpp)
+        #expect(server.hostHeader == .notChecked)
+    }
+
+    @Test func aServerThatGoesAwayForgetsTheResult() async {
+        let services = FakeResearchServices()
+        let probe = HostHeaderProbe()
+        let server = controller(services: services, probe: probe)
+        await server.check()
+        #expect(server.hostHeader != .notChecked)
+        services.setDown(true)
+        await server.refresh()
+        #expect(server.state == .off)
+        #expect(server.hostHeader == .notChecked)
+    }
+
+    @Test func aNewAddressDuringTheCheckDropsItsAnswer() async {
+        let gate = SlowHostHeader()
+        let server = ResearchServerController(
+            defaults: MemorySettings(), keyStore: MemoryKeyStore(key: "k"),
+            transport: FakeResearchServices(),
+            hostHeaderCheck: { port, _, _ in await gate.run(port) })
+        let check = Task { await server.check() }
+        await gate.waitUntilAsked()
+        #expect(server.hostHeader == .checking)
+        server.setAddress("http://127.0.0.1:8090")
+        gate.release()
+        await check.value
+        #expect(server.hostHeader == .notChecked)
+    }
+
+    @Test func theDefaultControllerSendsNothing() {
+        let server = ResearchServerController(
+            defaults: MemorySettings(), keyStore: MemoryKeyStore(key: "k"))
+        #expect(server.hostHeader == .notChecked)
+    }
+}

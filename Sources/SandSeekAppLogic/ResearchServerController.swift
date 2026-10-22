@@ -180,6 +180,23 @@ public final class ResearchServerController {
         case reachable(String)
     }
 
+    /// What the last Check found out about whether the server refuses a
+    /// request that names another host (see `ResearchHostHeaderCheck`).
+    public enum HostHeaderState: Equatable, Sendable {
+        /// Not looked at: no Check since the type or address changed, or the
+        /// server did not answer.
+        case notChecked
+        case checking
+        /// The server refuses another host, or asks for a key. The text is
+        /// the note to show.
+        case fine(String)
+        /// The server answers requests that name another host and needs no
+        /// key. The text is the warning to show.
+        case warning(String)
+        /// The check could not tell. The text says why.
+        case unclear(String)
+    }
+
     public static let memoryNote =
         "On a Mac with 16 GB, run only one model server with a loaded model at a time."
     public static let keyNote =
@@ -217,6 +234,9 @@ public final class ResearchServerController {
     /// Whether the server could be reached from the network, found by the
     /// last Check (not by the periodic look).
     public private(set) var exposure: Exposure = .notChecked
+    /// Whether the server refuses a request that names another host, found by
+    /// the last Check (not by the periodic look).
+    public private(set) var hostHeader: HostHeaderState = .notChecked
     /// The key SandSeek sends to llama.cpp. It is used in one request header
     /// and is never shown, copied, logged or put into a command.
     public let apiKey: String
@@ -233,10 +253,17 @@ public final class ResearchServerController {
     /// Tries this Mac's network addresses on a port. Nil: the exposure check
     /// is off, as in most tests; the app passes `networkExposureCheck`.
     private let exposureProbe: (@Sendable (Int) async -> ResearchExposureReport)?
+    /// Sends the Host header probes to a port: port, kind of server and the
+    /// `Authorization` value for it (nil when the server gets none). Nil: the
+    /// check is off, as in most tests; the app passes `networkHostHeaderCheck`.
+    private let hostHeaderProbe:
+        (@Sendable (Int, ResearchServerKind?, String?) async -> ResearchHostHeaderReport)?
     @ObservationIgnored private var generation = 0
     /// Counts the exposure checks and the changes of type or address, so that
     /// an answer that is no longer wanted is dropped.
     @ObservationIgnored private var exposureGeneration = 0
+    /// The same for the Host header checks.
+    @ObservationIgnored private var hostHeaderGeneration = 0
 
     /// The real check: a TCP connect to each of this Mac's network addresses.
     public nonisolated static let networkExposureCheck:
@@ -244,15 +271,25 @@ public final class ResearchServerController {
         await ResearchExposureCheck.run(port: port)
     }
 
+    /// The real check: three read-only GET requests to 127.0.0.1.
+    public nonisolated static let networkHostHeaderCheck:
+        @Sendable (Int, ResearchServerKind?, String?) async -> ResearchHostHeaderReport = {
+            port, kind, authorization in
+        await ResearchHostHeaderCheck.run(port: port, kind: kind, authorization: authorization)
+    }
+
     public init(defaults: any ResearchSettingsStore = UserDefaults.standard,
                 keyStore: any ResearchKeyStoring = FileKeyStore(),
                 transport: any ResearchHTTPTransport = URLSessionResearchTransport(timeout: 10),
                 tuffStreaming: Bool = true,
-                exposureCheck: (@Sendable (Int) async -> ResearchExposureReport)? = nil) {
+                exposureCheck: (@Sendable (Int) async -> ResearchExposureReport)? = nil,
+                hostHeaderCheck: (@Sendable (Int, ResearchServerKind?, String?) async
+                    -> ResearchHostHeaderReport)? = nil) {
         self.defaults = defaults
         self.transport = transport
         self.tuffStreaming = tuffStreaming
         exposureProbe = exposureCheck
+        hostHeaderProbe = hostHeaderCheck
         keyFilePath = keyStore.keyFilePath
         let saved = defaults.savedString(forKey: Self.typeKey)
             .flatMap(ResearchServerType.init(rawValue:))
@@ -314,6 +351,13 @@ public final class ResearchServerController {
     private func dropExposure() {
         exposureGeneration += 1
         exposure = .notChecked
+        dropHostHeader()
+    }
+
+    /// The same for the Host header check.
+    private func dropHostHeader() {
+        hostHeaderGeneration += 1
+        hostHeader = .notChecked
     }
 
     private func resetStatus() {
@@ -446,6 +490,7 @@ public final class ResearchServerController {
     public func check() async {
         await look(showProgress: true)
         await checkExposure()
+        await checkHostHeader()
     }
 
     /// Whether something that answers on the chosen port can also be reached
@@ -477,6 +522,45 @@ public final class ResearchServerController {
             exposure = .unclear(note)
         } else {
             exposure = .notReachable(addresses: report.checked.count)
+        }
+    }
+
+    /// Whether the server that answers on the chosen port refuses a request
+    /// that names another host. Only GET requests to the model list go out; no
+    /// prompt. llama.cpp gets SandSeek's own key, the other servers none. See
+    /// `ResearchHostHeaderCheck`.
+    private func checkHostHeader() async {
+        guard let probe = hostHeaderProbe else { return }
+        guard let port = serverURL?.port else {
+            dropHostHeader()
+            return
+        }
+        switch state {
+        case .ready, .problem:
+            break
+        case .notChecked, .checking, .off:
+            dropHostHeader()
+            return
+        }
+        let kind = serverType.kind
+        let key = authorization
+        hostHeaderGeneration += 1
+        let mine = hostHeaderGeneration
+        hostHeader = .checking
+        let report = await probe(port, kind, key)
+        guard mine == hostHeaderGeneration else { return }
+        let cors = report.corsNote.map { " " + $0 } ?? ""
+        switch report.verdict {
+        case .checksHost, .keyRequired:
+            hostHeader = .fine(report.summary + cors)
+        case .acceptsAnyHost:
+            if let warning = report.warningText(for: kind) {
+                hostHeader = .warning(warning + cors)
+            } else {
+                hostHeader = .fine(report.summary + cors)
+            }
+        case .serverNotRunning, .unclear:
+            hostHeader = .unclear(report.summary)
         }
     }
 
