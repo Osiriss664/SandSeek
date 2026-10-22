@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- `sandseek --check-host-header` checks whether the model server refuses a
+  request that names another host (the `Host` header), which is what stops a
+  web page from using DNS rebinding to reach it. It sends three read-only GET
+  requests to one path (`/v1/models`, or `/api/tags` for Ollama), never a
+  prompt, and tells whether the server refuses the other host, asks for a key,
+  or answers any host. It also notes an open `Access-Control-Allow-Origin`.
+  Exit code 0: refused or a key is required; 3: any host is answered and no key
+  is needed; 4: nothing answers on the port; 5: cannot tell; 2: bad arguments.
+  It takes `--server`, `--server-type`, `--api-key-file` and `--quiet`.
+- **Check** on the model server card now also shows this result below the
+  network exposure notice. llama.cpp gets SandSeek's own key in these requests;
+  the other servers get none.
+
+### Security
+
+- The model server's `Host` handling was not checked before. A server that
+  answers any `Host` and needs no key can be reached by a web page through DNS
+  rebinding while it runs; the new check and the card say so.
+
 ## 0.4.1 (16 October 2026)
 
 New: the app starts and stops Ollama, lists the models already on this Mac, and has a Tips page and a Light/Dark choice.

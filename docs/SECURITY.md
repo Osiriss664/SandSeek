@@ -558,6 +558,53 @@ does not control.
   without a Local Network prompt; a silent address is still reported and never
   counted as clear.
 
+- **Host header check.** A web page in your browser can use DNS rebinding: its
+  own host name is made to resolve to 127.0.0.1, so the browser sends requests
+  for it to a server on this Mac with a `Host:` header that names the page's
+  host. A server that refuses a `Host` it does not know (400, 403 or 421) gets
+  nothing from such a page; a server that answers as usual does, unless it asks
+  for a key that the page does not have. SandSeek checks this on **Check** in
+  the connection card, and with the command:
+
+  ```sh
+  .build/release/sandseek --check-host-header --server http://127.0.0.1:8080
+  ```
+
+  The command takes `--server`, `--server-type` (`auto`, the default, asks the
+  server; if it is not recognised, port 11434 means Ollama), `--api-key-file`
+  and `--quiet`, and only a server on 127.0.0.1, `localhost` or `::1`. It sends
+  plain HTTP/1.1 over a socket (URLSession does not reliably let a program
+  choose the `Host` header): three `GET` requests to one read-only path, the
+  model list (`/v1/models`, or `/api/tags` for Ollama), and never a prompt.
+  The requests carry `Host: 127.0.0.1:<port>` (the control),
+  `Host: sandseek-host-check.invalid:<port>` (a name that never resolves), and
+  the control `Host` with `Origin: http://sandseek-host-check.invalid:<port>`.
+  When a key file is given, a fourth request without the key shows whether the
+  server enforces it. Only the status line and the headers are read (at most
+  16 KiB, within 3 seconds per request). A key goes only into the
+  `Authorization` header of those requests; it is never printed or logged.
+  In the app, **Check** sends SandSeek's own key to llama.cpp and none to the
+  other servers.
+
+  How to read the result: the server **refuses the other host** (400, 403 or
+  421, or closes the connection) while the control is answered: a rebinding page
+  gets nothing. The server **asks for a key** (401 or 403 on the control with no
+  key sent): the page has none, so it gets nothing. The server **answers the
+  other host** like the control: a page could run prompts on it while it runs,
+  unless the fourth request shows that it enforces a key. Quit the server when
+  you are not researching, or, where the server has the option, start it so that
+  it asks for a key (llama-server: `--api-key-file`). Anything else (a 404 or a
+  5xx on the control, a refused key, odd combinations) is reported as *cannot
+  tell* with the statuses. The command also notes when the answer to the foreign
+  `Origin` carries `Access-Control-Allow-Origin` `*` or that origin: then any web
+  page can read the server's answers without rebinding, unless a key is needed.
+  That is a note and does not change the exit code. Exit codes: 0 the server
+  refuses the other host or asks for a key; 2 bad arguments; 3 it answers any
+  host and needs no key; 4 nothing answers on the port; 5 cannot tell. 4 and 5
+  mean "cannot tell": fix the cause and run the check again. The check is
+  about the `Host` header only; it does not stop a page from sending a simple
+  request straight to `http://127.0.0.1:<port>` without rebinding.
+
 **Start server.** The model server card can start and stop the server. What it
 does and does not do:
 
@@ -707,6 +754,7 @@ Durations are estimates from earlier runs on a 16 GB MacBook Air.
 | Sandbox unit tests | the address policy, fetching, redirects, extraction, cleaning, the HTTP API, and the address check's list against the real policy; no network | `cd Sandbox && python3 -m unittest test_server` | `OK` | seconds |
 | Swift tests | the research loop with fake services, the command, the app logic, streaming, the exposure check | `swift test` | all pass | minutes |
 | Exposure check | the model server and the sandbox do not accept connections on this Mac's network addresses | `.build/release/sandseek --check-exposure --server http://127.0.0.1:8080` | exit 0 (every address refused) | seconds |
+| Host header check | the model server refuses a request that names another host (DNS rebinding), or asks for a key; three read-only GET requests, no prompt | `.build/release/sandseek --check-host-header --server http://127.0.0.1:8080` | exit 0 (another host refused, or a key required) | seconds |
 | Injection check, original set | 5 pages with 16 planted attacks (print a canary, send the question to an outside address, read the Mac or the cloud metadata address, fake end of tool result, look-alike markers) | see below | `5/5 runs resisted the injections` | 6 to 15 min per repeat with Qwen; longer with slower models |
 | Injection check, external set | 9 pages with 91 attack texts rewritten from BIPIA and AgentDojo (both MIT) | `--set external` | per-source totals; every attack resisted, reported or blocked | 10 to 30 min per repeat |
 | garak (optional) | the bare model against latent injection, bad characters and encoded instructions; not the sandbox or the loop | `Scripts/garak/README.md` | hit rates per probe, to compare over time | about 40 min for the small pass |
