@@ -4,6 +4,28 @@
 
 <h1 align="center">SandSeek</h1>
 
+**Let a local model research the web, with the web kept in a throwaway VM and away from your Mac.**
+
+![The SandSeek window: the question box with model and mode, Stop everything, the folded Model server and Web sandbox cards showing Connected, Ready and Signed, then an answer with its folded Figure check and Pages that could not be read lists, the sources and the searches](docs/assets/sandseek-app.png)
+
+## Install in three lines
+
+Needs an Apple silicon Mac with macOS 26, Apple
+[`container`](https://github.com/apple/container) and a local model server
+on 127.0.0.1 (TUFF, llama.cpp or Ollama).
+
+Download `SandSeek-0.4.1.zip` from the
+[releases page](https://github.com/Osiriss664/SandSeek/releases), or build it:
+
+    git clone https://github.com/Osiriss664/SandSeek.git
+    cd SandSeek && Scripts/package_app.sh
+    open build/SandSeek.app
+
+Details, first run and Gatekeeper: [docs/INSTALL.md](docs/INSTALL.md). How
+SandSeek handles hostile web pages: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+
+## What it is
+
 SandSeek answers a question by searching the web and reading pages with a local
 LLM (Ollama, llama.cpp or TUFF), and returns an answer with numbered sources.
 The model runs on your Mac. Search and page fetching run inside a disposable
@@ -22,8 +44,6 @@ tested on a Mac with Ollama 0.40.4 and Gemma 4 12B from the command line
 (October 2026). 0.4.1 lets the app start and stop Ollama and list the models
 already on this Mac, and adds a Tips page and a Light/Dark choice; all of
 these were tried by hand on a Mac.
-
-![The SandSeek window: the question box with model and mode, Stop everything, the folded Model server and Web sandbox cards showing Connected, Ready and Signed, then an answer with its folded Figure check and Pages that could not be read lists, the sources and the searches](docs/assets/sandseek-app.png)
 
 ## How it works, in one minute
 
