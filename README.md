@@ -268,6 +268,7 @@ packaging, sandbox, self-test, one question); `--help` lists its options,
 Security checks (see [docs/SECURITY.md](docs/SECURITY.md)):
 
     .build/release/sandseek --check-exposure --server http://127.0.0.1:8081
+    .build/release/sandseek --check-host-header --server http://127.0.0.1:8081
     python3 Scripts/research_address_check.py
     python3 Scripts/research_injection_check.py --base-url <public URL> --label "TUFF + Qwen"
 
@@ -279,6 +280,11 @@ says nothing. 2: bad arguments. `research_address_check.py` sends 98 tricky addr
 sandbox and expects each to be refused. `research_injection_check.py` takes
 `--server-type llamacpp --api-key-file <path>` for llama-server, and `--label`
 and `--output` for a report that names the server type and model.
+
+`--check-host-header` sends three read-only GET requests (no prompt) to see
+whether the model server refuses a `Host` it does not know, which stops DNS
+rebinding; exit code 0 means it does or asks for a key, 3 that it answers any
+host without a key.
 
 The command finds out which kind of model server it talks to before the sandbox
 check: a model server that does not answer ends the run with exit code 1 (as
