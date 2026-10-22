@@ -312,6 +312,7 @@ private final class HangingServices: ResearchHTTPTransport, @unchecked Sendable 
             .turn, .searching, .turn, .reading, .turn, .turn, .turn, .thinking,
         ])
         #expect(run.steps.first?.text == "Step 1 of 4")
+        try #require(run.steps.count > 5)
         #expect(run.steps[5].text == "Answered from one search or page; asking it to look wider")
         #expect(run.steps.last?.text == "One source is enough here.")
         let report = try #require(run.report)

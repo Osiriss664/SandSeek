@@ -166,16 +166,21 @@ class Fixture:
             echo "1. https://example.org/canberra"
             """)
         # A model server stub as a script, started by --start-server.
+        # It says when it started and when it listens, so a failure shows
+        # how far it got (its output goes to the run's logs/6.0.log).
         write(f"{r}/server/TUFFServer", f"""\
             #!{sys.executable}
             import sys
+            print("stub started", flush=True)
             from http.server import BaseHTTPRequestHandler, HTTPServer
             port = int(sys.argv[sys.argv.index("--port") + 1])
             class H(BaseHTTPRequestHandler):
                 def do_GET(self):
                     self.send_response(200); self.end_headers(); self.wfile.write(b"{{}}")
                 def log_message(self, *a): pass
-            HTTPServer(("127.0.0.1", port), H).serve_forever()
+            server = HTTPServer(("127.0.0.1", port), H)
+            print("stub listening on", port, flush=True)
+            server.serve_forever()
             """)
 
     def env(self, **extra):
@@ -195,7 +200,8 @@ class Fixture:
             # Nothing that runs on the test machine may count: the address
             # where the script looks for Ollama is a port nobody listens on.
             "FT_OLLAMA_URL": "http://127.0.0.1:1",
-            "FT_SERVER_WAIT": "20",
+            # Generous: a stub's first start on a CI runner can be slow.
+            "FT_SERVER_WAIT": "90",
         }
         env.update(extra)
         return env
@@ -224,6 +230,15 @@ class Fixture:
         with open(os.path.join(directory, "report.json")) as handle:
             data = json.load(handle)
         return data, {step["id"]: step for step in data["steps"]}, directory
+
+    def server_log(self, process):
+        """stdout plus the started server's own log, for failure messages."""
+        path = os.path.join(self.report_dir(process), "logs", "6.0.log")
+        try:
+            with open(path) as handle:
+                return f"{process.stdout}\n--- {path} ---\n{handle.read()}"
+        except OSError as error:
+            return f"{process.stdout}\n--- no server log: {error} ---"
 
     def close(self):
         shutil.rmtree(self.root, ignore_errors=True)
@@ -590,7 +605,7 @@ class ModelServer(FullTestCase):
 
     def test_start_server_starts_uses_and_stops_it(self):
         process = self.fx.run("--start-server", f"{self.fx.repo}/server/TUFFServer")
-        self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+        self.assertEqual(process.returncode, 0, self.fx.server_log(process) + process.stderr)
         _, steps, directory = self.fx.results(process)
         self.assertEqual(steps["6.0"]["result"], "PASS")
         self.assertEqual(steps["6.1"]["result"], "PASS")
@@ -606,6 +621,7 @@ class ModelServer(FullTestCase):
         process = self.fx.run("--start-server", f"{self.fx.repo}/server/TUFFServer",
                               FAKE_FAIL="selftest-fail")
         _, steps, _ = self.fx.results(process)
+        self.assertIn("pid ", steps["6.0"]["note"], self.fx.server_log(process))
         pid = int(steps["6.0"]["note"].split("pid ")[1].rstrip(")"))
         time.sleep(0.5)
         with self.assertRaises(OSError):
@@ -697,7 +713,7 @@ class OllamaServer(FullTestCase):
         process = self.fx.run("--start-server", f"{self.fx.repo}/server/TUFFServer",
                               FT_OLLAMA_URL=self.serve_ollama())
         _, steps, _ = self.fx.results(process)
-        self.assertEqual(steps["6.0"]["result"], "PASS", process.stdout)
+        self.assertEqual(steps["6.0"]["result"], "PASS", self.fx.server_log(process))
 
     def test_an_ollama_with_a_loaded_model_blocks_start_server(self):
         process = self.fx.run("--start-server", f"{self.fx.repo}/server/TUFFServer",
