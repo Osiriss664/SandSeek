@@ -1334,7 +1334,8 @@ def unwrap_duckduckgo(href: str) -> str | None:
     if href.startswith("//"):
         href = "https:" + href
     parts = urllib.parse.urlsplit(href)
-    if parts.netloc.endswith("duckduckgo.com"):
+    host = parts.hostname or ""
+    if host == "duckduckgo.com" or host.endswith(".duckduckgo.com"):
         if parts.path.startswith("/y.js"):
             return None  # Advertisement.
         target = urllib.parse.parse_qs(parts.query).get("uddg", [None])[0]

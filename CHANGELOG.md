@@ -12,6 +12,9 @@
   certifi is not used for SandSeek's own fetches) and pypdf 6.20.1 to 6.21.1
   (GHSA-5hx5-vpf9-5wcv; the sandbox has no Pillow, so it was not affected).
   The sandbox image is rebuilt on the next Start.
+- Search results: only links on duckduckgo.com itself are unwrapped as
+  DuckDuckGo redirects; a look-alike host such as `evilduckduckgo.com` is
+  treated as an ordinary result (found by CodeQL).
 
 ## 0.4.1 (16 October 2026)
 

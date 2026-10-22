@@ -3818,5 +3818,18 @@ class SigtermTests(unittest.TestCase):
         self.assertNotIn("listening", done.stderr)
 
 
+
+class DuckDuckGoUnwrapTests(unittest.TestCase):
+    def test_only_duckduckgo_links_are_unwrapped(self):
+        wrapped = "/l/?uddg=https%3A%2F%2Fexample.com%2Fdoc"
+        for host in ("duckduckgo.com", "html.duckduckgo.com"):
+            with self.subTest(host=host):
+                self.assertEqual(server.unwrap_duckduckgo(f"https://{host}{wrapped}"),
+                                 "https://example.com/doc")
+        # A look-alike host is an ordinary result, not a DuckDuckGo redirect.
+        lookalike = f"https://evilduckduckgo.com{wrapped}"
+        self.assertEqual(server.unwrap_duckduckgo(lookalike), lookalike)
+        self.assertIsNone(server.unwrap_duckduckgo("https://duckduckgo.com/y.js?ad=1"))
+
 if __name__ == "__main__":
     unittest.main()
