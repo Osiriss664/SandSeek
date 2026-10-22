@@ -65,6 +65,14 @@ after updating rebuilds it, which takes a few minutes.
   cyclic outline trees in code SandSeek does not use (it only reads text);
   the other two are bug fixes.
 
+### Security
+
+- The pypdf update (6.20.0 to 6.20.1) includes a security fix for cyclic
+  outline trees, in code SandSeek does not use (it only reads text). The
+  Ollama Start and Stop changes had a security review; what it changed is
+  listed above.
+- No security advisories were published for this release.
+
 ## 0.3.0 (16 October 2026)
 
 New: Ollama as a third model server, next to TUFF and llama.cpp. The sandbox
@@ -89,6 +97,10 @@ image did not change; no rebuild is needed.
 - `web_search` accepts a list of queries and searches the first non-empty one;
   with more than one, it tells the model that only the first was used. Gemma 4 through Ollama sent the query as a list in 3 of 7 test
   runs and then got only errors until the step budget ran out.
+
+### Security
+
+No security advisories were published for this release.
 
 ## 0.2.0 (15 October 2026)
 
@@ -277,6 +289,12 @@ A better window.
 - Python tests for the scripts in `Scripts/`:
   `python3 -m unittest discover -s Scripts -p 'test_*.py'`.
 
+### Security
+
+- The hardening is described above: signed requests and answers, a secret
+  kept in a read-only file, and `POST /v1/raw` removed.
+- No security advisories were published for this release.
+
 ## 0.1.0 (11 October 2026)
 
 First release. SandSeek lets a local model research the web from a sandbox
@@ -322,3 +340,7 @@ Known limits:
   "Open Anyway" in System Settings, Privacy & Security, on first launch.
 - A model can still follow instructions hidden in web pages or PDFs; it can
   then only search and read pages.
+
+### Security
+
+No security advisories were published for this release.

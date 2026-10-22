@@ -4,6 +4,11 @@
 
 <h1 align="center">SandSeek</h1>
 
+<p align="center">
+  <a href="https://github.com/Osiriss664/SandSeek/actions/workflows/ci.yml"><img src="https://github.com/Osiriss664/SandSeek/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://scorecard.dev/viewer/?uri=github.com/Osiriss664/SandSeek"><img src="https://api.scorecard.dev/projects/github.com/Osiriss664/SandSeek/badge" alt="OpenSSF Scorecard"></a>
+</p>
+
 **Let a local model research the web, with every search and page read done inside a throwaway sandbox VM.**
 
 ![The SandSeek window: the question box with model and mode, Stop everything, the folded Model server and Web sandbox cards showing Connected, Ready and Signed, then an answer with its folded Figure check and Pages that could not be read lists, the sources and the searches](docs/assets/sandseek-app.png)
