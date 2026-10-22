@@ -41,7 +41,7 @@ VERSION_PATTERN = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+$")
 CREATED_PATTERN = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 COMMIT_PATTERN = re.compile(r"^[0-9a-fA-F]{7,64}$")
 FROM_PATTERN = re.compile(
-    r"^FROM\s+(?P<name>[^\s:@]+(?:/[^\s:@]+)*)(?::(?P<tag>[^\s@]+))?(?:@sha256:(?P<digest>[^\s]+))?\s*$"
+    r"^FROM\s+(?P<name>[^\s:@]+)(?::(?P<tag>[^\s@]+))?(?:@sha256:(?P<digest>[^\s]+))?\s*$"
 )
 DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 SNAPSHOT_PATTERN = re.compile(r"^[0-9]{8}T[0-9]{6}Z$")
