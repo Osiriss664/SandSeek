@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Security
+
+- The sandbox no longer trusts the emSign ECC Root CA - G3 certificate:
+  intermediates under it had their private keys compromised
+  (GHSA-6q48-6c7w-9gw2). The image removes it from the system CA store that
+  the sandbox's page fetches use, and the build stops if it is still there.
+- Sandbox packages updated: certifi 2026.7.22 to 2026.10.19 (same advisory;
+  certifi is not used for SandSeek's own fetches) and pypdf 6.20.1 to 6.21.1
+  (GHSA-5hx5-vpf9-5wcv; the sandbox has no Pillow, so it was not affected).
+  The sandbox image is rebuilt on the next Start.
+
 ## 0.4.1 (16 October 2026)
 
 New: the app starts and stops Ollama, lists the models already on this Mac, and has a Tips page and a Light/Dark choice.

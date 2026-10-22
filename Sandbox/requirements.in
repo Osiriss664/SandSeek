@@ -5,4 +5,4 @@
 trafilatura==2.3.1
 # pypdf reads PDFs inside the bounded child process (pure Python, BSD-3-Clause;
 # no crypto or image extras, so encrypted PDFs are refused, not decrypted).
-pypdf==6.20.1
+pypdf==6.21.1

@@ -8,6 +8,10 @@
 # - every Python package by hash (requirements.txt, generated from
 #   requirements.in as that file describes).
 # To update, change the digest, the snapshot date and requirements.txt together.
+# The system CA store (what server.py's TLS uses) no longer trusts emSign ECC
+# Root CA - G3: intermediates under it had their keys compromised
+# (GHSA-6q48-6c7w-9gw2; certifi and NSS dropped it). Drop that step once the
+# snapshot's ca-certificates package no longer ships the root.
 # The build prints the installed versions of nftables and Python so a build log
 # records them. Check the Python patch level there against CVE-2025-6069
 # (html.parser, quadratic) when the digest is updated; the server also runs its
@@ -40,6 +44,14 @@ RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends nftables; \
     dpkg-query --show nftables; python --version; \
+    ca=mozilla/emSign_ECC_Root_CA_-_G3.crt; \
+    if [ -f "/usr/share/ca-certificates/$ca" ]; then \
+      sed -i "s#^$ca\$#!$ca#" /etc/ca-certificates.conf; \
+      update-ca-certificates --fresh; \
+      python -c 'import sys; root = "".join(open(sys.argv[1]).read().split("-----")[2].split()); sys.exit(root in "".join(open(sys.argv[2]).read().split()))' \
+        "/usr/share/ca-certificates/$ca" /etc/ssl/certs/ca-certificates.crt \
+        || { echo "emSign ECC Root CA - G3 is still trusted" >&2; exit 1; }; \
+    fi; \
     rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/99snapshot; \
     pip install --require-hashes --no-deps -r /app/requirements.txt; \
     useradd --uid 10001 --no-create-home --home-dir /nonexistent \
