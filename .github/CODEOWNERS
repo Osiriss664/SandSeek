@@ -1,0 +1,8 @@
+# Changes to these paths need a review from the security maintainer
+# (see SECURITY.md). They decide what a web page, the model or the sandbox
+# can reach, or how SandSeek is built and released.
+/Sandbox/           @Osiriss664
+/Scripts/           @Osiriss664
+/docs/SECURITY.md   @Osiriss664
+/SECURITY.md        @Osiriss664
+/.github/           @Osiriss664
