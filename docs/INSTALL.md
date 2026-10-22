@@ -8,6 +8,22 @@ things are stored and how to remove everything again.
 For what the security design does and does not promise, read
 [SECURITY.md](SECURITY.md).
 
+### Verifying a download
+
+A release built by the release workflow (from the first release after 0.4.1)
+comes with `SHA256SUMS` and attestations. Put the files you downloaded in one
+folder and run:
+
+```
+shasum -a 256 -c SHA256SUMS
+gh attestation verify SandSeek-X.Y.Z.zip --repo Osiriss664/SandSeek
+```
+
+The first line checks that the files are the ones that were uploaded; the
+second checks with GitHub that the zip was built by this repository's workflow
+from the tagged commit. Releases up to 0.4.1 were built on the maintainer's
+Mac and have only a checksum file, if that; they have no attestation to check.
+
 ## Requirements
 
 - A Mac with Apple silicon and **macOS 26** (Apple `container` needs it).
