@@ -22,6 +22,17 @@
 - The model server's `Host` handling was not checked before. A server that
   answers any `Host` and needs no key can be reached by a web page through DNS
   rebinding while it runs; the new check and the card say so.
+- The sandbox no longer trusts the emSign ECC Root CA - G3 certificate:
+  intermediates under it had their private keys compromised
+  (GHSA-6q48-6c7w-9gw2). The image removes it from the system CA store that
+  the sandbox's page fetches use, and the build stops if it is still there.
+- Sandbox packages updated: certifi 2026.7.22 to 2026.10.19 (same advisory;
+  certifi is not used for SandSeek's own fetches) and pypdf 6.20.1 to 6.21.1
+  (GHSA-5hx5-vpf9-5wcv; the sandbox has no Pillow, so it was not affected).
+  The sandbox image is rebuilt on the next Start.
+- Search results: only links on duckduckgo.com itself are unwrapped as
+  DuckDuckGo redirects; a look-alike host such as `evilduckduckgo.com` is
+  treated as an ordinary result (found by CodeQL).
 
 ## 0.4.1 (16 October 2026)
 
