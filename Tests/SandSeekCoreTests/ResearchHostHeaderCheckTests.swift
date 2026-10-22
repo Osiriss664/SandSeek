@@ -751,7 +751,10 @@ private final class FakeHTTPServer: @unchecked Sendable {
             port: server.port, path: "/v1/models", host: "127.0.0.1:\(server.port)",
             origin: nil, authorization: nil, timeout: 0.5)
         #expect(answer == .noAnswer)
-        #expect(Date().timeIntervalSince(started) < 1.4)
+        // The server never answers, so without the deadline this would wait
+        // forever. The bound leaves room for a busy CI runner, where starting
+        // the probe on a global queue alone can take more than a second.
+        #expect(Date().timeIntervalSince(started) < 5)
     }
 
     @Test func theRealProberReadsStatusAndLowerCaseHeaders() async throws {
