@@ -1,0 +1,21 @@
+# Dependabot opens pull requests for new versions. Nothing is updated
+# without a review: the sandbox pins (base image digest, Python packages by
+# hash) are a safety feature, so each update goes through the usual tests and
+# a Mac test before it is merged.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: pip
+    directory: /Sandbox
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /Sandbox
+    schedule:
+      interval: weekly

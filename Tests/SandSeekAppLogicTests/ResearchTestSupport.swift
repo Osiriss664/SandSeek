@@ -380,9 +380,12 @@ final class MemoryKeyStore: ResearchKeyStoring {
     }
 }
 
+/// Waits until `condition` holds or `timeout` has passed. The limit is
+/// generous because a shared CI runner can be several times slower than a
+/// Mac; a test that passes returns as soon as the condition holds.
 @MainActor
 func waitUntil(_ condition: @MainActor () -> Bool,
-               timeout: Duration = .seconds(5)) async {
+               timeout: Duration = .seconds(20)) async {
     let clock = ContinuousClock()
     let deadline = clock.now.advanced(by: timeout)
     while !condition() && clock.now < deadline {

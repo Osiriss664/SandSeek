@@ -1,0 +1,45 @@
+# Builds and tests every pull request and every push to main on a GitHub
+# macOS runner. Read-only: it needs no secret and writes nothing back.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build and test
+    # macOS 26 on Apple silicon, with Xcode 26 (Swift 6.2) as the default.
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The sandbox image runs Python 3.12; its tests run on the same version.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Tool versions
+        run: |
+          sw_vers
+          xcodebuild -version
+          swift --version
+          python3 --version
+      - name: Swift build
+        run: swift build
+      - name: Swift tests
+        run: swift test
+      - name: Sandbox server tests
+        run: python3 -m unittest Sandbox/test_server.py
+      - name: Script tests
+        run: python3 -m unittest discover -s Scripts -p 'test_*.py'

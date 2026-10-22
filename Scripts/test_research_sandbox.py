@@ -353,9 +353,11 @@ class FixedEnvironmentTests(unittest.TestCase):
         with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as handle:
             handle.write(program)
         self.addCleanup(os.unlink, handle.name)
+        # A DYLD_* variable that cannot kill bash itself: CI runners have SIP
+        # off, so dyld would honour DYLD_INSERT_LIBRARIES in the first bash.
         polluted = {
             "PATH": "/tmp/evil:/usr/bin:/bin", "HOME": "/home/someone", "USER": "someone",
-            "BASH_ENV": "/tmp/evil.sh", "DYLD_INSERT_LIBRARIES": "/tmp/evil.dylib",
+            "BASH_ENV": "/tmp/evil.sh", "DYLD_FALLBACK_LIBRARY_PATH": "/tmp/evil",
             "HTTPS_PROXY": "http://proxy.example:3128", "SSH_AUTH_SOCK": "/tmp/agent",
             "SANDSEEK_DNS": "1.1.1.1 9.9.9.9", "SEARXNG_URL": "http://127.0.0.1:8080",
             "SANDSEEK_SANDBOX_PORT": "9100", "SHELLOPTS": "xtrace",
