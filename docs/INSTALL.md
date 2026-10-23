@@ -8,6 +8,20 @@ things are stored and how to remove everything again.
 For what the security design does and does not promise, read
 [SECURITY.md](SECURITY.md).
 
+### Homebrew
+
+```sh
+brew install --cask osiriss664/tap/sandseek   # the app
+brew install osiriss664/tap/sandseek          # the sandseek command
+```
+
+The cask installs the release zip, so the app is not notarized either (see
+below). The formula builds the `sandseek` command from the release's source
+(this needs Xcode 26) and adds `sandseek-sandbox`, which runs
+`Scripts/research_sandbox.sh` (for example `sandseek-sandbox start`).
+Homebrew does not install Apple `container` or a model server; see
+Requirements.
+
 ### Verifying a download
 
 A release built by the release workflow (from the first release after 0.4.1)
@@ -47,7 +61,7 @@ Mac and have only a checksum file, if that; they have no attestation to check.
   - **TUFF 8.3.1 or newer** (the official release), with a Qwen model for
     research; or
   - **llama.cpp** (`llama-server`), with a model that supports tool calls (the
-    project probed it with Bonsai). llama.cpp is experimental in 0.4.1: no
+    project probed it with Bonsai). llama.cpp is experimental in 0.4.2: no
     streaming, the Thinking switch has no effect on it yet, and no research
     run was measured with it; see [SECURITY.md](SECURITY.md).
   - **Ollama**, experimental (tested once on a Mac). See "Ollama" below.

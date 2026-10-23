@@ -1,6 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.4.2 (23 October 2026)
+
+New: a check whether the model server can be reached through DNS rebinding,
+sandbox security updates, and the first release built by GitHub Actions,
+with `SHA256SUMS`, an SBOM and attestations. The sandbox image changes, so the
+first Start after updating rebuilds it, which takes a few minutes.
 
 ### Added
 

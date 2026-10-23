@@ -13,22 +13,31 @@
 
 ![The SandSeek window: the question box with model and mode, Stop everything, the folded Model server and Web sandbox cards showing Connected, Ready and Signed, then an answer with its folded Figure check and Pages that could not be read lists, the sources and the searches](docs/assets/sandseek-app.png)
 
-## Install in three lines
+## Install
 
 Needs an Apple silicon Mac with macOS 26, Apple
 [`container`](https://github.com/apple/container) and a local model server
 on 127.0.0.1 (TUFF, llama.cpp or Ollama). Building needs Xcode 26 or another
 Swift 6.2 toolchain.
 
-Download `SandSeek-0.4.1.zip` from the
-[releases page](https://github.com/Osiriss664/SandSeek/releases), or build it:
+Download `SandSeek-0.4.2.zip` from the
+[releases page](https://github.com/Osiriss664/SandSeek/releases), install it
+with Homebrew:
+
+    brew install --cask osiriss664/tap/sandseek   # the app
+    brew install osiriss664/tap/sandseek          # the sandseek command
+
+or build it:
 
     git clone https://github.com/Osiriss664/SandSeek.git
     cd SandSeek && Scripts/package_app.sh
     open build/SandSeek.app
 
-Details, first run and Gatekeeper: [docs/INSTALL.md](docs/INSTALL.md). How
-SandSeek handles hostile web pages: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+Releases come with `SHA256SUMS`, an SBOM and GitHub attestations, so you can
+check that a download was built from this repository
+([docs/INSTALL.md](docs/INSTALL.md#verifying-a-download)). Details, first run
+and Gatekeeper: [docs/INSTALL.md](docs/INSTALL.md). How SandSeek handles
+hostile web pages: [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
 
 ## What it is
 
@@ -40,7 +49,7 @@ tool. The model has exactly two tools, `web_search` and `open_page`: no shell,
 no file access, no network tool. `open_page` reads web pages and text PDFs (up
 to 5 MB and 50 pages, no OCR), parsed inside the VM.
 
-Status: 0.4.1. SandSeek began in a fork of TUFF. The command-line tool,
+Status: 0.4.2. SandSeek began in a fork of TUFF. The command-line tool,
 the core library and the Mac app (a window with the same research loop) are one
 Swift package. 0.2.0 was built, tested and tried by hand on a Mac with macOS
 27, TUFF 9.3.0 and Qwen3.6 35B (15 October 2026), including the safety test
@@ -49,7 +58,10 @@ Swift package. 0.2.0 was built, tested and tried by hand on a Mac with macOS
 tested on a Mac with Ollama 0.40.4 and Gemma 4 12B from the command line
 (October 2026). 0.4.1 lets the app start and stop Ollama and list the models
 already on this Mac, and adds a Tips page and a Light/Dark choice; all of
-these were tried by hand on a Mac.
+these were tried by hand on a Mac. 0.4.2 checks whether the model server
+refuses foreign `Host` headers (DNS rebinding), brings sandbox security
+updates and is the first release built by GitHub Actions, with checksums, an
+SBOM and attestations.
 
 ## How it works, in one minute
 
@@ -77,11 +89,12 @@ addresses go to the internet. More in [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.m
 
    LM Studio is planned; other servers are not supported yet.
 2. Get the app, in one of two ways:
-   - **Download:** `SandSeek-0.4.1.zip` from the release page, unzip it and
-     move SandSeek to Applications. It is not notarized: on first launch
-     choose System Settings → Privacy & Security → Open Anyway.
+   - **Download:** `SandSeek-0.4.2.zip` from the release page, unzip it and
+     move SandSeek to Applications, or run
+     `brew install --cask osiriss664/tap/sandseek`. It is not notarized: on
+     first launch choose System Settings → Privacy & Security → Open Anyway.
    - **Build it yourself:** with Xcode 26 or its command line tools (Swift
-     6.2 or newer; 0.4.1 was built on macOS 27):
+     6.2 or newer; the project tests on macOS 27):
 
          git clone https://github.com/Osiriss664/SandSeek.git
          cd SandSeek
@@ -123,6 +136,13 @@ above all test reports.
 - [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.md): the research method.
 - [docs/SECURITY.md](docs/SECURITY.md): what the sandbox guarantees and what it
   does not, the threat model, the tests and how to run them, known limits.
+- [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md): each threat, what stops it,
+  where in the code, and which test checks it.
+- [docs/SAFETY_TEST.md](docs/SAFETY_TEST.md): the safety test that attacks a
+  running sandbox.
+- [CHANGELOG.md](CHANGELOG.md): what changed in each release.
+- [SECURITY.md](SECURITY.md): how to report a security problem and which
+  versions get fixes.
 
 ## Requirements
 
@@ -132,7 +152,7 @@ above all test reports.
 - A local model server on 127.0.0.1: TUFF 8.3.1 or newer, or llama.cpp or
   Ollama (both experimental, see below). Streaming is on by
   default for TUFF, so that Stop and the time limits make it stop generating.
-  llama.cpp (`llama-server`) is experimental in 0.4.1: it works through
+  llama.cpp (`llama-server`) is experimental in 0.4.2: it works through
   `--server-type llamacpp` with plain requests (no streaming), the app's
   Thinking switch has no effect on it yet, and it was probed but not measured
   with a research run. The app connects to a
