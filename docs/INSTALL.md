@@ -61,7 +61,7 @@ Mac and have only a checksum file, if that; they have no attestation to check.
   - **TUFF 8.3.1 or newer** (the official release), with a Qwen model for
     research; or
   - **llama.cpp** (`llama-server`), with a model that supports tool calls (the
-    project probed it with Bonsai). llama.cpp is experimental in 0.4.2: no
+    project probed it with Bonsai). llama.cpp is experimental in 0.4.3: no
     streaming, the Thinking switch has no effect on it yet, and no research
     run was measured with it; see [SECURITY.md](SECURITY.md).
   - **Ollama**, experimental (tested once on a Mac). See "Ollama" below.
