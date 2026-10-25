@@ -8,17 +8,18 @@
 # - every Python package by hash (requirements.txt, generated from
 #   requirements.in as that file describes).
 # To update, change the digest, the snapshot date and requirements.txt together.
-# The system CA store (what server.py's TLS uses) no longer trusts emSign ECC
-# Root CA - G3: intermediates under it had their keys compromised
-# (GHSA-6q48-6c7w-9gw2; certifi and NSS dropped it). Drop that step once the
-# snapshot's ca-certificates package no longer ships the root.
+# The system CA store (what server.py's TLS uses) no longer trusts three emSign
+# roots: ECC Root CA - G3, because intermediates under it had their keys
+# compromised (GHSA-6q48-6c7w-9gw2), and Root CA - C1 and ECC Root CA - C3,
+# which Mozilla retired at the same time. certifi and NSS dropped all three.
+# Drop that step once the snapshot's ca-certificates package no longer ships them.
 # The build prints the installed versions of nftables and Python so a build log
 # records them. Check the Python patch level there against CVE-2025-6069
 # (html.parser, quadratic) when the digest is updated; the server also runs its
 # HTML fallback parser in a killed-after-timeout child.
-FROM docker.io/library/python:3.12-slim@sha256:dddfd7e07f9d15aeeca61529320492139d21cac7f0070c00609243e51e4e0016
+FROM docker.io/library/python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704
 
-ARG DEBIAN_SNAPSHOT=20261002T000000Z
+ARG DEBIAN_SNAPSHOT=20261025T000000Z
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -44,13 +45,20 @@ RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends nftables; \
     dpkg-query --show nftables; python --version; \
-    ca=mozilla/emSign_ECC_Root_CA_-_G3.crt; \
-    if [ -f "/usr/share/ca-certificates/$ca" ]; then \
-      sed -i "s#^$ca\$#!$ca#" /etc/ca-certificates.conf; \
+    distrusted=""; \
+    for ca in mozilla/emSign_ECC_Root_CA_-_G3.crt mozilla/emSign_Root_CA_-_C1.crt mozilla/emSign_ECC_Root_CA_-_C3.crt; do \
+      if [ -f "/usr/share/ca-certificates/$ca" ]; then \
+        sed -i "s#^$ca\$#!$ca#" /etc/ca-certificates.conf; \
+        distrusted="$distrusted $ca"; \
+      fi; \
+    done; \
+    if [ -n "$distrusted" ]; then \
       update-ca-certificates --fresh; \
-      python -c 'import sys; root = "".join(open(sys.argv[1]).read().split("-----")[2].split()); sys.exit(root in "".join(open(sys.argv[2]).read().split()))' \
-        "/usr/share/ca-certificates/$ca" /etc/ssl/certs/ca-certificates.crt \
-        || { echo "emSign ECC Root CA - G3 is still trusted" >&2; exit 1; }; \
+      for ca in $distrusted; do \
+        python -c 'import sys; root = "".join(open(sys.argv[1]).read().split("-----")[2].split()); sys.exit(root in "".join(open(sys.argv[2]).read().split()))' \
+          "/usr/share/ca-certificates/$ca" /etc/ssl/certs/ca-certificates.crt \
+          || { echo "$ca is still trusted" >&2; exit 1; }; \
+      done; \
     fi; \
     rm -rf /var/lib/apt/lists/* /etc/apt/apt.conf.d/99snapshot; \
     pip install --require-hashes --no-deps -r /app/requirements.txt; \
