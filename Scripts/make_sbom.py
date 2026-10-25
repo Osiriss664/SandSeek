@@ -46,7 +46,11 @@ FROM_PATTERN = re.compile(
 DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 SNAPSHOT_PATTERN = re.compile(r"^[0-9]{8}T[0-9]{6}Z$")
 HASH_PATTERN = re.compile(r"^--hash=sha256:([0-9a-f]{64})$")
-REQUIREMENT_PATTERN = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==([A-Za-z0-9][A-Za-z0-9._+!-]*)$")
+# pip-compile may add extras ("lxml[html-clean]==6.1.3"); they name optional
+# dependencies, which are pinned on their own lines, so only name and version count.
+REQUIREMENT_PATTERN = re.compile(
+    r"^([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[A-Za-z0-9._,-]+\])?==([A-Za-z0-9][A-Za-z0-9._+!-]*)$"
+)
 PACKAGE_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9.+-]*$")
 
 
