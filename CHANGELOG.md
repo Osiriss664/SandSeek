@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.3 (25 October 2026)
 
 Sandbox updates only. The sandbox image changes, so the first Start after
 updating rebuilds it, which takes a few minutes.
