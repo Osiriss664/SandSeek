@@ -176,6 +176,16 @@ class FailureTests(Temp):
         root = self.fake_checkout("six>=1.17.0 \\\n    --hash=sha256:" + "a" * 64 + "\n")
         self.expect_failure(root, "not an exact pin")
 
+    def test_requirement_with_extras_is_listed_by_name(self):
+        root = self.fake_checkout("lxml[html-clean]==6.1.3 \\\n    --hash=sha256:" + "a" * 64 + "\n")
+        output = self.path("out.json")
+        result = run(output, root=root)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with open(output, encoding="utf-8") as handle:
+            packages = json.load(handle)["packages"]
+        found = [(item["name"], item.get("versionInfo")) for item in packages if item["name"].startswith("lxml")]
+        self.assertEqual(found, [("lxml", "6.1.3")])
+
     def test_requirement_without_hash_fails(self):
         root = self.fake_checkout("six==1.17.0\n")
         self.expect_failure(root, "no --hash=sha256")
