@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+Sandbox updates only. The sandbox image changes, so the first Start after
+updating rebuilds it, which takes a few minutes.
+
+### Security
+
+- The sandbox also stops trusting the emSign Root CA - C1 and emSign ECC Root
+  CA - C3 certificates, which Mozilla retired together with G3 (certifi and NSS
+  dropped them). The build stops if any of the three is still trusted.
+- Sandbox packages updated: pypdf 6.21.1 to 6.21.2 (limits on oversized PDF
+  cross-reference tables and repeated full file loads), certifi 2026.10.19 to
+  2026.10.23 (drops C1 and C3) and tzlocal 5.4.4 to 5.4.5.
+- Sandbox base image: the newest python:3.12-slim build (still Python 3.12.15)
+  and Debian packages from the 25 October 2026 snapshot.
+
+### Fixed
+
+- `Scripts/make_sbom.py` accepts a pinned requirement with extras, such as
+  `lxml[html-clean]==6.1.3`, and lists it under its plain name.
+
 ## 0.4.2 (23 October 2026)
 
 New: a check whether the model server can be reached through DNS rebinding,
