@@ -171,9 +171,10 @@ Check it:
 curl -s http://127.0.0.1:8080/tuff/v1/status
 ```
 
-An answer with a version number means it runs. TUFF 8.3.1 has no check of the
-`Host` header, so quit the server when you are not using it (see
-[SECURITY.md](SECURITY.md)). If you start it with the button, it is easy to
+An answer with a version number means it runs. TUFF 9.5.6 and newer refuse a
+request that names another host (DNS rebinding). Older versions have no check
+of the `Host` header, so with an older TUFF quit the server when you are not
+using it (see [SECURITY.md](SECURITY.md)). If you start it with the button, it is easy to
 leave it running for hours with the window open: click **Stop server** when you
 are done.
 
@@ -235,7 +236,7 @@ Ollama card, including **Start server**, was not tried by hand, and no other mod
 ### llama.cpp
 
 llama.cpp must be started with `--host 127.0.0.1` **and** a key file, because it
-has no host check either. The key is what stops a web page in your browser from
+has no host check. The key is what stops a web page in your browser from
 using the server.
 
 1. Open SandSeek and choose **llama.cpp** on the model server card. The app

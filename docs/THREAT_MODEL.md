@@ -209,7 +209,7 @@ The ones that matter most for this threat model. The complete list is in
 - **VM escape.** A kernel or virtualisation flaw could let code leave the VM.
   That is the risk of any VM.
 - **Program running as you.** It can call the sandbox and read its secret.
-- **Model servers without a host check.** TUFF 8.3.1 and llama.cpp have none,
+- **Model servers without a host check.** TUFF before 9.5.6 and llama.cpp have none,
   so a web page in your browser could use DNS rebinding against them. SandSeek
   cannot fix a server it does not control. Details and advice:
   [SECURITY.md](SECURITY.md#model-servers-host-check-and-exposure).

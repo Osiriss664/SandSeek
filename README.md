@@ -363,7 +363,7 @@ To record real streams from a running server for test fixtures, use
   its secret.
 - Prompt-injection test pages are in `Sandbox/fixtures/injection`
   (`Scripts/research_injection_check.py`). A pass is evidence, not proof.
-- TUFF 8.3.1 and llama.cpp have no `Host` check; llama.cpp is used only with
+- TUFF before 9.5.6 and llama.cpp have no `Host` check; llama.cpp is used only with
   `--host 127.0.0.1` and `--api-key-file`. `sandseek --check-exposure` and the
   connection card tell you if a server is reachable from the network. The full
   picture is in [docs/SECURITY.md](docs/SECURITY.md).

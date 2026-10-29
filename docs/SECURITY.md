@@ -479,16 +479,19 @@ SandSeek connects to a model server on 127.0.0.1. It can start one itself
 (**Start server**, see below) and then stops it again when you quit it normally;
 a server you started yourself is never stopped by SandSeek.
 
-**TUFF 8.3.1 and llama.cpp have no check of the `Host` header.** A web page in
+**TUFF before 9.5.6 and llama.cpp have no check of the `Host` header.** A web page in
 your normal browser can use DNS rebinding (its own name resolves to 127.0.0.1)
 to make your browser send requests to the model server as if they came from the
 page's own site. Without a host check and a key, such a page could run prompts
 on your model and read the answers. SandSeek cannot fix this in a server it
 does not control.
 
-- **TUFF** has no key. The risk is open until TUFF itself checks the `Host`
-  header. It is low to medium, and only while the server runs. Quit the server
-  when you are not researching.
+- **TUFF** has no key. TUFF 9.5.6 and newer refuse a request whose `Host` or
+  `Origin` is not `127.0.0.1`, `localhost` or `[::1]` (TUFF's
+  `docs/LOCAL_SERVER.md`), so a page that uses DNS rebinding gets nothing.
+  With an older TUFF the risk is open. It is low to medium, and only while the
+  server runs: update TUFF, or quit the server when you are not researching.
+  The host header check below tells which case you have.
 - **Ollama** (experimental) is used on 127.0.0.1:11434, with no key. The
   app and the command refuse Ollama cloud models (names ending in `:cloud` or
   `-cloud`, read the way Ollama itself reads them, and models whose details
@@ -701,8 +704,8 @@ does and does not do:
   SandSeek's own child and runs the program SandSeek chose. It sits in a
   folder only you can use, so another account cannot plant one; a program of
   your own could (and could just as well stop a server itself, see *Who is
-  trusted*). TUFF has no `Host` header check (above), so quit the server when
-  you are not using it.
+  trusted*). TUFF before 9.5.6 has no `Host` header check (above), so with an
+  older TUFF quit the server when you are not using it.
 
 ## Known limits
 
@@ -729,7 +732,7 @@ does and does not do:
 - **Search engine.** DuckDuckGo's HTML results can change shape or rate-limit.
   A SearXNG address (`SEARXNG_URL`) can replace it; the firewall then makes one
   exception for that address and port.
-- **Servers without a host check:** TUFF 8.3.1 and llama.cpp, as above.
+- **Servers without a host check:** TUFF before 9.5.6 and llama.cpp, as above.
   llama.cpp only with `--host 127.0.0.1` and `--api-key-file`.
 - **Only TUFF with Qwen has been measured against the injection pages** so far.
   llama.cpp with Bonsai: not measured yet. Until it is, llama.cpp counts as only
