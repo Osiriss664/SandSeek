@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- The docs now say that TUFF 9.5.6 and newer refuse a request that names
+  another host or origin (DNS rebinding), and the connection card's TUFF
+  warning names TUFF before 9.5.6 and advises updating.
+- INSTALL.md says how to update the release app and how to go back to an
+  older version.
+
+### Tests
+
+- New checks of the sandbox Containerfile and requirements files, and firewall
+  tests that load `firewall.nft` and the entrypoint's rules in a throwaway
+  Linux network namespace (adapted from the TUFF sandbox, see NOTICE). A Linux
+  CI job runs them with `nft`.
+
 ## 0.4.3 (25 October 2026)
 
 Sandbox updates only. The sandbox image changes, so the first Start after

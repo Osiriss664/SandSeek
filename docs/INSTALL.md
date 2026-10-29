@@ -1,9 +1,9 @@
 # Installing SandSeek
 
 You can download the app from the release page (it is not notarized; see the
-README) or build it from source on your Mac. This page covers what you need, how to build and
-package the app, how to start a model server safely, the first run, where
-things are stored and how to remove everything again.
+README) or build it from source on your Mac. This page covers what you need,
+how to build and package the app, how to start a model server safely, the
+first run, where things are stored and how to remove everything again.
 
 For what the security design does and does not promise, read
 [SECURITY.md](SECURITY.md).
@@ -171,11 +171,12 @@ Check it:
 curl -s http://127.0.0.1:8080/tuff/v1/status
 ```
 
-An answer with a version number means it runs. TUFF 8.3.1 has no check of the
-`Host` header, so quit the server when you are not using it (see
-[SECURITY.md](SECURITY.md)). If you start it with the button, it is easy to
-leave it running for hours with the window open: click **Stop server** when you
-are done.
+An answer with a version number means it runs. TUFF 9.5.6 and newer refuse a
+request that names another host (DNS rebinding). Older versions have no check
+of the `Host` header, so with an older TUFF quit the server when you are not
+using it (see [SECURITY.md](SECURITY.md)). If you start it with the button, it
+is easy to leave it running for hours with the window open: click **Stop
+server** when you are done.
 
 ### Ollama (experimental)
 
@@ -235,7 +236,7 @@ Ollama card, including **Start server**, was not tried by hand, and no other mod
 ### llama.cpp
 
 llama.cpp must be started with `--host 127.0.0.1` **and** a key file, because it
-has no host check either. The key is what stops a web page in your browser from
+has no host check. The key is what stops a web page in your browser from
 using the server.
 
 1. Open SandSeek and choose **llama.cpp** on the model server card. The app
@@ -374,13 +375,46 @@ originals are never changed or removed.
 
 ## Update
 
-Fetch the new code, then build and package again. The app rebuilds the sandbox
-image by itself when anything in `Sandbox/` changed; by hand, run
-`Scripts/research_sandbox.sh build`. Quit the app and stop the sandbox first
+**The release app.** Download the new zip and its `SHA256SUMS` from the
+release page and check them (see *Verifying a download*). Quit SandSeek and
+stop the sandbox (**Stop everything**), keep the old zip, then move the old
+`SandSeek.app` to the Trash and put the new one in its place. With Homebrew,
+quit SandSeek, stop the sandbox and run `brew upgrade --cask
+osiriss664/tap/sandseek`; for the command, run
+`brew upgrade osiriss664/tap/sandseek`. A replaced app is a new download, so
+macOS asks for the first-open approval again (see the README, *Quick start*,
+step 2: System Settings, Privacy & Security, Open Anyway).
+
+**From source.** Fetch the new code, then build and package again. The app
+rebuilds the sandbox image by itself when anything in `Sandbox/` changed. If
+you use only the command, run `Scripts/research_sandbox.sh build` yourself:
+`start` never rebuilds the image. Quit the app and stop the sandbox first
 (**Stop everything**, or `Scripts/research_sandbox.sh stop`).
 
 After updating from the first release, the first **Start** rebuilds the sandbox image, which
 takes a few minutes. The old secret file in TUFF's folder is removed.
+
+### If an update breaks SandSeek
+
+Go back to the version that worked:
+
+1. Quit SandSeek and stop the sandbox (**Stop everything**, or
+   `Scripts/research_sandbox.sh stop`).
+2. Take the zip of the older version: the one you kept, or the one on its
+   release page. Check it the same way as a new download (*Verifying a
+   download*); releases up to 0.4.1 have no `SHA256SUMS` or attestation, so
+   there is nothing to check them against.
+3. Move the current `SandSeek.app` to the Trash and put the older one in its
+   place. With Homebrew, download the older release zip and replace the app
+   the same way. macOS asks for the first-open approval again (README, *Quick
+   start*, step 2). From source, check out the older tag (for example
+   `git checkout v0.4.2`) and build and package again.
+4. Start SandSeek. If the older version has a different `Sandbox/` folder, the
+   first **Start** rebuilds the sandbox image for it, which takes a few minutes.
+
+Your reports, settings and the llama.cpp key file stay where they are (see
+*Where things are stored*). Please open an issue that says which version broke
+and what happened.
 
 ## Uninstall
 

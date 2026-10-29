@@ -1,5 +1,6 @@
 SandSeek
 Copyright 2026 the SandSeek authors.
 This project was first developed in a fork of TUFF (https://github.com/rexmhall09/TUFF), licensed under the Apache License 2.0.
+The tests of the Containerfile and the requirements files, and the firewall tests that load firewall.nft in a network namespace, in Sandbox/test_server.py are adapted, with changes, from test_infra.py of the TUFF sandbox (https://github.com/tuff-app/sandbox), Copyright 2026 Rex Hall, licensed under the Apache License 2.0.
 The grading prompt and question format in Scripts/research_question_set.py come from OpenAI simple-evals (MIT License, https://github.com/openai/simple-evals).
 The prompt-injection test pages in Sandbox/fixtures/injection include text from BIPIA and AgentDojo (MIT License); see Sandbox/fixtures/injection/THIRD_PARTY_NOTICES.md.

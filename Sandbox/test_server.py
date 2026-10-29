@@ -15,6 +15,7 @@ import ipaddress
 import json
 import os
 import re
+import shlex
 import shutil
 import socket
 import struct
@@ -2954,6 +2955,7 @@ class MemoryDumpTests(unittest.TestCase):
         self.assertEqual(order, ["dumps", "load", "drop", "dumps"])
 
 
+# Adapted from test_infra.py of tuff-app/sandbox (Apache License 2.0, see NOTICE).
 class ContainerfileTests(unittest.TestCase):
     def test_apt_comes_from_a_snapshot_and_pip_is_hashed(self):
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Containerfile")
@@ -2964,6 +2966,199 @@ class ContainerfileTests(unittest.TestCase):
         self.assertIn("snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}", text)
         self.assertIn("still names the live Debian archive", text)
         self.assertIn("pip install --require-hashes", text)
+
+    def setUp(self):
+        self.text = self.read("Containerfile")
+        lines = [l for l in self.text.splitlines() if l.strip() and not l.lstrip().startswith("#")]
+        self.instructions = []
+        current = ""
+        for line in lines:
+            current += line.rstrip("\\").rstrip() + " " if line.endswith("\\") else line + "\n"
+            if not line.endswith("\\"):
+                self.instructions.append(current.strip())
+                current = ""
+        runs = [i for i in self.instructions if i.startswith("RUN ")]
+        self.assertEqual(len(runs), 1, "every build step belongs in the one checked RUN")
+        self.run = runs[0]
+
+    @staticmethod
+    def read(name):
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), name),
+                  encoding="utf-8") as source:
+            return source.read()
+
+    def copy_sources(self):
+        sources = []
+        for instruction in self.instructions:
+            if instruction.startswith("COPY "):
+                parts = [p for p in instruction.split()[1:] if not p.startswith("--")]
+                sources += parts[:-1]
+        return sources
+
+    def test_the_base_image_is_pinned_by_digest_and_there_is_one_from(self):
+        froms = [i for i in self.instructions if i.startswith("FROM ")]
+        self.assertEqual(len(froms), 1)
+        self.assertRegex(froms[0], r"\AFROM \S+/python:3\.12-slim@sha256:[0-9a-f]{64}\Z")
+
+    def test_requirements_are_installed_with_hashes_and_without_dependency_resolution(self):
+        self.assertRegex(
+            self.run, r"pip install --require-hashes --no-deps -r /app/requirements\.txt")
+        self.assertNotRegex(self.run, r"pip install (?!--require-hashes)")
+        self.assertEqual(self.run.count("pip install"), 1)
+        copy = next(i for i in self.instructions if i.startswith("COPY requirements.txt"))
+        self.assertTrue(copy.endswith("/app/requirements.txt"))
+        self.assertLess(self.text.index(copy), self.text.index("pip install"))
+
+    def test_apt_sources_are_rewritten_before_apt_runs_and_a_live_archive_stops_the_build(self):
+        run = self.run
+        self.assertIn("/etc/apt/sources.list.d/debian.sources", run)
+        sed = run.index("sed -i")
+        check = run.index("grep -rE")
+        update = run.index("apt-get update")
+        install = run.index("apt-get install")
+        pip = run.index("pip install")
+        self.assertLess(sed, check)
+        self.assertLess(check, update)
+        self.assertLess(update, install)
+        self.assertLess(install, pip)
+        self.assertRegex(run, r"grep -rE '[^']*deb\\\.debian\\\.org[^']*'")
+        self.assertIn("security", run[check:update])
+        self.assertIn("exit 1", run[check:update])
+        self.assertIn("set -eux", run)
+        self.assertIn("security.debian.org", run[sed:check])
+        # debian-security is rewritten before debian, whose pattern is its prefix.
+        self.assertLess(run.index("deb.debian.org/debian-security"),
+                        run.index("deb.debian.org/debian#"))
+        self.assertIn("nftables", run[install:pip])
+
+    def test_the_three_emsign_roots_are_distrusted_and_the_build_stops_if_one_stays(self):
+        run = self.run
+        for root in ("emSign_ECC_Root_CA_-_G3.crt", "emSign_Root_CA_-_C1.crt",
+                     "emSign_ECC_Root_CA_-_C3.crt"):
+            self.assertEqual(run.count(f"mozilla/{root}"), 1, root)
+        self.assertIn('sed -i "s#^$ca\\$#!$ca#" /etc/ca-certificates.conf', run)
+        refresh = run.index("update-ca-certificates --fresh")
+        self.assertLess(run.index("/etc/ca-certificates.conf"), refresh)
+        self.assertLess(run.index("apt-get install"), refresh)
+        self.assertIn('echo "$ca is still trusted" >&2; exit 1', run[refresh:])
+        self.assertLess(refresh, run.index("pip install"))
+
+    def test_the_copy_list_is_the_five_runtime_files_and_no_tests(self):
+        sources = self.copy_sources()
+        self.assertEqual(sorted(sources), sorted(
+            ["requirements.txt", "server.py", "firewall.nft", "entrypoint.sh",
+             "default_gateway.py"]))
+        for source in sources:
+            self.assertNotIn("test", source.lower(), source)
+        self.assertNotRegex(self.text, r"(?m)^(ADD|VOLUME)\b")
+
+    def test_every_copied_file_exists(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        for name in self.copy_sources():
+            self.assertTrue(os.path.isfile(os.path.join(here, name)), name)
+
+    def test_the_entrypoint_is_the_script_and_the_image_does_not_start_as_the_sandbox_user(self):
+        self.assertRegex(self.text, r'(?m)^ENTRYPOINT \["/app/entrypoint\.sh"\]$')
+        self.assertEqual(self.text.count("ENTRYPOINT"), 1)
+        self.assertNotRegex(self.text, r"(?m)^(USER|CMD)\b")
+        here = os.path.dirname(os.path.abspath(__file__))
+        self.assertTrue(os.access(os.path.join(here, "entrypoint.sh"), os.X_OK))
+
+    def test_the_user_and_port_match_server_py(self):
+        self.assertIn(f"--uid {server.SANDBOX_UID} ", self.run)
+        self.assertEqual(server.SANDBOX_UID, 10001)
+        self.assertIn("--shell /usr/sbin/nologin", self.run)
+        # Literal: the PORT environment variable can change server.PORT.
+        self.assertRegex(self.text, r"(?m)^EXPOSE 9100$")
+        self.assertRegex(self.read("server.py"), r'(?m)^PORT = int\(os\.environ\.get\("PORT"\) or "9100"\)$')
+
+    def test_image_hygiene(self):
+        self.assertIn("PYTHONDONTWRITEBYTECODE=1", self.text)
+        self.assertIn("PIP_NO_CACHE_DIR=1", self.text)
+        self.assertIn("rm -rf /var/lib/apt/lists/*", self.run)
+
+
+# Adapted from test_infra.py of tuff-app/sandbox (Apache License 2.0, see NOTICE).
+class RequirementsTests(unittest.TestCase):
+    @staticmethod
+    def read(name):
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), name),
+                  encoding="utf-8") as source:
+            return source.read()
+
+    @staticmethod
+    def logical_lines(text):
+        """Requirement lines with their backslash continuations joined."""
+        result, current = [], ""
+        for raw in text.splitlines():
+            line = raw.strip()
+            if not current and (not line or line.startswith("#")):
+                continue
+            if line.endswith("\\"):
+                current += line[:-1].strip() + " "
+            else:
+                result.append((current + line).strip())
+                current = ""
+        return result
+
+    def direct_pins(self):
+        pins = {}
+        for line in self.read("requirements.in").splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line:
+                match = re.fullmatch(r"([A-Za-z0-9._-]+)==([0-9][A-Za-z0-9.+!_-]*)", line)
+                self.assertIsNotNone(match, line)
+                pins[match.group(1).lower()] = match.group(2)
+        return pins
+
+    def test_every_requirement_is_pinned_with_equals_and_has_only_sha256_hashes(self):
+        entries = self.logical_lines(self.read("requirements.txt"))
+        self.assertGreater(len(entries), 10)
+        names = set()
+        for entry in entries:
+            with self.subTest(entry=entry[:60]):
+                match = re.match(
+                    r"\A([A-Za-z0-9][A-Za-z0-9._-]*)==([A-Za-z0-9.!+_-]+) (.*)\Z", entry)
+                self.assertIsNotNone(match, entry[:80])
+                name, _, rest = match.groups()
+                hashes = rest.split()
+                self.assertTrue(hashes)
+                for item in hashes:
+                    self.assertRegex(item, r"\A--hash=sha256:[0-9a-f]{64}\Z")
+                self.assertEqual(len(set(hashes)), len(hashes))
+                self.assertNotIn(name.lower(), names)
+                names.add(name.lower())
+
+    def test_nothing_in_requirements_txt_is_unpinned_or_comes_from_elsewhere(self):
+        for line in self.read("requirements.txt").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            self.assertFalse(stripped.startswith(
+                ("-e", "--index-url", "--extra-index-url", "--find-links", "-f ", "-i ",
+                 "git+", "http")), stripped[:60])
+            requirement = stripped.split("--hash")[0]
+            self.assertNotIn("@", requirement)
+            self.assertNotRegex(requirement, r"(>=|<=|~=|>|<|!=|===)")
+
+    def test_requirements_in_pins_exactly_trafilatura_and_pypdf(self):
+        self.assertEqual(set(self.direct_pins()), {"trafilatura", "pypdf"})
+
+    def test_requirements_txt_has_the_same_versions_as_requirements_in(self):
+        locked = {}
+        for entry in self.logical_lines(self.read("requirements.txt")):
+            name, _, rest = entry.partition("==")
+            locked[name.lower()] = rest.split()[0]
+        for name, version in self.direct_pins().items():
+            self.assertEqual(locked.get(name), version, name)
+
+    def test_pypdf_is_listed_without_extras(self):
+        # The extras would add crypto and image libraries to the image.
+        self.assertNotRegex(self.read("requirements.in"), r"(?m)^pypdf\[")
+        locked = {entry.split("==")[0].lower() for entry in
+                  self.logical_lines(self.read("requirements.txt"))}
+        for name in ("cryptography", "pillow", "pycryptodome"):
+            self.assertNotIn(name, locked)
 
 
 def _load_address_check():
@@ -3240,8 +3435,38 @@ class InjectionCheckScriptTests(unittest.TestCase):
         self.assertNotIn("3/3 runs resisted", text)
 
 
+def _skip_or_fail(test, reason):
+    if os.environ.get("SANDSEEK_REQUIRE_NFT"):
+        test.fail(reason + " (SANDSEEK_REQUIRE_NFT is set)")
+    test.skipTest(reason)
+
+
+def _require_nft(test, namespace=False):
+    """The only place the nft tests may skip: nft (and unshare -n) must work here."""
+    if shutil.which("nft") is None:
+        _skip_or_fail(test, "nft is not installed")
+    if namespace:
+        if shutil.which("unshare") is None:
+            _skip_or_fail(test, "unshare is not installed")
+        probe = subprocess.run(["unshare", "-n", "true"], capture_output=True, text=True)
+        if probe.returncode != 0:
+            _skip_or_fail(test, "no network namespace here: " + probe.stderr.strip())
+    # `nft list tables` needs the kernel, as the real loads do; checking an
+    # empty file does not, and passes where nft cannot be used.
+    argv = ["unshare", "-n", "nft", "list", "ruleset"] if namespace else \
+        ["nft", "list", "tables"]
+    probe = subprocess.run(argv, capture_output=True, text=True)
+    if probe.returncode != 0:
+        _skip_or_fail(test, "nft cannot be used here: " + probe.stderr.strip())
+
+
+# The Containerfile, requirements and namespace firewall tests are adapted from
+# test_infra.py of tuff-app/sandbox (Apache License 2.0, see NOTICE).
 class FirewallFileTests(unittest.TestCase):
-    """nft cannot run here; these read firewall.nft as text."""
+    """Most of these read firewall.nft as text; two load it with nft, the second in
+    a throwaway network namespace, and skip where nft or unshare cannot be used
+    (a failure after that probe is a test failure). SANDSEEK_REQUIRE_NFT turns
+    every such skip into a failure."""
 
     def setUp(self):
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "firewall.nft")
@@ -3263,7 +3488,9 @@ class FirewallFileTests(unittest.TestCase):
             "ct state established,related accept",
             "ip saddr $gateway tcp dport 9100 accept",
         ])
-        self.assertEqual(server.PORT, 9100)
+        self.assertRegex(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "server.py"),
+                              encoding="utf-8").read(),
+                         r'(?m)^PORT = int\(os\.environ\.get\("PORT"\) or "9100"\)$')
 
     def test_port_9100_is_accepted_from_the_gateway_only_and_never_over_ipv6(self):
         # The only rule naming the port has a source address; `ip saddr`
@@ -3275,15 +3502,10 @@ class FirewallFileTests(unittest.TestCase):
         self.assertNotIn("define gateway", self.code)  # entrypoint.sh passes it
 
     def test_the_file_loads_with_a_gateway_and_not_without(self):
-        import shutil
-        import subprocess
-        if shutil.which("nft") is None:
-            self.skipTest("nft is not installed")
+        _require_nft(self)
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "firewall.nft")
         ok = subprocess.run(["nft", "-c", "-D", "gateway=192.168.64.1", "-f", path],
                             capture_output=True, text=True)
-        if "ermission" in ok.stderr or "not permitted" in ok.stderr or "not supported" in ok.stderr:
-            self.skipTest("nft cannot check rules here: " + ok.stderr.strip())
         self.assertEqual(ok.returncode, 0, ok.stderr)
         missing = subprocess.run(["nft", "-c", "-f", path], capture_output=True, text=True)
         self.assertNotEqual(missing.returncode, 0)
@@ -3319,6 +3541,45 @@ class FirewallFileTests(unittest.TestCase):
             self.assertIn(f"type {kind}", body)
             self.assertNotIn("elements", body)
             self.assertNotIn("interval", body)
+
+    def test_loaded_for_real_in_a_throwaway_network_namespace(self):
+        _require_nft(self, namespace=True)
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "firewall.nft")
+        table = "inet sandseek_sandbox"
+        script = (f"nft -D gateway=192.168.64.1 -f {shlex.quote(path)} && "
+                  f'nft add element {table} blocked4 "{{ 192.168.64.1 }}" && '
+                  f'nft add element {table} blocked6 "{{ fe80::1 }}" && '
+                  f"nft insert rule {table} output ip daddr 192.168.64.1 udp dport 53 accept && "
+                  f"nft insert rule {table} output ip daddr 192.168.64.1 tcp dport 53 accept && "
+                  f"nft -nn list chain {table} output && "
+                  "echo ==== && "
+                  f"nft -nn list chain {table} input && "
+                  "echo ==== && "
+                  f"nft -nn list set {table} blocked4")
+        result = subprocess.run(["unshare", "-n", "sh", "-c", script], capture_output=True,
+                                text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output_chain, input_chain, blocked_set = (
+            part for part in result.stdout.split("====\n"))
+        lines = [line.strip() for line in output_chain.splitlines()]
+        dns = [i for i, line in enumerate(lines) if "dport 53 accept" in line]
+        established = next(i for i, line in enumerate(lines)
+                           if line.startswith("ct state") and line.endswith("accept"))
+        blocked4 = [i for i, line in enumerate(lines) if "@blocked4" in line and "reject" in line]
+        blocked6 = [i for i, line in enumerate(lines) if "@blocked6" in line and "reject" in line]
+        private4 = [i for i, line in enumerate(lines) if "@private4" in line]
+        self.assertEqual(len(dns), 2, output_chain)
+        self.assertEqual(len(blocked4), 2, output_chain)
+        self.assertEqual(len(blocked6), 2, output_chain)
+        self.assertLess(max(dns), min(blocked4 + blocked6))
+        self.assertLess(max(dns), established)
+        self.assertLess(established, min(blocked4 + blocked6))
+        self.assertLess(max(blocked4 + blocked6), min(private4))
+        self.assertIn("tcp reset", lines[blocked4[0]])
+        self.assertIn("tcp reset", lines[blocked6[0]])
+        self.assertIn("192.168.64.1", blocked_set)
+        port_rules = [line.strip() for line in input_chain.splitlines() if "dport" in line]
+        self.assertEqual(port_rules, ["ip saddr 192.168.64.1 tcp dport 9100 accept"])
 
 
 SAMPLE_ROUTE = (
@@ -3412,7 +3673,7 @@ class EntrypointTests(unittest.TestCase):
     BLOCKED = "198.41.0.4\n::1\n"
 
     def run_entrypoint(self, helper_body, nft_exit=0, blocked=BLOCKED, nft_fail_on=None,
-                       blocked_is_link=False):
+                       blocked_is_link=False, resolv_conf=""):
         import subprocess
         import tempfile
         here = os.path.dirname(os.path.abspath(__file__))
@@ -3428,16 +3689,16 @@ class EntrypointTests(unittest.TestCase):
             log = os.path.join(directory, "calls")
             helper = write("helper", helper_body)
             # The helper is run by name through python3 in the real script.
-            # A script on standard input (`python3 -`) runs for real; the
+            # A script on standard input or after -c (`python3 -`, `-c`) runs for real; the
             # helper and the server are stand-ins.
             write("python3", f'#!/bin/sh\nif [ "$1" = "/app/default_gateway.py" ]; then shift; '
                              f'exec {helper} "$@"; fi\n'
-                             f'if [ "$1" = "-" ]; then exec {sys.executable} "$@"; fi\n'
+                             f'if [ "$1" = "-" ] || [ "$1" = "-c" ]; then exec {sys.executable} "$@"; fi\n'
                              f'echo "python3 $*" >> {log}\n')
             fail_on = f'case "$*" in *"{nft_fail_on}"*) exit 1 ;; esac\n' if nft_fail_on else ""
             write("nft", f'#!/bin/sh\necho "nft $*" >> {log}\n{fail_on}exit {nft_exit}\n')
             write("sleep", "#!/bin/sh\nexit 0\n")
-            resolv = write("resolv.conf", "")
+            resolv = write("resolv.conf", resolv_conf)
             blocked_file = os.path.join(directory, "blocked-addresses")
             if blocked is not None:
                 with open(blocked_file + (".real" if blocked_is_link else ""), "w") as handle:
@@ -3528,6 +3789,50 @@ class EntrypointTests(unittest.TestCase):
         result, calls = self.run_entrypoint(self.GATEWAY, nft_fail_on="add element")
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("server.py", calls)
+
+    NAMESERVERS = "nameserver 192.168.64.1\nnameserver 2606:4700:4700::1111\n"
+
+    def test_each_nameserver_gets_dns_rules_inserted_at_the_top_of_the_chain(self):
+        result, calls = self.run_entrypoint(self.GATEWAY, resolv_conf=self.NAMESERVERS)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        table = "nft insert rule inet sandseek_sandbox output"
+        inserted = [line for line in calls.splitlines() if " rule " in line]
+        # `insert`, not `add`: an added rule would land below the blocked rules.
+        self.assertEqual(inserted, [
+            f"{table} ip daddr 192.168.64.1 udp dport 53 accept",
+            f"{table} ip daddr 192.168.64.1 tcp dport 53 accept",
+            f"{table} ip6 daddr 2606:4700:4700::1111 udp dport 53 accept",
+            f"{table} ip6 daddr 2606:4700:4700::1111 tcp dport 53 accept",
+        ])
+        self.assertLess(calls.rindex("add element"), calls.index("insert rule"))
+        self.assertLess(calls.rindex("insert rule"), calls.index("python3 /app/server.py"))
+
+    # Adapted from tuff-app/sandbox test_infra.py (Apache 2.0, see NOTICE).
+    def test_the_recorded_calls_produce_the_right_chain_in_a_throwaway_network_namespace(self):
+        _require_nft(self, namespace=True)
+        result, calls = self.run_entrypoint(self.GATEWAY, resolv_conf="nameserver 192.168.64.1\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "firewall.nft")
+        replay = [line.replace("-f FIREWALL", "-f " + shlex.quote(path))
+                  for line in calls.splitlines() if line.startswith("nft ")]
+        self.assertGreaterEqual(len(replay), 5, calls)
+        script = " && ".join(replay) + " && nft -nn list chain inet sandseek_sandbox output"
+        run = subprocess.run(["unshare", "-n", "sh", "-c", script], capture_output=True,
+                             text=True, timeout=60)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        lines = [line.strip() for line in run.stdout.splitlines()]
+        rules = lines[lines.index(next(l for l in lines if l.startswith("type filter"))) + 1:]
+        # Each insert goes to the top, so the pair is in reverse order.
+        for rule in rules[:2]:
+            self.assertTrue(rule.startswith("ip daddr 192.168.64.1 "), rule)
+            self.assertTrue(rule.endswith(" dport 53 accept"), rule)
+        self.assertEqual({rule.split()[3] for rule in rules[:2]}, {"udp", "tcp"})
+        established = next(i for i, l in enumerate(rules)
+                           if l.startswith("ct state") and l.endswith("accept"))
+        blocked = [i for i, l in enumerate(rules) if "@blocked" in l]
+        self.assertTrue(blocked, run.stdout)
+        self.assertLess(1, established)
+        self.assertLess(established, min(blocked))
 
 
 class LauncherTests(unittest.TestCase):

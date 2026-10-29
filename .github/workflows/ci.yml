@@ -1,5 +1,6 @@
 # Builds and tests every pull request and every push to main on a GitHub
-# macOS runner. Read-only: it needs no secret and writes nothing back.
+# macOS runner, plus one Linux job for the firewall. Read-only: it needs no
+# secret and writes nothing back.
 name: CI
 
 on:
@@ -43,3 +44,28 @@ jobs:
         run: python3 -m unittest Sandbox/test_server.py
       - name: Script tests
         run: python3 -m unittest discover -s Scripts -p 'test_*.py'
+
+  # The macOS runner above has no nft, so the tests that load firewall.nft (also in
+  # a real network namespace) only run here. The Containerfile and requirements
+  # tests are text checks and run on macOS too; they are listed so they run
+  # under the same root Python as the rest.
+  linux-firewall:
+    name: Firewall and build files (Linux)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install nftables
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends nftables
+      # sudo: the namespace tests need root. These classes import server.py but
+      # need neither trafilatura nor pypdf, so the system Python is enough.
+      # SANDSEEK_REQUIRE_NFT makes a missing nft or namespace a failure, not a skip.
+      - name: Firewall, entrypoint, Containerfile and requirements tests
+        working-directory: Sandbox
+        run: sudo env SANDSEEK_REQUIRE_NFT=1 /usr/bin/python3 -B -m unittest test_server.FirewallFileTests test_server.EntrypointTests test_server.ContainerfileTests test_server.RequirementsTests -v
