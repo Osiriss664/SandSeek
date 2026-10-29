@@ -2955,6 +2955,7 @@ class MemoryDumpTests(unittest.TestCase):
         self.assertEqual(order, ["dumps", "load", "drop", "dumps"])
 
 
+# Adapted from test_infra.py of tuff-app/sandbox (Apache License 2.0, see NOTICE).
 class ContainerfileTests(unittest.TestCase):
     def test_apt_comes_from_a_snapshot_and_pip_is_hashed(self):
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Containerfile")
@@ -2976,7 +2977,9 @@ class ContainerfileTests(unittest.TestCase):
             if not line.endswith("\\"):
                 self.instructions.append(current.strip())
                 current = ""
-        self.run = next(i for i in self.instructions if i.startswith("RUN "))
+        runs = [i for i in self.instructions if i.startswith("RUN ")]
+        self.assertEqual(len(runs), 1, "every build step belongs in the one checked RUN")
+        self.run = runs[0]
 
     @staticmethod
     def read(name):
@@ -3065,8 +3068,9 @@ class ContainerfileTests(unittest.TestCase):
         self.assertIn(f"--uid {server.SANDBOX_UID} ", self.run)
         self.assertEqual(server.SANDBOX_UID, 10001)
         self.assertIn("--shell /usr/sbin/nologin", self.run)
-        self.assertRegex(self.text, rf"(?m)^EXPOSE {server.PORT}$")
-        self.assertEqual(server.PORT, 9100)  # the default; PORT can be overridden by the env
+        # Literal: the PORT environment variable can change server.PORT.
+        self.assertRegex(self.text, r"(?m)^EXPOSE 9100$")
+        self.assertRegex(self.read("server.py"), r'(?m)^PORT = int\(os\.environ\.get\("PORT"\) or "9100"\)$')
 
     def test_image_hygiene(self):
         self.assertIn("PYTHONDONTWRITEBYTECODE=1", self.text)
@@ -3074,6 +3078,7 @@ class ContainerfileTests(unittest.TestCase):
         self.assertIn("rm -rf /var/lib/apt/lists/*", self.run)
 
 
+# Adapted from test_infra.py of tuff-app/sandbox (Apache License 2.0, see NOTICE).
 class RequirementsTests(unittest.TestCase):
     @staticmethod
     def read(name):
@@ -3149,8 +3154,11 @@ class RequirementsTests(unittest.TestCase):
 
     def test_pypdf_is_listed_without_extras(self):
         # The extras would add crypto and image libraries to the image.
-        for name in ("requirements.in", "requirements.txt"):
-            self.assertNotRegex(self.read(name), r"(?m)^pypdf\[")
+        self.assertNotRegex(self.read("requirements.in"), r"(?m)^pypdf\[")
+        locked = {entry.split("==")[0].lower() for entry in
+                  self.logical_lines(self.read("requirements.txt"))}
+        for name in ("cryptography", "pillow", "pycryptodome"):
+            self.assertNotIn(name, locked)
 
 
 def _load_address_check():
@@ -3427,8 +3435,37 @@ class InjectionCheckScriptTests(unittest.TestCase):
         self.assertNotIn("3/3 runs resisted", text)
 
 
+def _skip_or_fail(test, reason):
+    if os.environ.get("SANDSEEK_REQUIRE_NFT"):
+        test.fail(reason + " (SANDSEEK_REQUIRE_NFT is set)")
+    test.skipTest(reason)
+
+
+def _require_nft(test, namespace=False):
+    """The only place the nft tests may skip: nft (and unshare -n) must work here."""
+    if shutil.which("nft") is None:
+        _skip_or_fail(test, "nft is not installed")
+    if namespace:
+        if shutil.which("unshare") is None:
+            _skip_or_fail(test, "unshare is not installed")
+        probe = subprocess.run(["unshare", "-n", "true"], capture_output=True, text=True)
+        if probe.returncode != 0:
+            _skip_or_fail(test, "no network namespace here: " + probe.stderr.strip())
+    with tempfile.NamedTemporaryFile("w", suffix=".nft") as empty:
+        argv = ["unshare", "-n", "nft", "list", "ruleset"] if namespace else \
+            ["nft", "-c", "-f", empty.name]
+        probe = subprocess.run(argv, capture_output=True, text=True)
+    if probe.returncode != 0:
+        _skip_or_fail(test, "nft cannot be used here: " + probe.stderr.strip())
+
+
+# The Containerfile, requirements and namespace firewall tests are adapted from
+# test_infra.py of tuff-app/sandbox (Apache License 2.0, see NOTICE).
 class FirewallFileTests(unittest.TestCase):
-    """nft cannot run here; these read firewall.nft as text."""
+    """Most of these read firewall.nft as text; two load it with nft, the second in
+    a throwaway network namespace, and skip where nft or unshare cannot be used
+    (a failure after that probe is a test failure). SANDSEEK_REQUIRE_NFT turns
+    every such skip into a failure."""
 
     def setUp(self):
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "firewall.nft")
@@ -3450,7 +3487,9 @@ class FirewallFileTests(unittest.TestCase):
             "ct state established,related accept",
             "ip saddr $gateway tcp dport 9100 accept",
         ])
-        self.assertEqual(server.PORT, 9100)
+        self.assertRegex(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "server.py"),
+                              encoding="utf-8").read(),
+                         r'(?m)^PORT = int\(os\.environ\.get\("PORT"\) or "9100"\)$')
 
     def test_port_9100_is_accepted_from_the_gateway_only_and_never_over_ipv6(self):
         # The only rule naming the port has a source address; `ip saddr`
@@ -3462,15 +3501,10 @@ class FirewallFileTests(unittest.TestCase):
         self.assertNotIn("define gateway", self.code)  # entrypoint.sh passes it
 
     def test_the_file_loads_with_a_gateway_and_not_without(self):
-        import shutil
-        import subprocess
-        if shutil.which("nft") is None:
-            self.skipTest("nft is not installed")
+        _require_nft(self)
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "firewall.nft")
         ok = subprocess.run(["nft", "-c", "-D", "gateway=192.168.64.1", "-f", path],
                             capture_output=True, text=True)
-        if "ermission" in ok.stderr or "not permitted" in ok.stderr or "not supported" in ok.stderr:
-            self.skipTest("nft cannot check rules here: " + ok.stderr.strip())
         self.assertEqual(ok.returncode, 0, ok.stderr)
         missing = subprocess.run(["nft", "-c", "-f", path], capture_output=True, text=True)
         self.assertNotEqual(missing.returncode, 0)
@@ -3508,8 +3542,7 @@ class FirewallFileTests(unittest.TestCase):
             self.assertNotIn("interval", body)
 
     def test_loaded_for_real_in_a_throwaway_network_namespace(self):
-        if shutil.which("unshare") is None or shutil.which("nft") is None:
-            self.skipTest("unshare or nft is not installed")
+        _require_nft(self, namespace=True)
         path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "firewall.nft")
         table = "inet sandseek_sandbox"
         script = (f"nft -D gateway=192.168.64.1 -f {shlex.quote(path)} && "
@@ -3524,9 +3557,6 @@ class FirewallFileTests(unittest.TestCase):
                   f"nft -nn list set {table} blocked4")
         result = subprocess.run(["unshare", "-n", "sh", "-c", script], capture_output=True,
                                 text=True, timeout=60)
-        refused = ("ermission", "not supported", "not permitted", "unshare")
-        if result.returncode != 0 and any(text in result.stderr for text in refused):
-            self.skipTest("cannot use a network namespace here: " + result.stderr.strip())
         self.assertEqual(result.returncode, 0, result.stderr)
         output_chain, input_chain, blocked_set = (
             part for part in result.stdout.split("====\n"))
@@ -3642,7 +3672,7 @@ class EntrypointTests(unittest.TestCase):
     BLOCKED = "198.41.0.4\n::1\n"
 
     def run_entrypoint(self, helper_body, nft_exit=0, blocked=BLOCKED, nft_fail_on=None,
-                       blocked_is_link=False):
+                       blocked_is_link=False, resolv_conf=""):
         import subprocess
         import tempfile
         here = os.path.dirname(os.path.abspath(__file__))
@@ -3658,16 +3688,16 @@ class EntrypointTests(unittest.TestCase):
             log = os.path.join(directory, "calls")
             helper = write("helper", helper_body)
             # The helper is run by name through python3 in the real script.
-            # A script on standard input (`python3 -`) runs for real; the
+            # A script on standard input or after -c (`python3 -`, `-c`) runs for real; the
             # helper and the server are stand-ins.
             write("python3", f'#!/bin/sh\nif [ "$1" = "/app/default_gateway.py" ]; then shift; '
                              f'exec {helper} "$@"; fi\n'
-                             f'if [ "$1" = "-" ]; then exec {sys.executable} "$@"; fi\n'
+                             f'if [ "$1" = "-" ] || [ "$1" = "-c" ]; then exec {sys.executable} "$@"; fi\n'
                              f'echo "python3 $*" >> {log}\n')
             fail_on = f'case "$*" in *"{nft_fail_on}"*) exit 1 ;; esac\n' if nft_fail_on else ""
             write("nft", f'#!/bin/sh\necho "nft $*" >> {log}\n{fail_on}exit {nft_exit}\n')
             write("sleep", "#!/bin/sh\nexit 0\n")
-            resolv = write("resolv.conf", "")
+            resolv = write("resolv.conf", resolv_conf)
             blocked_file = os.path.join(directory, "blocked-addresses")
             if blocked is not None:
                 with open(blocked_file + (".real" if blocked_is_link else ""), "w") as handle:
@@ -3758,6 +3788,49 @@ class EntrypointTests(unittest.TestCase):
         result, calls = self.run_entrypoint(self.GATEWAY, nft_fail_on="add element")
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("server.py", calls)
+
+    NAMESERVERS = "nameserver 192.168.64.1\nnameserver 2606:4700:4700::1111\n"
+
+    def test_each_nameserver_gets_dns_rules_inserted_at_the_top_of_the_chain(self):
+        result, calls = self.run_entrypoint(self.GATEWAY, resolv_conf=self.NAMESERVERS)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        table = "nft insert rule inet sandseek_sandbox output"
+        inserted = [line for line in calls.splitlines() if " rule " in line]
+        # `insert`, not `add`: an added rule would land below the blocked rules.
+        self.assertEqual(inserted, [
+            f"{table} ip daddr 192.168.64.1 udp dport 53 accept",
+            f"{table} ip daddr 192.168.64.1 tcp dport 53 accept",
+            f"{table} ip6 daddr 2606:4700:4700::1111 udp dport 53 accept",
+            f"{table} ip6 daddr 2606:4700:4700::1111 tcp dport 53 accept",
+        ])
+        self.assertLess(calls.rindex("add element"), calls.index("insert rule"))
+        self.assertLess(calls.rindex("insert rule"), calls.index("python3 /app/server.py"))
+
+    def test_the_recorded_calls_produce_the_right_chain_in_a_throwaway_network_namespace(self):
+        _require_nft(self, namespace=True)
+        result, calls = self.run_entrypoint(self.GATEWAY, resolv_conf="nameserver 192.168.64.1\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "firewall.nft")
+        replay = [line.replace("-f FIREWALL", "-f " + shlex.quote(path))
+                  for line in calls.splitlines() if line.startswith("nft ")]
+        self.assertGreaterEqual(len(replay), 5, calls)
+        script = " && ".join(replay) + " && nft -nn list chain inet sandseek_sandbox output"
+        run = subprocess.run(["unshare", "-n", "sh", "-c", script], capture_output=True,
+                             text=True, timeout=60)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        lines = [line.strip() for line in run.stdout.splitlines()]
+        rules = lines[lines.index(next(l for l in lines if l.startswith("type filter"))) + 1:]
+        # Each insert goes to the top, so the pair is in reverse order.
+        for rule in rules[:2]:
+            self.assertTrue(rule.startswith("ip daddr 192.168.64.1 "), rule)
+            self.assertTrue(rule.endswith(" dport 53 accept"), rule)
+        self.assertEqual({rule.split()[3] for rule in rules[:2]}, {"udp", "tcp"})
+        established = next(i for i, l in enumerate(rules)
+                           if l.startswith("ct state") and l.endswith("accept"))
+        blocked = [i for i, l in enumerate(rules) if "@blocked" in l]
+        self.assertTrue(blocked, run.stdout)
+        self.assertLess(1, established)
+        self.assertLess(established, min(blocked))
 
 
 class LauncherTests(unittest.TestCase):

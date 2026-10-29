@@ -150,8 +150,8 @@ struct ConnectionCard: View {
     }
 
     private var tuffCaption: some View {
-        Label("TUFF does not check which web page a request comes from. "
-              + "Quit the server when you are not using it.",
+        Label("TUFF before 9.5.6 does not check which web page a request comes from. "
+              + "Update TUFF, or quit the server when you are not using it.",
               systemImage: "exclamationmark.triangle")
             .font(.caption)
             .foregroundStyle(.orange)
