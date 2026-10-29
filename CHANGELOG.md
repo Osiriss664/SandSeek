@@ -4,9 +4,9 @@
 
 ### Changed
 
-- The docs and the TUFF warning in the connection card now say that TUFF
-  9.5.6 and newer refuse a request that names another host or origin (DNS
-  rebinding); the advice to quit the server applies to older TUFF only.
+- The docs now say that TUFF 9.5.6 and newer refuse a request that names
+  another host or origin (DNS rebinding), and the connection card's TUFF
+  warning names TUFF before 9.5.6 and advises updating.
 - INSTALL.md says how to update the release app and how to go back to an
   older version.
 

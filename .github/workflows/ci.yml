@@ -1,5 +1,6 @@
 # Builds and tests every pull request and every push to main on a GitHub
-# macOS runner, plus one Linux job for the firewall. Read-only: it needs no secret and writes nothing back.
+# macOS runner, plus one Linux job for the firewall. Read-only: it needs no
+# secret and writes nothing back.
 name: CI
 
 on:

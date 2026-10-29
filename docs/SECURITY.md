@@ -489,10 +489,10 @@ does not control.
 - **TUFF** has no key. TUFF 9.5.6 and newer refuse a request whose `Host` or
   `Origin` is not `127.0.0.1`, `localhost` or `[::1]` (TUFF's
   `docs/LOCAL_SERVER.md`), so a page that uses DNS rebinding gets nothing.
-  The `Origin` check also refuses a page that sends a request straight to
-  127.0.0.1 without rebinding (the Ollama problem below). Pages served from
-  localhost or 127.0.0.1 on another port are let through, but cannot read the
-  answers.
+  The `Origin` check also refuses a page that sends a prompt (a POST)
+  straight to 127.0.0.1 without rebinding (the Ollama problem below). Pages
+  served from `localhost`, `127.0.0.1` or `[::1]` on another port are let
+  through, but cannot read the answers.
   With an older TUFF the risk is open. It is low to medium, and only while the
   server runs: update TUFF, or quit the server when you are not researching.
   The host header check below tells which case you have.

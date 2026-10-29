@@ -3451,10 +3451,11 @@ def _require_nft(test, namespace=False):
         probe = subprocess.run(["unshare", "-n", "true"], capture_output=True, text=True)
         if probe.returncode != 0:
             _skip_or_fail(test, "no network namespace here: " + probe.stderr.strip())
-    with tempfile.NamedTemporaryFile("w", suffix=".nft") as empty:
-        argv = ["unshare", "-n", "nft", "list", "ruleset"] if namespace else \
-            ["nft", "-c", "-f", empty.name]
-        probe = subprocess.run(argv, capture_output=True, text=True)
+    # `nft list tables` needs the kernel, as the real loads do; checking an
+    # empty file does not, and passes where nft cannot be used.
+    argv = ["unshare", "-n", "nft", "list", "ruleset"] if namespace else \
+        ["nft", "list", "tables"]
+    probe = subprocess.run(argv, capture_output=True, text=True)
     if probe.returncode != 0:
         _skip_or_fail(test, "nft cannot be used here: " + probe.stderr.strip())
 
@@ -3806,6 +3807,7 @@ class EntrypointTests(unittest.TestCase):
         self.assertLess(calls.rindex("add element"), calls.index("insert rule"))
         self.assertLess(calls.rindex("insert rule"), calls.index("python3 /app/server.py"))
 
+    # Adapted from tuff-app/sandbox test_infra.py (Apache 2.0, see NOTICE).
     def test_the_recorded_calls_produce_the_right_chain_in_a_throwaway_network_namespace(self):
         _require_nft(self, namespace=True)
         result, calls = self.run_entrypoint(self.GATEWAY, resolv_conf="nameserver 192.168.64.1\n")
