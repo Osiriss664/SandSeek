@@ -375,13 +375,39 @@ originals are never changed or removed.
 
 ## Update
 
-Fetch the new code, then build and package again. The app rebuilds the sandbox
+**The release app.** Download the new zip and its `SHA256SUMS` from the
+release page and check them (see *Verifying a download*). Quit SandSeek and
+stop the sandbox (**Stop everything**), keep the old zip, then move the old
+`SandSeek.app` to the Trash and put the new one in its place. With Homebrew,
+quit SandSeek, stop the sandbox and run `brew upgrade --cask
+osiriss664/tap/sandseek` (Homebrew checks the zip's checksum itself).
+
+**From source.** Fetch the new code, then build and package again. The app rebuilds the sandbox
 image by itself when anything in `Sandbox/` changed; by hand, run
 `Scripts/research_sandbox.sh build`. Quit the app and stop the sandbox first
 (**Stop everything**, or `Scripts/research_sandbox.sh stop`).
 
 After updating from the first release, the first **Start** rebuilds the sandbox image, which
 takes a few minutes. The old secret file in TUFF's folder is removed.
+
+### If an update breaks SandSeek
+
+Go back to the version that worked:
+
+1. Quit SandSeek and stop the sandbox (**Stop everything**, or
+   `Scripts/research_sandbox.sh stop`).
+2. Take the zip of the older version: the one you kept, or the one on its
+   release page. Check it the same way as a new download (*Verifying a
+   download*).
+3. Move the current `SandSeek.app` to the Trash and put the older one in its
+   place. From source, check out the older tag (for example
+   `git checkout v0.4.2`) and build and package again.
+4. Start SandSeek. If the older version has a different `Sandbox/` folder, the
+   first **Start** rebuilds the sandbox image for it, which takes a few minutes.
+
+Your reports, settings and the llama.cpp key file stay where they are (see
+*Where things are stored*). Please open an issue that says which version broke
+and what happened.
 
 ## Uninstall
 
