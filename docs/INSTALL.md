@@ -416,6 +416,40 @@ Your reports, settings and the llama.cpp key file stay where they are (see
 *Where things are stored*). Please open an issue that says which version broke
 and what happened.
 
+## Updating the sandbox's Linux kernel
+
+The sandbox runs in a small Linux VM, and that VM's kernel comes from Apple
+container, not from SandSeek. Apple container installs a default kernel once
+and keeps it until you change it, so updating SandSeek or Apple container does
+not change the kernel an existing Mac already has.
+
+SandSeek only warns. When the sandbox starts, it compares the running kernel
+with the one Apple container recommends. If the running one is older, the
+sandbox card shows an orange "Older Linux kernel" note (the command prints a
+`warning:` line), and the sandbox works as before. Nothing is downloaded or
+changed for you, and if the check cannot tell (Apple container's service is
+off, or it answers in a way SandSeek does not know), it shows nothing.
+
+To see which kernel files you have, run
+`ls -l ~/Library/Application\ Support/com.apple.container/kernels/`. The
+`default.kernel-arm64` link shows the one that is in use.
+
+To update, run this in Terminal:
+
+```
+container system kernel set --recommended
+```
+
+If it says the kernel already exists, run it again with `--force`. Then stop
+the sandbox and start it again (**Stop everything**, then **Start Sandbox**):
+a new kernel is used by VMs created after the change, not by the one that is
+running.
+
+On 31 October 2026 a flaw in Linux's TCP code was published (CVE-2026-98432);
+it is fixed in kernel 6.18.56. The sandbox's firewall accepts no new inbound
+connection from outside the VM, which keeps it out of reach from the network,
+but update the kernel when the warning shows up.
+
 ## Uninstall
 
 Nothing is installed outside your home folder and Apple `container`. Remove the

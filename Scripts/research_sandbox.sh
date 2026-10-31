@@ -3,6 +3,8 @@
 #
 #   Scripts/research_sandbox.sh build    build the sandseek-sandbox image
 #   Scripts/research_sandbox.sh start    start a fresh sandbox on a free port of 127.0.0.1
+#                                        (warns if its Linux kernel is older than the
+#                                        one Apple container recommends)
 #   Scripts/research_sandbox.sh stop     stop and remove the sandbox
 #   Scripts/research_sandbox.sh status   report whether the sandbox answers
 #   Scripts/research_sandbox.sh selftest check that the sandbox refuses the Mac,
@@ -124,6 +126,8 @@ perl_bin=/usr/bin/perl
 blocked_file="$secret_folder/blocked-addresses"
 # Where `ifconfig` is on macOS. Never found through PATH.
 ifconfig_bin=/sbin/ifconfig
+# Apple's own plutil reads the JSON of `container system property list`.
+plutil_bin=/usr/bin/plutil
 # One public address that is no Mac's own, added to the list only so the
 # security check can tell the list from the private ranges (a.root-servers.net;
 # SandSeek never talks to it).
@@ -810,6 +814,76 @@ call_body() {
   printf '%s' "${rest#*$nl}"
 }
 
+# --- The sandbox's Linux kernel ----------------------------------------------
+# The VM's kernel comes from Apple container (installed once, and kept until
+# `container system kernel set --recommended`), not from SandSeek. After a
+# successful start, `kernel_notice` compares the running kernel with the one
+# Apple container recommends and prints one warning line when it is older. It
+# only ever warns: nothing is downloaded or changed, a lookup that fails or
+# gives text it cannot read prints nothing, and it never fails the start. The
+# app shows the same line (it finds it by kernelNoticeMarker in
+# Sources/SandSeekAppLogic/ResearchSandboxController.swift; change both together).
+
+# Runs a command and ends it after $1 seconds (the alarm survives `exec`).
+run_bounded() {
+  local seconds="$1"
+  shift
+  "$perl_bin" -e 'alarm shift @ARGV; exec(@ARGV) or exit 127' "$seconds" "$@"
+}
+
+# "6.18.35", "6.20" or "6.12.28-fc" gives "6 18 35", "6 20 0" and "6 12 28".
+# Fails for text that does not start with a version.
+parse_kernel_release() {
+  [[ "$1" =~ ^([0-9]{1,6})\.([0-9]{1,6})(\.([0-9]{1,6}))? ]] || return 1
+  printf '%s %s %s\n' "$((10#${BASH_REMATCH[1]}))" "$((10#${BASH_REMATCH[2]}))" \
+    "$((10#${BASH_REMATCH[4]:-0}))"
+}
+
+# The release in Apple's kernel file name: `vmlinux-6.18.35-197-debug` gives
+# "6 18 35". As in Apple's own test, drop `vmlinux-`, then cut at the first
+# all-digit piece (the build number) after the first piece.
+kernel_release_from_file_name() {
+  local file="${1##*/}" part release="" index=0
+  file="${file#vmlinux-}"
+  local IFS=-
+  for part in $file; do
+    if (( index > 0 )) && [[ "$part" =~ ^[0-9]+$ ]]; then break; fi
+    if (( index > 0 )); then release+="-"; fi
+    release+="$part"
+    index=$((index + 1))
+  done
+  parse_kernel_release "$release"
+}
+
+# Succeeds when release $1 is older than release $2 (both as "major minor patch").
+kernel_is_older() {
+  local a b c x y z
+  read -r a b c <<<"$1"
+  read -r x y z <<<"$2"
+  if (( a != x )); then (( a < x )); return; fi
+  if (( b != y )); then (( b < y )); return; fi
+  (( c < z ))
+}
+
+kernel_notice_marker="warning: the sandbox runs Linux kernel "
+
+# Prints the warning on stderr when the running kernel is older than the
+# recommended one; prints nothing otherwise. Always succeeds.
+kernel_notice() {
+  local reply open='{' close='}' recommended running wanted found
+  reply="$(run_bounded 6 "$container_bin" system property list --format json </dev/null 2>/dev/null)" || return 0
+  # Text around the JSON (a warning line, say) is ignored.
+  [[ "$reply" == *"$open"* && "$reply" == *"$close"* ]] || return 0
+  reply="$open${reply#*"$open"}"
+  reply="${reply%"$close"*}$close"
+  recommended="$(printf '%s' "$reply" | "$plutil_bin" -extract kernel.binaryPath raw -o - - 2>/dev/null)" || return 0
+  wanted="$(kernel_release_from_file_name "$recommended")" || return 0
+  running="$(run_bounded 6 "$container_bin" exec "$name" uname -r </dev/null 2>/dev/null)" || return 0
+  found="$(parse_kernel_release "$running")" || return 0
+  kernel_is_older "$found" "$wanted" || return 0
+  echo "${kernel_notice_marker}${found// /.}, older than ${wanted// /.}, which Apple container recommends. To update, run \"container system kernel set --recommended\" in Terminal (add --force if it says the kernel already exists), then stop and start the sandbox again. See docs/INSTALL.md." >&2
+}
+
 case "${1:-}" in
   build)
     require_container
@@ -935,6 +1009,9 @@ case "${1:-}" in
           fi
           trap - EXIT
           echo "web research sandbox ready at http://127.0.0.1:$port"
+          # After the ready line, and bounded: a slow or failing lookup never
+          # fails the start (see the kernel section above).
+          kernel_notice || true
           exit 0
         fi
       elif [[ "$health_state" == old ]]; then

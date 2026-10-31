@@ -394,7 +394,10 @@ time-limit `container` itself; the app's limit on the script covers that.
   in the VM remove the firewall. That is the risk of any VM. The Python
   packages and the base image are pinned by hash and digest, and `nftables`
   comes from a fixed Debian snapshot date (snapshot.debian.org), so a rebuild
-  installs the same version.
+  installs the same version. The VM's kernel is not part of the image: it
+  comes from Apple container and stays as it was installed until you update it.
+  `start` warns when it is older than the one Apple container recommends, and
+  changes nothing (INSTALL.md, *Updating the sandbox's Linux kernel*).
 - **Any program running as you can call the sandbox** on its 127.0.0.1 port and
   have public pages fetched through it. It needs the secret file for that,
   which only your Mac user can read, so another Mac user, a browser page (Host

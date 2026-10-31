@@ -40,6 +40,13 @@ struct SandboxCard: View {
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            if sandbox.state == .ready, let notice = sandbox.kernelNotice {
+                Text(notice)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if sandbox.files?.origin == .checkout {
                 Text("Using the files in \(SandboxResources.overrideVariable), not the copy that came with the app.")
                     .font(.caption)
@@ -91,6 +98,12 @@ struct SandboxCard: View {
     /// sandbox is verified), "Security check failed", or "Check failed" when
     /// the sandbox stopped passing its signed health check.
     private var summaryText: String? {
+        let checked = checkSummaryText
+        guard sandbox.kernelNotice != nil else { return checked }
+        return [checked, "Older Linux kernel"].compactMap { $0 }.joined(separator: " \u{00B7} ")
+    }
+
+    private var checkSummaryText: String? {
         if sandbox.securityCheckFailed { return "Security check failed" }
         if sandbox.showsSignedSeal, let checked = sandbox.lastSignedCheck {
             return "Signed \u{00B7} " + ResearchSandboxController.checkedLabel(for: checked)
@@ -102,7 +115,8 @@ struct SandboxCard: View {
     /// After the badge, also on the folded row: "Signed" with a checkmark and
     /// the time of the last signed health check (only while the sandbox is
     /// verified), a red "Security check failed", or, if the signed health
-    /// check failed, a plain "Check failed".
+    /// check failed, a plain "Check failed". An orange "Older Linux kernel"
+    /// follows when the kernel warning is set.
     @ViewBuilder
     private var signedSummary: some View {
         if sandbox.securityCheckFailed {
@@ -122,6 +136,12 @@ struct SandboxCard: View {
             Label("Check failed", systemImage: "xmark.seal.fill")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.red)
+        }
+        if sandbox.kernelNotice != nil {
+            Label("Older Linux kernel", systemImage: "exclamationmark.triangle.fill")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.orange)
+                .help("The sandbox\u{2019}s Linux kernel is older than the one Apple container recommends. Open the card to see how to update it.")
         }
     }
 

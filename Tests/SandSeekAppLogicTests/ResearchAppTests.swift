@@ -671,6 +671,94 @@ private struct UnsignedServices: ResearchHTTPTransport {
         #expect(ResearchSandboxController.port == 9100)
     }
 
+    /// What the start script prints when the kernel is older than the
+    /// recommended one (Scripts/test_research_sandbox.py runs the real script).
+    nonisolated private static let kernelLine = "warning: the sandbox runs Linux kernel 6.12.28, older than 6.18.35, "
+        + "which Apple container recommends. To update, run \"container system kernel set --recommended\" "
+        + "in Terminal (add --force if it says the kernel already exists), then stop and start the "
+        + "sandbox again. See docs/INSTALL.md."
+
+    private func runnerWithStartOutput(_ output: @escaping @Sendable () -> String) -> FakeProcessRunner {
+        FakeProcessRunner { command in
+            if command.last == "start" {
+                return ResearchProcessResult(
+                    status: 0, output: "web research sandbox ready at http://127.0.0.1:9100\n" + output())
+            }
+            return FakeProcessRunner.healthy(command)
+        }
+    }
+
+    @Test func theKernelWarningIsFoundInTheScriptsOutput() {
+        let output = "web research sandbox ready at http://127.0.0.1:9100\n" + Self.kernelLine + "\n"
+        let notice = ResearchSandboxController.kernelNotice(in: output)
+        #expect(notice?.hasPrefix("The sandbox runs Linux kernel 6.12.28, older than 6.18.35") == true)
+        #expect(notice?.contains("container system kernel set --recommended") == true)
+        #expect(notice?.contains("\n") == false)
+        #expect(ResearchSandboxController.kernelNotice(in: Self.kernelLine) != nil)
+    }
+
+    @Test func outputWithoutTheKernelWarningGivesNoNotice() {
+        #expect(ResearchSandboxController.kernelNotice(in: "") == nil)
+        #expect(ResearchSandboxController.kernelNotice(
+            in: "web research sandbox ready at http://127.0.0.1:9100\n") == nil)
+        // Other warnings are not mistaken for it.
+        #expect(ResearchSandboxController.kernelNotice(
+            in: "warning: could not list the containers, so leftover sandboxes were not looked for\n") == nil)
+        #expect(ResearchSandboxController.kernelNotice(in: "the sandbox runs Linux kernel 6.12.28") == nil)
+    }
+
+    @Test func anOlderKernelSetsTheNoticeAndTheSandboxIsReady() async throws {
+        let sandbox = try controller(runner: runnerWithStartOutput { Self.kernelLine + "\n" },
+                                     bundle: try fakeSandboxBundle())
+        await sandbox.start()
+        #expect(sandbox.state == .ready)
+        #expect(sandbox.protection == .verified)
+        #expect(sandbox.kernelNotice?.hasPrefix("The sandbox runs Linux kernel 6.12.28") == true)
+
+        await sandbox.stop()
+        #expect(sandbox.state == .off)
+        #expect(sandbox.kernelNotice == nil)
+    }
+
+    @Test func aCurrentOrUnknownKernelSetsNoNotice() async throws {
+        let sandbox = try controller(bundle: try fakeSandboxBundle())
+        await sandbox.start()
+        #expect(sandbox.state == .ready)
+        #expect(sandbox.kernelNotice == nil)
+    }
+
+    @Test func aFailedStartSetsNoNotice() async throws {
+        let runner = FakeProcessRunner { command in
+            if command.last == "start" {
+                return ResearchProcessResult(status: 1, output: Self.kernelLine + "\n")
+            }
+            return FakeProcessRunner.healthy(command)
+        }
+        let sandbox = try controller(runner: runner, bundle: try fakeSandboxBundle())
+        await sandbox.start()
+        guard case .failed = sandbox.state else {
+            Issue.record("expected a failed sandbox, got \(sandbox.state)")
+            return
+        }
+        #expect(sandbox.kernelNotice == nil)
+    }
+
+    @Test func theNoticeFollowsTheNewVMAfterARestart() async throws {
+        let older = LockedFlag()
+        older.value = true
+        let sandbox = try controller(
+            runner: runnerWithStartOutput { older.value ? Self.kernelLine + "\n" : "" },
+            bundle: try fakeSandboxBundle())
+        await sandbox.start()
+        #expect(sandbox.kernelNotice != nil)
+
+        // The person updated the kernel; the next VM runs it.
+        older.value = false
+        #expect(await sandbox.restart())
+        #expect(sandbox.state == .ready)
+        #expect(sandbox.kernelNotice == nil)
+    }
+
     @Test func firstStartBuildsTheImageThenStartsAndChecksProtection() async throws {
         let root = try fakeSandboxBundle()
         let runner = FakeProcessRunner()
