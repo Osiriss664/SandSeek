@@ -132,9 +132,16 @@ public final class ResearchSandboxController {
             if state != .ready {
                 protection = .unknown
                 lastSignedCheck = nil
+                kernelNotice = nil
             }
         }
     }
+    /// Set when the sandbox's Linux kernel is older than the one Apple
+    /// container recommends: one plain sentence, with the command that
+    /// updates it. The start script finds this out (see `kernelNotice(in:)`);
+    /// nil while the sandbox is not ready, when the kernel is current, and
+    /// when the script could not tell. Only a warning: nothing is changed.
+    public private(set) var kernelNotice: String?
     public private(set) var protection: Protection = .unknown
     /// When the sandbox last answered a signed health check with a signed
     /// answer (the check that decides "running"). Nil while it is not running.
@@ -722,6 +729,20 @@ public final class ResearchSandboxController {
         return " " + text.prefix(1).uppercased() + text.dropFirst()
     }
 
+    /// What `research_sandbox.sh start` prints (on its error output) when the
+    /// kernel is older than the recommended one. Change it with the script.
+    nonisolated static let kernelNoticeMarker = "warning: the sandbox runs Linux kernel "
+
+    /// The kernel warning in the script's output, as a sentence for the card,
+    /// or nil if there is none.
+    nonisolated static func kernelNotice(in output: String) -> String? {
+        for line in output.split(whereSeparator: \.isNewline) where line.hasPrefix(kernelNoticeMarker) {
+            let sentence = line.dropFirst("warning: ".count)
+            return sentence.prefix(1).uppercased() + sentence.dropFirst()
+        }
+        return nil
+    }
+
     /// Builds the image when it is missing or the sandbox's files changed
     /// since the last build, then starts a fresh VM.
     public func start() async {
@@ -779,6 +800,7 @@ public final class ResearchSandboxController {
             return
         }
         state = .ready
+        kernelNotice = Self.kernelNotice(in: started.output)
         await verifyProtection()
     }
 
@@ -848,6 +870,7 @@ public final class ResearchSandboxController {
             return false
         }
         state = .ready
+        kernelNotice = Self.kernelNotice(in: started.output)
         await verifyProtection()
         return state == .ready && protection == .verified
     }

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- A warning when the sandbox's Linux kernel is older than the one Apple
+  container recommends. The kernel comes from Apple container and is never
+  changed by SandSeek, so a Mac that got its kernel from an earlier version
+  keeps it. `Scripts/research_sandbox.sh start` prints a `warning:` line, and
+  the sandbox card shows an orange "Older Linux kernel" note. It only warns:
+  nothing is downloaded or changed, and a check that cannot tell shows
+  nothing. INSTALL.md has the update command (*Updating the sandbox's Linux
+  kernel*).
+
 ### Changed
 
 - The docs now say that TUFF 9.5.6 and newer refuse a request that names
@@ -12,6 +23,8 @@
 
 ### Tests
 
+- Tests for reading and comparing kernel releases, the warning, and that a
+  failed or slow lookup never fails a start (script tests and app tests).
 - New checks of the sandbox Containerfile and requirements files, and firewall
   tests that load `firewall.nft` and the entrypoint's rules in a throwaway
   Linux network namespace (adapted from the TUFF sandbox, see NOTICE). A Linux

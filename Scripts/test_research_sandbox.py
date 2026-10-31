@@ -49,6 +49,20 @@ def addresses(snippet, stdin=""):
         input=stdin, capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"}, timeout=30)
 
 
+def kernel_helpers():
+    """The script's kernel check (parse_kernel_release to kernel_notice)."""
+    start = TEXT.index("# --- The sandbox's Linux kernel")
+    end = TEXT.index('case "${1:-}" in')
+    return TEXT[start:end]
+
+
+def kernel(snippet):
+    # The same options as the script, and the same perl for the time limit.
+    return subprocess.run(
+        ["bash", "-c", "set -euo pipefail\nset -f\nperl_bin=/usr/bin/perl\n" + kernel_helpers() + snippet],
+        capture_output=True, text=True, env={"PATH": "/usr/bin:/bin"}, timeout=60)
+
+
 def bash(snippet, env=None):
     return subprocess.run(
         ["bash", "-c", "set -euo pipefail\n" + helpers() + snippet],
@@ -89,6 +103,67 @@ class NoBareContainerTests(unittest.TestCase):
         for feature in ("readlink -f", "mapfile", "readarray", "declare -A", "&>>", "|&"):
             self.assertNotIn(feature, text)
         self.assertNotRegex(text, r"\$\{[a-zA-Z_]+(,,|\^\^)\}")
+
+
+class KernelReleaseTests(unittest.TestCase):
+    """Reading and comparing Linux kernel releases (the warning that the
+    sandbox's kernel is older than the one Apple container recommends)."""
+
+    def parse(self, text):
+        done = kernel(f"parse_kernel_release {text!r}")
+        return done.stdout.strip() if done.returncode == 0 else None
+
+    def from_file(self, name):
+        done = kernel(f"kernel_release_from_file_name {name!r}")
+        return done.stdout.strip() if done.returncode == 0 else None
+
+    def older(self, first, second):
+        return kernel(f"kernel_is_older {first!r} {second!r}").returncode == 0
+
+    def test_plain_and_suffixed_releases_are_read(self):
+        self.assertEqual(self.parse("6.18.35"), "6 18 35")
+        self.assertEqual(self.parse("6.18.35\n"), "6 18 35")
+        self.assertEqual(self.parse("6.12.28-fc-v185"), "6 12 28")
+
+    def test_a_missing_patch_number_is_zero(self):
+        self.assertEqual(self.parse("6.20"), "6 20 0")
+        self.assertEqual(self.parse("6.20-rc3"), "6 20 0")
+
+    def test_numbers_with_leading_zeros_are_not_octal(self):
+        self.assertEqual(self.parse("6.08.09"), "6 8 9")
+
+    def test_garbage_is_unknown(self):
+        for text in ("", "Linux", "6", "x6.18.35", " 6.18.35", ".18.35", "6..35", "unknown"):
+            self.assertIsNone(self.parse(text), text)
+
+    def test_releases_are_compared_as_numbers_not_as_text(self):
+        self.assertTrue(self.older("6 9 0", "6 18 0"))
+        self.assertFalse(self.older("6 18 0", "6 9 0"))
+        self.assertTrue(self.older("6 18 15", "6 18 35"))
+        self.assertTrue(self.older("5 99 99", "6 0 0"))
+        self.assertFalse(self.older("7 0 0", "6 99 99"))
+
+    def test_equal_releases_are_not_older(self):
+        self.assertFalse(self.older("6 18 35", "6 18 35"))
+
+    def test_the_release_comes_from_the_kernel_file_name(self):
+        self.assertEqual(self.from_file("opt/kata/share/kata-containers/vmlinux-6.18.35-197-debug"), "6 18 35")
+        self.assertEqual(self.from_file("vmlinux-6.18.35-197"), "6 18 35")
+        self.assertEqual(self.from_file("vmlinux-6.18.35"), "6 18 35")
+        self.assertEqual(self.from_file("vmlinux-6.19-rc3-12-debug"), "6 19 0")
+        self.assertEqual(self.from_file("vmlinux-6.12.28-fc-197"), "6 12 28")
+
+    def test_the_app_looks_for_the_line_the_script_prints(self):
+        # The app finds the warning in the script's output by this text.
+        swift = os.path.join(os.path.dirname(SCRIPT), "..", "Sources", "SandSeekAppLogic",
+                             "ResearchSandboxController.swift")
+        with open(swift, encoding="utf-8") as handle:
+            marker = re.search(r'kernelNoticeMarker = "([^"]+)"', handle.read()).group(1)
+        self.assertIn(f'kernel_notice_marker="{marker}"', TEXT)
+
+    def test_a_file_name_without_a_release_is_unknown(self):
+        for name in ("", "vmlinux", "vmlinux-debug", "opt/kata/vmlinux-latest-197", "vmlinux-197"):
+            self.assertIsNone(self.from_file(name), name)
 
 
 class ContainerCheckTests(unittest.TestCase):
@@ -426,16 +501,32 @@ case "$1" in
     mv "$vms.new" "$vms" ;;
   list) cat "$vms" ;;
   logs) ;;
+  system)
+    [[ -z "${FAKE_PROPERTY_SLEEP:-}" ]] || exec sleep "$FAKE_PROPERTY_SLEEP"
+    [[ -z "${FAKE_PROPERTY_EXIT:-}" ]] || exit "$FAKE_PROPERTY_EXIT"
+    printf '%s\\n' "${FAKE_PROPERTY_JSON:-}" ;;
+  exec)
+    [[ -z "${FAKE_UNAME_SLEEP:-}" ]] || exec sleep "$FAKE_UNAME_SLEEP"
+    [[ -z "${FAKE_UNAME_EXIT:-}" ]] || exit "$FAKE_UNAME_EXIT"
+    printf '%s\\n' "${FAKE_UNAME:-}" ;;
 esac
 exit 0
 ''')
         self.write_stub("curl", "#!/bin/bash\nprintf '%s\\n%s' '" + self.UNSIGNED + "' 401\n")
+        # Stands in for plutil: prints the "binaryPath" value of the JSON on stdin.
+        self.write_stub("plutil", '''#!/bin/bash
+[[ "$*" == "-extract kernel.binaryPath raw -o - -" ]] || exit 2
+value="$(sed -n 's/.*"binaryPath" *: *"\\([^"]*\\)".*/\\1/p')"
+[[ -n "$value" ]] || exit 1
+printf '%s\\n' "$value"
+''')
         self.write_stub("ifconfig", "#!/bin/bash\necho '\tinet 127.0.0.1 netmask 0xff000000'\n")
         with open(SCRIPT, encoding="utf-8") as handle:
             text = handle.read()
         text = text.replace("container_bin=/usr/local/bin/container",
                             f'container_bin="{self.bin}/container"', 1)
         text = text.replace("ifconfig_bin=/sbin/ifconfig", f'ifconfig_bin="{self.bin}/ifconfig"', 1)
+        text = text.replace("plutil_bin=/usr/bin/plutil", f'plutil_bin="{self.bin}/plutil"', 1)
         start = text.index("require_container() {")
         end = text.index("\n}\n", start) + 3
         text = text[:start] + "require_container() {\n  :\n}\n" + text[end:]
@@ -486,6 +577,71 @@ exit 0
         done = self.run_script("start", **extra)
         self.assertEqual(done.returncode, 0, done.stderr)
         return done
+
+    PROPERTIES = ('{"build":{"rosetta":true},"kernel":{"binaryPath":"opt/kata/share/kata-containers/'
+                  'vmlinux-6.18.35-197-debug","digest":"sha256:0","url":"https://example.invalid/k.tar"}}')
+    NOTICE = "warning: the sandbox runs Linux kernel "
+
+    def kernel_start(self, running, properties=None, **extra):
+        # One start at a time: end the one an earlier call of this test made.
+        self.run_script("stop")
+        return self.started(FAKE_PROPERTY_JSON=properties if properties is not None else self.PROPERTIES,
+                            FAKE_UNAME=running, **extra)
+
+    def test_an_older_kernel_gives_a_warning_and_the_start_succeeds(self):
+        done = self.kernel_start("6.12.28")
+        self.assertIn("web research sandbox ready at http://127.0.0.1:", done.stdout)
+        self.assertIn(self.NOTICE + "6.12.28, older than 6.18.35, which Apple container recommends.", done.stderr)
+        self.assertIn("container system kernel set --recommended", done.stderr)
+        self.assertIn("--force", done.stderr)
+        self.assertEqual(len([l for l in done.stderr.splitlines() if l.startswith(self.NOTICE)]), 1)
+        # The check only reads: no kernel is set, nothing is downloaded.
+        self.assertFalse([c for c in self.lines(self.calls) if c.startswith("system kernel")])
+        self.assertIn("system property list --format json", self.lines(self.calls))
+        self.assertTrue(any(c.endswith(" uname -r") for c in self.lines(self.calls)))
+
+    def test_an_older_patch_release_and_a_shorter_minor_number_also_warn(self):
+        self.assertIn("older than 6.18.35", self.kernel_start("6.18.15\n").stderr)
+        self.assertIn("older than 6.18.35", self.kernel_start("6.9.100-fc").stderr)
+
+    def test_the_same_or_a_newer_kernel_gives_no_warning(self):
+        for running in ("6.18.35", "6.18.36", "6.19.0", "7.0", "6.18.56-fc"):
+            self.assertNotIn(self.NOTICE, self.kernel_start(running).stderr, running)
+
+    def test_a_failed_property_lookup_gives_no_warning_and_the_start_succeeds(self):
+        done = self.kernel_start("5.10.0", FAKE_PROPERTY_EXIT="1")
+        self.assertNotIn(self.NOTICE, done.stderr)
+        self.assertIn("ready", done.stdout)
+
+    def test_a_failed_uname_gives_no_warning_and_the_start_succeeds(self):
+        done = self.kernel_start("5.10.0", FAKE_UNAME_EXIT="1")
+        self.assertNotIn(self.NOTICE, done.stderr)
+        self.assertIn("ready", done.stdout)
+
+    def test_output_that_cannot_be_read_gives_no_warning(self):
+        for properties, uname in (("", "5.10.0"), ("not json", "5.10.0"), ("{}", "5.10.0"),
+                                  ('{"kernel":{"binaryPath":"vmlinux-latest"}}', "5.10.0"),
+                                  (self.PROPERTIES, "Linux"), (self.PROPERTIES, "")):
+            done = self.kernel_start(uname, properties)
+            self.assertNotIn(self.NOTICE, done.stderr, (properties, uname))
+
+    def test_text_around_the_json_is_ignored(self):
+        done = self.kernel_start("6.12.28", "warning: something\n" + self.PROPERTIES + "\ndone")
+        self.assertIn(self.NOTICE + "6.12.28", done.stderr)
+
+    def test_a_property_lookup_that_hangs_is_cut_off_and_the_start_succeeds(self):
+        began = time.time()
+        done = self.kernel_start("5.10.0", FAKE_PROPERTY_SLEEP="30")
+        self.assertLess(time.time() - began, 25)
+        self.assertNotIn(self.NOTICE, done.stderr)
+        self.assertIn("ready", done.stdout)
+
+    def test_a_uname_that_hangs_is_cut_off_and_the_start_succeeds(self):
+        began = time.time()
+        done = self.kernel_start("5.10.0", FAKE_UNAME_SLEEP="30")
+        self.assertLess(time.time() - began, 25)
+        self.assertNotIn(self.NOTICE, done.stderr)
+        self.assertIn("ready", done.stdout)
 
     def test_a_start_records_a_free_port_and_a_new_name(self):
         self.started()
