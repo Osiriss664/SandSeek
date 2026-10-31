@@ -731,7 +731,7 @@ public final class ResearchSandboxController {
 
     /// What `research_sandbox.sh start` prints (on its error output) when the
     /// kernel is older than the recommended one. Change it with the script.
-    static let kernelNoticeMarker = "warning: the sandbox runs Linux kernel "
+    nonisolated static let kernelNoticeMarker = "warning: the sandbox runs Linux kernel "
 
     /// The kernel warning in the script's output, as a sentence for the card,
     /// or nil if there is none.

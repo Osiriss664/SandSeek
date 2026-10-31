@@ -1010,8 +1010,13 @@ case "${1:-}" in
           trap - EXIT
           echo "web research sandbox ready at http://127.0.0.1:$port"
           # After the ready line, and bounded: a slow or failing lookup never
-          # fails the start (see the kernel section above).
-          kernel_notice || true
+          # fails the start (see the kernel section above). It runs in a
+          # subshell so nothing in it can end this one, and only while the
+          # start is well inside the app's 180 s limit (two lookups of at most
+          # 6 s each).
+          if (( SECONDS < 150 )); then
+            ( kernel_notice ) || true
+          fi
           exit 0
         fi
       elif [[ "$health_state" == old ]]; then

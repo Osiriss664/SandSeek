@@ -506,6 +506,7 @@ case "$1" in
     [[ -z "${FAKE_PROPERTY_EXIT:-}" ]] || exit "$FAKE_PROPERTY_EXIT"
     printf '%s\\n' "${FAKE_PROPERTY_JSON:-}" ;;
   exec)
+    [[ -z "${FAKE_UNAME_SLEEP:-}" ]] || exec sleep "$FAKE_UNAME_SLEEP"
     [[ -z "${FAKE_UNAME_EXIT:-}" ]] || exit "$FAKE_UNAME_EXIT"
     printf '%s\\n' "${FAKE_UNAME:-}" ;;
 esac
@@ -514,6 +515,7 @@ exit 0
         self.write_stub("curl", "#!/bin/bash\nprintf '%s\\n%s' '" + self.UNSIGNED + "' 401\n")
         # Stands in for plutil: prints the "binaryPath" value of the JSON on stdin.
         self.write_stub("plutil", '''#!/bin/bash
+[[ "$*" == "-extract kernel.binaryPath raw -o - -" ]] || exit 2
 value="$(sed -n 's/.*"binaryPath" *: *"\\([^"]*\\)".*/\\1/p')"
 [[ -n "$value" ]] || exit 1
 printf '%s\\n' "$value"
@@ -630,6 +632,13 @@ printf '%s\\n' "$value"
     def test_a_property_lookup_that_hangs_is_cut_off_and_the_start_succeeds(self):
         began = time.time()
         done = self.kernel_start("5.10.0", FAKE_PROPERTY_SLEEP="30")
+        self.assertLess(time.time() - began, 25)
+        self.assertNotIn(self.NOTICE, done.stderr)
+        self.assertIn("ready", done.stdout)
+
+    def test_a_uname_that_hangs_is_cut_off_and_the_start_succeeds(self):
+        began = time.time()
+        done = self.kernel_start("5.10.0", FAKE_UNAME_SLEEP="30")
         self.assertLess(time.time() - began, 25)
         self.assertNotIn(self.NOTICE, done.stderr)
         self.assertIn("ready", done.stdout)

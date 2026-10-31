@@ -445,10 +445,15 @@ the sandbox and start it again (**Stop everything**, then **Start Sandbox**):
 a new kernel is used by VMs created after the change, not by the one that is
 running.
 
-On 31 October 2026 a flaw in Linux's TCP code was published (CVE-2026-98432);
-it is fixed in kernel 6.18.56. The sandbox's firewall accepts no new inbound
-connection from outside the VM, which keeps it out of reach from the network,
-but update the kernel when the warning shows up.
+An example: at the end of October 2026 a flaw in Linux's TCP code was
+published (CVE-2026-98432), fixed in kernel 6.18.56. Apple `container` 1.5.0
+to 1.6.1 still recommend 6.18.35, so updating does not fix it yet and the
+warning does not show for it; it shows once a newer Apple `container`
+recommends a newer kernel than the one you have. The flaw needs a new
+incoming connection to a port the VM listens on. The sandbox's firewall
+accepts new incoming connections only on port 9100 and only from the VM's
+gateway (the Mac), so the flaw cannot be reached from the network; see
+docs/SECURITY.md for what can still send from the gateway address.
 
 ## Uninstall
 
