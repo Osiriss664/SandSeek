@@ -2120,7 +2120,8 @@ public struct ResearchAgent: Sendable {
             turn = try await chat.complete(
                 messages: state.messages, tools: toolDefinitions, toolUse: toolUse,
                 thinking: thinking,
-                preserveThinking: state.preserveThinking, timeout: limit)
+                preserveThinking: state.preserveThinking,
+                promptCacheKey: state.promptCacheKey, timeout: limit)
         } catch ResearchError.modelRequestFailed(let status, let message,
                                                  "context_length_exceeded"?)
                     where state.keepsHistoryWhole {
@@ -2139,7 +2140,8 @@ public struct ResearchAgent: Sendable {
             turn = try await chat.complete(
                 messages: state.messages, tools: toolDefinitions, toolUse: toolUse,
                 thinking: thinking,
-                preserveThinking: state.preserveThinking, timeout: limit)
+                preserveThinking: state.preserveThinking,
+                promptCacheKey: state.promptCacheKey, timeout: limit)
         } catch ResearchError.modelRequestFailed(_, _, "context_length_exceeded"?) {
             // The server's tokens hold fewer characters than estimated.
             state.tightenEstimate()
@@ -2157,7 +2159,8 @@ public struct ResearchAgent: Sendable {
                 turn = try await chat.complete(
                     messages: state.messages, tools: toolDefinitions, toolUse: toolUse,
                     thinking: thinking,
-                    preserveThinking: state.preserveThinking, timeout: limit)
+                    preserveThinking: state.preserveThinking,
+                    promptCacheKey: state.promptCacheKey, timeout: limit)
             } catch ResearchError.modelRequestFailed(let status, let message,
                                                      "context_length_exceeded"?) {
                 // The continuation of a cut-off answer is never shortened this
@@ -2173,7 +2176,8 @@ public struct ResearchAgent: Sendable {
                 turn = try await chat.complete(
                     messages: state.messages, tools: toolDefinitions, toolUse: toolUse,
                     thinking: thinking,
-                    preserveThinking: state.preserveThinking, timeout: limit)
+                    preserveThinking: state.preserveThinking,
+                    promptCacheKey: state.promptCacheKey, timeout: limit)
             }
         }
         state.calibrate(sentCharacters: sent, promptTokens: turn.promptTokens)
@@ -3387,6 +3391,13 @@ public struct ResearchAgent: Sendable {
         /// the start and never changed: the server's prompt cache only
         /// matches a request whose flag equals the cached one.
         var preserveThinking = false
+        /// The key every request of the run sends as `prompt_cache_key` (to
+        /// TUFF only). TUFF 10 keeps prompt memory only per key, so one key
+        /// for the whole run lets each step reuse the previous step's prefix
+        /// instead of reading the whole prompt again. A new run gets a new
+        /// key, so runs never share state. It is made when the run's `State`
+        /// is made, from random bytes only: no question text and no path.
+        let promptCacheKey = "sandseek-" + UUID().uuidString.lowercased()
         /// A turn ran past the request timeout while reasoning, so the rest
         /// of the run asks without it.
         var thinkingTimedOut = false

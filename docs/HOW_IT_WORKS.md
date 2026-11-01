@@ -242,10 +242,16 @@ server covers the differences. A server without a connector is not used, even
 if it calls itself OpenAI-compatible.
 
 - **TUFF 8.3.1 or newer.** It reports the model's context window itself and
-  rejects fields it does not know, so only known fields are sent. Replies are
-  read as a stream. Research makes many long prompts, so model speed matters:
-  Qwen3.6 35B-A3B gives good answers; a question takes roughly 2 to 8 minutes
-  on a 16 GB Mac (estimates from earlier runs).
+  rejects fields it does not know, so only known fields are sent. One of them
+  is `prompt_cache_key`: TUFF 10 keeps its prompt memory only for requests
+  with a key, so each research run sends one random key (new for every run, no
+  question text in it) on all its requests; llama.cpp and Ollama get none.
+  With a key, TUFF 10 also saves the run's prompt state in its cache folder
+  (`~/Library/Caches/TUFF/PrefixSnapshots`, a shared 2 GB limit, oldest
+  removed first). Replies are read as a stream. Research makes many long
+  prompts, so model speed matters: Qwen3.6 35B-A3B gives good answers; a
+  question takes roughly 2 to 8 minutes on a 16 GB Mac (estimates from earlier
+  runs).
 - **llama.cpp (`llama-server`).** The app reads the context window from `/props`;
   the `sandseek` command does not, and uses a 16,000-character prompt budget
   unless `--context-chars` is given. The key from the key file is sent with every

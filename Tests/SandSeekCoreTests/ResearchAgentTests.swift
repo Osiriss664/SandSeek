@@ -785,8 +785,9 @@ struct ResearchAgentTests {
         let request = try #require(services.modelRequests.first)
         let keys = Set(request.objectValue?.keys.map { $0 } ?? [])
         // `default` with no model list is an unknown family, which gets the flag.
+        // `prompt_cache_key` is the run's key, which TUFF 10 needs to keep its prompt memory.
         #expect(keys == ["model", "messages", "max_tokens", "stream", "tools", "tool_choice",
-                         "preserve_thinking"])
+                         "preserve_thinking", "prompt_cache_key"])
         #expect(request["tool_choice"] == .string("auto"))
         #expect(request["max_tokens"] == .integer(512))
         let names = request["tools"]?.arrayValue?.compactMap { $0["function"]?["name"]?.stringValue }
@@ -848,6 +849,31 @@ struct ResearchAgentTests {
         #expect(body(nil)["preserve_thinking"] == nil)
     }
 
+    /// Proves that the prompt cache key goes into a TUFF request when there is
+    /// one, and into no other request: not without a key, not with an empty
+    /// one, and never to llama.cpp or Ollama, which could refuse the field.
+    @Test func requestBodySendsPromptCacheKeyOnlyToTUFF() {
+        func body(_ kind: ResearchServerKind, _ key: String?) -> ResearchJSON {
+            ResearchChatClient(
+                serverURL: URL(string: "http://127.0.0.1:8080")!, model: "qwen36",
+                maxTokens: 100, enableThinking: false, kind: kind,
+                transport: FakeServices(modelReplies: []))
+                .requestBody(messages: [], tools: [], toolUse: .allowed, promptCacheKey: key)
+        }
+        #expect(body(.tuff, "sandseek-abc")["prompt_cache_key"] == .string("sandseek-abc"))
+        #expect(body(.tuff, nil)["prompt_cache_key"] == nil)
+        #expect(body(.tuff, "")["prompt_cache_key"] == nil)
+        #expect(body(.llamacpp, "sandseek-abc")["prompt_cache_key"] == nil)
+        #expect(body(.ollama, "sandseek-abc")["prompt_cache_key"] == nil)
+    }
+
+    /// True when the requests are not empty and all carry one and the same
+    /// prompt cache key.
+    private func carrySameCacheKey(_ requests: [ResearchJSON]) -> Bool {
+        guard let first = requests.first?["prompt_cache_key"]?.stringValue else { return false }
+        return requests.allSatisfy { $0["prompt_cache_key"]?.stringValue == first }
+    }
+
     /// Scripted replies for a run that searches, answers early, reads a page,
     /// and then needs a revision pass: many requests, some after tool results
     /// and some after plain-text turns.
@@ -860,6 +886,35 @@ struct ResearchAgentTests {
             FakeServices.answer("It runs each container in a VM [1]."),
         ]
     }
+
+#if canImport(CryptoKit)
+    /// Proves that every request of one run, including the answer and revision
+    /// steps, carries the same random key, and that another run gets another.
+    @Test func aRunSendsOnePromptCacheKeyAndTheNextRunAnotherOne() async throws {
+        func keys(_ services: FakeServices) -> [String?] {
+            services.modelRequests.map { $0["prompt_cache_key"]?.stringValue }
+        }
+        let first = FakeServices(modelReplies: longRunReplies())
+        _ = try await agent(first).run(question: "zebra migration")
+        let firstKeys = keys(first)
+        // Search, snippet answer, page open, answer asked to look wider, final
+        // answer: one request for each of the five scripted replies.
+        #expect(firstKeys.count == 5)
+        let key = try #require(firstKeys.first.flatMap { $0 })
+        #expect(key.hasPrefix("sandseek-"))
+        #expect(key.count > "sandseek-".count)
+        #expect(!key.contains("zebra"))
+        #expect(firstKeys.allSatisfy { $0 == key })
+
+        let second = FakeServices(modelReplies: longRunReplies())
+        _ = try await agent(second).run(question: "zebra migration")
+        let secondKeys = keys(second)
+        let otherKey = try #require(secondKeys.first.flatMap { $0 })
+        #expect(otherKey.hasPrefix("sandseek-"))
+        #expect(secondKeys.allSatisfy { $0 == otherKey })
+        #expect(otherKey != key)
+    }
+#endif
 
 #if canImport(CryptoKit)
     @Test func aRunWithGemmaAndThinkingOffNeverSendsPreserveThinking() async throws {
@@ -2274,6 +2329,7 @@ struct ResearchAgentTests {
         options.contextBudgetCharacters = 1_000_000
         let report = try await agent(services, options: options).run(question: "q")
         #expect(report.answer == "ok")
+        #expect(carrySameCacheKey(services.modelRequests))
         let retried = messages(services.modelRequests[3])
             .filter { $0["role"] == .string("tool") }
             .compactMap { $0["content"]?.stringValue }
@@ -3931,6 +3987,7 @@ struct ResearchAgentTests {
         let report = try await agent(services, options: options)
             .run(question: "Welche Gruppen verteilen in Berlin Zeitungen?")
         #expect(report.answer == "Eine Gruppe [1].")
+        #expect(carrySameCacheKey(services.modelRequests))
         func newestResult(in request: ResearchJSON) -> String {
             messages(request).last { $0["role"] == .string("tool") }?["content"]?.stringValue ?? ""
         }
@@ -3993,6 +4050,7 @@ struct ResearchAgentTests {
         // the same thinking setting (none here).
         #expect(services.modelRequests.count >= 2)
         #expect(services.modelRequests[1]["enable_thinking"] == nil)
+        #expect(carrySameCacheKey(services.modelRequests))
 
         // A second timeout in a row ends the run, which keeps the page it read.
         let failing = replies([FakeServices.answer("never")])

@@ -44,6 +44,8 @@ public enum ResearchToolUse: Sendable {
 /// Talks to TUFF's OpenAI-compatible Chat Completions endpoint. It sends only
 /// fields TUFF accepts: the server refuses unknown keys, and it refuses
 /// `tool_choice=required` and `parallel_tool_calls=false`, so neither is used.
+/// One of the accepted fields is `prompt_cache_key`, which TUFF 10 needs to
+/// keep its prompt memory between the requests of a run (see `requestBody`).
 ///
 /// For an Ollama connection (`kind == .ollama`) it talks to Ollama's native
 /// `POST /api/chat` instead. The loop keeps its OpenAI-style messages; the
@@ -105,7 +107,8 @@ public struct ResearchChatClient: Sendable {
                      tools: [ResearchJSON],
                      toolUse: ResearchToolUse,
                      thinking: Bool? = nil,
-                     preserveThinking: Bool = false) -> ResearchJSON {
+                     preserveThinking: Bool = false,
+                     promptCacheKey: String? = nil) -> ResearchJSON {
         if kind == .ollama {
             return ollamaRequestBody(messages: messages, tools: tools, toolUse: toolUse,
                                      thinking: thinking)
@@ -134,6 +137,15 @@ public struct ResearchChatClient: Sendable {
         if preserveThinking {
             body["preserve_thinking"] = .bool(true)
         }
+        // TUFF 10 keeps its prompt memory only for a request that carries a
+        // key; without one the server ends its session after the reply and the
+        // next step reads the whole prompt again. The run sends one random key
+        // on every request. TUFF 9 and older accept the field; at most it helps
+        // them find the cached conversation sooner. llama.cpp and Ollama never
+        // get it.
+        if kind == .tuff, let promptCacheKey, !promptCacheKey.isEmpty {
+            body["prompt_cache_key"] = .string(promptCacheKey)
+        }
         return .object(body)
     }
 
@@ -145,7 +157,7 @@ public struct ResearchChatClient: Sendable {
     /// loop answers by shortening it, and not text Ollama silently drops.
     /// A request with `toolUse == .off` carries no tools. None of TUFF's
     /// fields (`enable_thinking`, `preserve_thinking`, `stream_options`,
-    /// `tool_choice`, `max_tokens`) is sent.
+    /// `tool_choice`, `max_tokens`, `prompt_cache_key`) is sent.
     func ollamaRequestBody(messages: [ResearchJSON],
                            tools: [ResearchJSON],
                            toolUse: ResearchToolUse,
@@ -207,10 +219,12 @@ public struct ResearchChatClient: Sendable {
                          toolUse: ResearchToolUse = .allowed,
                          thinking: Bool? = nil,
                          preserveThinking: Bool = false,
+                         promptCacheKey: String? = nil,
                          timeout: TimeInterval? = nil) async throws -> ResearchAssistantTurn {
         let body = try requestBody(messages: messages, tools: tools, toolUse: toolUse,
                                    thinking: thinking,
-                                   preserveThinking: preserveThinking).encoded()
+                                   preserveThinking: preserveThinking,
+                                   promptCacheKey: promptCacheKey).encoded()
         if streaming { return try await completeStreaming(body: body, timeout: timeout) }
         let response: ResearchHTTPResponse
         do {

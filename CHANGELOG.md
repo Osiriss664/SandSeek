@@ -26,6 +26,20 @@
 - INSTALL.md says how to update the release app and how to go back to an
   older version.
 
+### Fixed
+
+- With TUFF 10 every research step read the whole prompt again, so runs were
+  much slower (the full test's quick question ran past its 900 second limit).
+  TUFF 10 reuses its prompt memory only for a request that carries a
+  `prompt_cache_key`, so SandSeek now sends one random key per research run to
+  TUFF (not to llama.cpp or Ollama): the same key on every step of that run,
+  a different one for the next run, and no question text in it. With a key,
+  TUFF 10 also saves the run's prompt state in its cache folder
+  (`~/Library/Caches/TUFF/PrefixSnapshots`, a shared 2 GB limit, oldest
+  removed first). Older TUFF versions accept the field; it at most helps them
+  find the cached conversation sooner. The first step of a run is still slower
+  on TUFF 10.0.1 than on 9.6.0; that needs a TUFF fix.
+
 ### Tests
 
 - The requirements check accepts extras that pip-compile writes, such as
@@ -33,6 +47,8 @@
   Python updates no longer fail on it.
 - Tests for reading and comparing kernel releases, the warning, and that a
   failed or slow lookup never fails a start (script tests and app tests).
+- Tests that the prompt cache key is sent to TUFF only, and that every request
+  of a run carries the same key while the next run gets another.
 - New checks of the sandbox Containerfile and requirements files, and firewall
   tests that load `firewall.nft` and the entrypoint's rules in a throwaway
   Linux network namespace (adapted from the TUFF sandbox, see NOTICE). A Linux
