@@ -15,6 +15,11 @@
 
 ### Changed
 
+- The sandbox uses pypdf 6.21.4 (was 6.21.2). It fixes seven pypdf
+  advisories where a crafted PDF could make reading slow, use a lot of memory
+  or loop forever. SandSeek already reads PDFs in a child process that is
+  killed after a time limit, so a bad PDF stopped that one page, not the
+  sandbox.
 - The docs now say that TUFF 9.5.6 and newer refuse a request that names
   another host or origin (DNS rebinding), and the connection card's TUFF
   warning names TUFF before 9.5.6 and advises updating.
@@ -23,6 +28,9 @@
 
 ### Tests
 
+- The requirements check accepts extras that pip-compile writes, such as
+  `lxml[html-clean]`, like the SBOM script already does, so Dependabot's
+  Python updates no longer fail on it.
 - Tests for reading and comparing kernel releases, the warning, and that a
   failed or slow lookup never fails a start (script tests and app tests).
 - New checks of the sandbox Containerfile and requirements files, and firewall
