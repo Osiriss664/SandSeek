@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.4.4 (1 November 2026)
+
+Faster research with TUFF 10, a warning for an old sandbox kernel and a
+sandbox package update. The sandbox image changes, so the first Start after
+updating rebuilds it, which takes a few minutes.
+
+### Security
+
+- Sandbox package updated: pypdf 6.21.2 to 6.21.4. It fixes seven pypdf
+  advisories where a crafted PDF could make reading slow, use a lot of memory
+  or loop forever. SandSeek already reads PDFs in a child process that is
+  killed after a time limit, so a bad PDF stopped that one page, not the
+  sandbox.
+
 ### Added
 
 - A warning when the sandbox's Linux kernel is older than the one Apple
@@ -15,11 +29,6 @@
 
 ### Changed
 
-- The sandbox uses pypdf 6.21.4 (was 6.21.2). It fixes seven pypdf
-  advisories where a crafted PDF could make reading slow, use a lot of memory
-  or loop forever. SandSeek already reads PDFs in a child process that is
-  killed after a time limit, so a bad PDF stopped that one page, not the
-  sandbox.
 - The docs now say that TUFF 9.5.6 and newer refuse a request that names
   another host or origin (DNS rebinding), and the connection card's TUFF
   warning names TUFF before 9.5.6 and advises updating.
