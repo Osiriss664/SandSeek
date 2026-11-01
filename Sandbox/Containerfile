@@ -17,7 +17,7 @@
 # records them. Check the Python patch level there against CVE-2025-6069
 # (html.parser, quadratic) when the digest is updated; the server also runs its
 # HTML fallback parser in a killed-after-timeout child.
-FROM docker.io/library/python:3.12-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704
+FROM docker.io/library/python:3.15-slim@sha256:94d3426f1def7db4a106a232ac121bfd975393e5dfd40a619b955fae45fe7913
 
 ARG DEBIAN_SNAPSHOT=20261025T000000Z
 
