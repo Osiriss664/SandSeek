@@ -3117,8 +3117,11 @@ class RequirementsTests(unittest.TestCase):
         names = set()
         for entry in entries:
             with self.subTest(entry=entry[:60]):
+                # pip-compile may write extras ("lxml[html-clean]==6.1.3"),
+                # as Scripts/make_sbom.py accepts; the name is the part before.
                 match = re.match(
-                    r"\A([A-Za-z0-9][A-Za-z0-9._-]*)==([A-Za-z0-9.!+_-]+) (.*)\Z", entry)
+                    r"\A([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[A-Za-z0-9._,-]+\])?"
+                    r"==([A-Za-z0-9.!+_-]+) (.*)\Z", entry)
                 self.assertIsNotNone(match, entry[:80])
                 name, _, rest = match.groups()
                 hashes = rest.split()
