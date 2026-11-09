@@ -107,8 +107,12 @@ The model is told today's date, and that pages dated up to today are real, so a
 model whose training ended earlier does not call recent news "simulated". The
 last tool result of each step ends with a line such as `Research so far: 2
 searches, 1 page read, step 3 of 8.`, so the model keeps track after older
-results are shortened. A search it already ran is answered from the loop
-without going to the search engine again. The report lists every search.
+results are shortened. A request of the loop that follows tool results
+(for example to read pages, or to answer now) is added there in the same
+way, after the label `Research loop:`, because TUFF 10 does not accept a
+separate message right after tool results; web text that writes that label
+is marked as web text. A search it already ran is answered from the loop without going to the
+search engine again. The report lists every search.
 
 ## What the loop does besides asking
 

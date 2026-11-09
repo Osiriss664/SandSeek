@@ -9,10 +9,9 @@
   now"), because it does not accept a user message directly after tool
   results. A run that used up its steps, or searched without reading, then
   ended without an answer. The loop now adds such a request to the end of the
-  last result, marked with "Research loop:", instead of sending it as a
-  separate message. Shortening of older results keeps that
-  request, and keeps the page text of pages that were added to a search
-  result.
+  last result, after the label "Research loop:", for every model server. The
+  system prompt says what the label means, and web text that writes it is
+  marked as web text.
 
 ## 0.4.4 (1 November 2026)
 
