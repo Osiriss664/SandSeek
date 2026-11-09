@@ -78,7 +78,9 @@ These hold as long as the design is intact and the VM boundary holds.
   (and their full-width forms) are made harmless in page text in every marker
   mode, not only with a per-run code, and the words UNTRUSTED WEB CONTENT are
   removed from page text in any case and spacing, so a page can neither write a
-  marker with extra blanks nor leave a bracket lookalike of one. Two things from a page stand in the loop's own lines before a block:
+  marker with extra blanks nor leave a bracket lookalike of one. The loop's own
+  requests after tool results start with `Research loop:`; web text that
+  writes that label gets "(web text)" added to it, in any case and spacing. Two things from a page stand in the loop's own lines before a block:
   its title and its final address. They are cut (120 and 300 characters), put
   on one line, stripped of control and invisible characters and of anything
   that looks like a marker, and so are addresses echoed in a tool error or the

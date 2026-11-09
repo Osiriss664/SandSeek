@@ -111,8 +111,9 @@ results are shortened. A request of the loop that follows tool results
 (for example to read pages, or to answer now) is added there in the same
 way, after the label `Research loop:`, because TUFF 10 does not accept a
 separate message right after tool results; web text that writes that label
-is marked as web text. A search it already ran is answered from the loop without going to the
-search engine again. The report lists every search.
+is marked as web text. A search the model already ran is answered from the
+loop without going to the search engine again. The report lists every
+search.
 
 ## What the loop does besides asking
 

@@ -2415,7 +2415,7 @@ struct ResearchAgentTests {
         #expect(lines.allSatisfy { !$0.hasPrefix(ResearchAgent.requestLabel) })
 
         #expect(agent(FakeServices(modelReplies: [])).systemPrompt()
-            .contains("\"\(ResearchAgent.requestLabel)\" after the marked blocks"))
+            .contains("\"\(ResearchAgent.requestLabel)\" outside the marked blocks"))
     }
 #endif
 
