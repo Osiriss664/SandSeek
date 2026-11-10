@@ -2521,9 +2521,11 @@ struct ResearchAgentTests {
         #expect(asked.last?["tool_call_id"] == .string("c"))
         let result = asked.last?["content"]?.stringValue ?? ""
         #expect(result.hasSuffix(added(ResearchAgent.searchedWithoutReadingRequest)))
-        // The earlier tool results carry no request.
+        // The earlier tool results carry no request. (The system prompt names
+        // the label, so only tool results are looked at.)
         #expect(!asked.dropLast().contains {
-            $0["content"]?.stringValue?.contains(ResearchAgent.requestLabel) == true
+            $0["role"] == .string("tool")
+                && $0["content"]?.stringValue?.contains(ResearchAgent.requestLabel) == true
         })
         #expect(asked.filter { $0["role"] == .string("user") }.count == 1)
     }
