@@ -1857,7 +1857,8 @@ struct ResearchAgentTests {
         #expect(spent.requests.filter { $0.url.path == "/v1/fetch" }.isEmpty)
         // The request for the answer ends the last tool result: a user message
         // after tool results is refused by TUFF 10.
-        let spentLast = try #require(messages(try #require(spent.modelRequests.last)).last)
+        let spentRequest = try #require(spent.modelRequests.last)
+        let spentLast = try #require(messages(spentRequest).last)
         #expect(spentLast["role"] == .string("tool"))
         #expect(spentLast["content"]?.stringValue?
             .hasSuffix(added(ResearchAgent.budgetUsedUpRequest)) == true)
@@ -2343,7 +2344,8 @@ struct ResearchAgentTests {
         let readReport = try await agent(read, options: options).run(question: "q")
         #expect(readReport.sources.count == 1)
         #expect(read.requests.filter { $0.url.path == "/v1/fetch" }.count == 1)
-        let readFinal = try #require(messages(try #require(read.modelRequests.last)).last)
+        let readRequest = try #require(read.modelRequests.last)
+        let readFinal = try #require(messages(readRequest).last)
         #expect(readFinal["role"] == .string("tool"))
         #expect(readFinal["content"]?.stringValue?
             .hasSuffix(added(ResearchAgent.budgetUsedUpRequest)) == true)
