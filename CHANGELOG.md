@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Fixed
+
+- TUFF 10 refused the research loop's own requests that came right after
+  search or page results (for example "the research budget is used up, answer
+  now"), because it does not accept a user message directly after tool
+  results. A run that used up its steps, or searched without reading, then
+  ended without an answer. The loop now adds such a request to the end of the
+  last result, after the label "Research loop:", for every model server. The
+  system prompt says what the label means, and web text that writes it is
+  marked as web text.
+
 ## 0.4.4 (1 November 2026)
 
 Faster research with TUFF 10, a warning for an old sandbox kernel and a
