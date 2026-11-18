@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.4.5 (19 November 2026)
+
+Research with TUFF 10 no longer ends without an answer, and a sandbox package
+update. The sandbox image changes, so the first Start after updating rebuilds
+it, which takes a few minutes.
+
+### Security
+
+- Sandbox package updated: pypdf 6.21.4 to 7.0.1. The new major version
+  adds more limits for crafted PDFs (image sizes, XFA form decoding, object
+  stream offsets). SandSeek's own limits for PDF reading are unchanged and
+  all sandbox PDF tests pass with it. SandSeek already reads PDFs in a child
+  process that is killed after a time limit.
+
 ### Fixed
 
 - TUFF 10 refused the research loop's own requests that came right after

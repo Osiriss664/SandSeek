@@ -20,7 +20,7 @@ Needs an Apple silicon Mac with macOS 26, Apple
 on 127.0.0.1 (TUFF, llama.cpp or Ollama). Building needs Xcode 26 or another
 Swift 6.2 toolchain.
 
-Download `SandSeek-0.4.4.zip` from the
+Download `SandSeek-0.4.5.zip` from the
 [releases page](https://github.com/Osiriss664/SandSeek/releases), install it
 with Homebrew:
 
@@ -49,7 +49,7 @@ tool. The model has exactly two tools, `web_search` and `open_page`: no shell,
 no file access, no network tool. `open_page` reads web pages and text PDFs (up
 to 5 MB and 50 pages, no OCR), parsed inside the VM.
 
-Status: 0.4.4. SandSeek began in a fork of TUFF. The command-line tool,
+Status: 0.4.5. SandSeek began in a fork of TUFF. The command-line tool,
 the core library and the Mac app (a window with the same research loop) are one
 Swift package. 0.2.0 was built, tested and tried by hand on a Mac with macOS
 27, TUFF 9.3.0 and Qwen3.6 35B (15 October 2026), including the safety test
@@ -66,7 +66,9 @@ image, and three emSign root certificates are no longer trusted. 0.4.4
 makes research with TUFF 10 much faster (TUFF reuses its prompt memory
 between steps again), warns when the sandbox's Linux kernel is older than
 the one Apple container recommends, and updates pypdf in the sandbox; it was
-tested on a Mac with TUFF 10.0.1 and 9.6.0.
+tested on a Mac with TUFF 10.0.1 and 9.6.0. 0.4.5 fixes research runs
+that ended without an answer on TUFF 10 (it refused the loop's own requests
+after search or page results) and updates pypdf in the sandbox to 7.0.1.
 
 ## How it works, in one minute
 
@@ -95,7 +97,7 @@ addresses go to the internet. More in [docs/HOW_IT_WORKS.md](docs/HOW_IT_WORKS.m
 
    LM Studio is planned; other servers are not supported yet.
 2. Get the app, in one of two ways:
-   - **Download:** `SandSeek-0.4.4.zip` from the release page, unzip it and
+   - **Download:** `SandSeek-0.4.5.zip` from the release page, unzip it and
      move SandSeek to Applications, or run
      `brew install --cask osiriss664/tap/sandseek`. It is not notarized: on
      first launch choose System Settings → Privacy & Security → Open Anyway.
@@ -158,7 +160,7 @@ above all test reports.
 - A local model server on 127.0.0.1: TUFF 8.3.1 or newer, or llama.cpp or
   Ollama (both experimental, see below). Streaming is on by
   default for TUFF, so that Stop and the time limits make it stop generating.
-  llama.cpp (`llama-server`) is experimental in 0.4.4: it works through
+  llama.cpp (`llama-server`) is experimental in 0.4.5: it works through
   `--server-type llamacpp` with plain requests (no streaming), the app's
   Thinking switch has no effect on it yet, and it was probed but not measured
   with a research run. The app connects to a
